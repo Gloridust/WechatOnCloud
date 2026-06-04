@@ -34,6 +34,11 @@ export interface Instance {
   kasmPassword: string;
   createdAt: string;
   createdBy: string; // userId
+  // 自愈 watchdog 的"安全阀"，per-instance 覆盖全局默认；缺省时使用 env / 内置默认。
+  // soft：内存超此值时，仅在"当前没有用户在远程会话"才主动重启（柔和自愈）；
+  // hard：内存超此值时，无论是否有人在会话都重启（防止 OOM 拖垮宿主）。
+  memSoftLimitMB?: number;
+  memHardLimitMB?: number;
 }
 
 interface Data {
@@ -190,7 +195,39 @@ function sanitizeInstanceIds(ids: string[]): string[] {
 }
 
 export function publicInstance(i: Instance) {
-  return { id: i.id, name: i.name, createdAt: i.createdAt, createdBy: i.createdBy };
+  return {
+    id: i.id,
+    name: i.name,
+    createdAt: i.createdAt,
+    createdBy: i.createdBy,
+    memSoftLimitMB: i.memSoftLimitMB,
+    memHardLimitMB: i.memHardLimitMB,
+  };
+}
+
+// 设置/清除某实例的 mem 安全阀。传 null 表示恢复默认（从对象上删字段）。
+// 校验：正整数；soft < hard；上限 20480 MiB（20 GiB）。
+export function setInstanceMemLimits(
+  id: string,
+  softMB: number | null,
+  hardMB: number | null,
+) {
+  const inst = findInstance(id);
+  if (!inst) throw new Error('实例不存在');
+  const norm = (v: number | null): number | undefined => {
+    if (v == null) return undefined;
+    if (!Number.isFinite(v) || !Number.isInteger(v) || v < 1 || v > 20480) {
+      throw new Error('阈值需为 1-20480 之间的整数（MiB）');
+    }
+    return v;
+  };
+  const s = norm(softMB);
+  const h = norm(hardMB);
+  if (s != null && h != null && s >= h) throw new Error('soft 阈值需小于 hard 阈值');
+  inst.memSoftLimitMB = s;
+  inst.memHardLimitMB = h;
+  persist();
+  return publicInstance(inst);
 }
 
 export function listInstances() {
@@ -213,13 +250,34 @@ export function userCanAccess(u: User, instanceId: string) {
   return u.allowedInstances.includes(instanceId) && !!findInstance(instanceId);
 }
 
-export function createInstance(name: string, createdBy: string, allowedUserIds: string[] = []) {
-  const id = randomBytes(5).toString('hex'); // 10 hex chars
+// 复用旧卷时：从 woc-data-<id> 解析回 id，让新实例的 containerName / volumeName 都对齐旧卷的
+// id（避免出现"卷叫 woc-data-abc，但实例 id 是 def"这种命名错配）。若旧 id 与现存实例冲突或卷名
+// 非标准前缀，则退回新生成 id，仅卷名指向旧卷。
+function parseIdFromVolume(volumeName: string): string | null {
+  const m = /^woc-data-([0-9a-f]{10})$/.exec(volumeName);
+  return m ? m[1] : null;
+}
+
+export function createInstance(
+  name: string,
+  createdBy: string,
+  allowedUserIds: string[] = [],
+  reuseVolumeName?: string,
+) {
+  let id = randomBytes(5).toString('hex'); // 10 hex chars
+  let volumeName = `woc-data-${id}`;
+  if (reuseVolumeName) {
+    const reusedId = parseIdFromVolume(reuseVolumeName);
+    if (reusedId && !findInstance(reusedId)) {
+      id = reusedId;
+    }
+    volumeName = reuseVolumeName; // 始终指向旧卷（即便 id 是新生成的）
+  }
   const inst: Instance = {
     id,
     name: name.trim() || `微信-${id.slice(0, 4)}`,
     containerName: `woc-wx-${id}`,
-    volumeName: `woc-data-${id}`,
+    volumeName,
     kasmUser: 'woc',
     // 用 hex（仅 0-9a-f）：容器内 init 脚本以 `openssl passwd -apr1 ${PASSWORD}` 未加引号方式生成 .htpasswd，
     // base64url 可能含前导 '-' 而被 openssl 当作命令行选项，导致密码哈希为空、所有鉴权失败。hex 不含任何 shell 特殊字符。

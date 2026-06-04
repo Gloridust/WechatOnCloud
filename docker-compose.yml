@@ -21,6 +21,13 @@ services:
       # 摄像头直通：逗号分隔的宿主视频设备（如 /dev/video0）。留空则自动探测（见下方 /host-dev 挂载）或禁用摄像头。
       # 启用前需在宿主加载 v4l2loopback 内核模块。详见 .env.example。
       - WOC_VIDEO_DEVICES=${WOC_VIDEO_DEVICES:-}
+      # 实例资源相关（见 .env.example）：GPU 硬件编码默认关闭（避免 WSL2/虚拟 GPU 下 Xvnc 内存暴涨）；
+      # 可选给每个实例设内存上限（GiB），0=不限制；watchdog 双阈值（soft 柔和自愈 / hard 强制重启）+ 巡检间隔。
+      - WOC_ENABLE_GPU=${WOC_ENABLE_GPU:-}
+      - WOC_INSTANCE_MEM_GB=${WOC_INSTANCE_MEM_GB:-}
+      - WOC_INSTANCE_MEM_SOFT_MB=${WOC_INSTANCE_MEM_SOFT_MB:-1500}
+      - WOC_INSTANCE_MEM_HARD_MB=${WOC_INSTANCE_MEM_HARD_MB:-2500}
+      - WOC_WATCHDOG_INTERVAL_SEC=${WOC_WATCHDOG_INTERVAL_SEC:-300}
       # 面板首个管理员账号（仅首次启动、无账号文件时写入；务必改掉默认密码）
       - PANEL_ADMIN_USER=${WOC_USER:-admin}
       - PANEL_ADMIN_PASSWORD=${WOC_PASSWORD:-wechat}

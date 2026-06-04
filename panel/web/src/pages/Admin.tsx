@@ -27,7 +27,10 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
   const [resetTarget, setResetTarget] = useState<PanelUser | null>(null); // 重置密码弹窗
   const [deleteInst, setDeleteInst] = useState<InstanceWithStatus | null>(null); // 删除实例弹窗
   const [renameInst, setRenameInst] = useState<InstanceWithStatus | null>(null); // 重命名实例弹窗
+  const [securityInst, setSecurityInst] = useState<InstanceWithStatus | null>(null); // 安全（内存阈值）弹窗
   const [acting, setActing] = useState<Record<string, string>>({}); // 实例 id → 进行中的动作文案（启动中/升级中…）
+  // 未使用的旧数据卷（来自之前删实例时未勾选"彻底清除"）：允许复用以继承聊天记录，或显式删除。
+  const [orphanVols, setOrphanVols] = useState<{ name: string; createdAt?: string; sizeBytes?: number }[]>([]);
   const setAct = (id: string, label: string | null) =>
     setActing((a) => {
       const n = { ...a };
@@ -47,6 +50,30 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
       setInstances(instances);
     } catch (e: any) {
       setErr(e.message);
+    }
+    // 孤儿卷列表独立 catch：docker 卷接口失败不应阻塞用户/实例视图
+    try {
+      const { volumes } = await api.listOrphanVolumes();
+      setOrphanVols(volumes);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const removeOrphanVol = async (name: string) => {
+    const ok = await confirm({
+      title: `彻底删除数据卷「${name}」？`,
+      body: '该卷里保存的微信本地数据（聊天记录缓存等）将永久消失，无法恢复。',
+      danger: true,
+      confirmText: '彻底删除',
+    });
+    if (!ok) return;
+    try {
+      await api.deleteOrphanVolume(name);
+      toast('已删除数据卷', 'ok');
+      setOrphanVols((vs) => vs.filter((v) => v.name !== name));
+    } catch (e: any) {
+      toast(e.message || '删除失败', 'error');
     }
   };
 
@@ -171,6 +198,7 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                     onRename={() => setRenameInst(inst)}
                     onAssign={() => setAssignInst(inst)}
                     onDelete={() => setDeleteInst(inst)}
+                    onSecurity={() => setSecurityInst(inst)}
                   />
                 ))}
               </div>
@@ -221,6 +249,35 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                   </div>
                 ))}
               </div>
+            )}
+            {orphanVols.length > 0 && (
+              <>
+                <div className="section-row" style={{ marginTop: 22 }}>
+                  <span className="section-title">未使用的数据卷</span>
+                  <span className="muted small">删除实例时未勾选「彻底清除」会保留下来；可在新建实例时复用以继承聊天记录。</span>
+                </div>
+                <div className="inst-grid">
+                  {orphanVols.map((v) => (
+                    <div key={v.name} className="inst-card">
+                      <div className="inst-head">
+                        <span className="inst-name" style={{ fontFamily: 'monospace', fontSize: 13 }}>{v.name}</span>
+                      </div>
+                      <div className="inst-sub">
+                        {v.createdAt ? `创建于 ${v.createdAt.slice(0, 10)}` : '创建时间未知'}
+                        {typeof v.sizeBytes === 'number' ? `　·　${(v.sizeBytes / 1024 / 1024).toFixed(1)} MB` : ''}
+                      </div>
+                      <div className="inst-admin-links">
+                        <button className="btn-text" onClick={() => setCreatingInst(true)} title="去「新建实例」对话框，在「数据卷」下拉里选择复用此卷">
+                          复用为新实例
+                        </button>
+                        <button className="btn-text danger" onClick={() => removeOrphanVol(v.name)}>
+                          彻底删除
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
           </>
         )}
@@ -319,6 +376,16 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
           }}
         />
       )}
+      {securityInst && (
+        <InstanceSecurity
+          inst={securityInst}
+          onClose={() => setSecurityInst(null)}
+          onDone={() => {
+            toast('已保存安全阈值', 'ok');
+            load();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -402,6 +469,160 @@ function ResetPassword({ user, onClose, onDone }: { user: PanelUser; onClose: ()
   );
 }
 
+// 「安全」弹窗：编辑某实例的内存安全阀（soft / hard）。
+// soft：超过且无人在远程会话时主动重启（柔和自愈，不打扰）
+// hard：超过即强制重启（无视会话，防止 OOM）
+// 留空 = 使用面板全局默认（来自 env）。
+function InstanceSecurity({ inst, onClose, onDone }: { inst: InstanceWithStatus; onClose: () => void; onDone: () => void }) {
+  const [data, setData] = useState<import('../api').MemLimits | null>(null);
+  // 输入字段：空串 = "使用默认"（→ 提交时映射为 null）
+  const [softStr, setSoftStr] = useState('');
+  const [hardStr, setHardStr] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  // 首次加载 + 每 5s 刷新 currentMB（运行实例的实时内存）
+  useEffect(() => {
+    let alive = true;
+    const fetchOnce = async (initial: boolean) => {
+      try {
+        const d = await api.getInstanceMemLimits(inst.id);
+        if (!alive) return;
+        setData(d);
+        if (initial) {
+          setSoftStr(d.soft == null ? '' : String(d.soft));
+          setHardStr(d.hard == null ? '' : String(d.hard));
+          setLoaded(true);
+        }
+      } catch (e: any) {
+        if (alive && initial) {
+          setErr(e?.message || '读取失败');
+          setLoaded(true);
+        }
+      }
+    };
+    fetchOnce(true);
+    const t = window.setInterval(() => fetchOnce(false), 5000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [inst.id]);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr('');
+    const parse = (s: string): number | null => {
+      const t = s.trim();
+      if (t === '') return null;
+      const n = Number(t);
+      if (!Number.isInteger(n)) throw new Error('阈值需为整数（MiB）');
+      return n;
+    };
+    let s: number | null;
+    let h: number | null;
+    try {
+      s = parse(softStr);
+      h = parse(hardStr);
+    } catch (e: any) {
+      setErr(e.message);
+      return;
+    }
+    if (s != null && h != null && s >= h) {
+      setErr('soft 阈值需小于 hard 阈值');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.setInstanceMemLimits(inst.id, s, h);
+      onDone();
+      onClose();
+    } catch (e: any) {
+      setErr(e.message || '保存失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resetToDefault = () => {
+    setSoftStr('');
+    setHardStr('');
+  };
+
+  return (
+    <div className="modal-mask" onClick={onClose}>
+      <form className="card modal" onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ maxWidth: 460 }}>
+        <h2>安全 · {inst.name}</h2>
+        {!loaded ? (
+          <div className="muted small" style={{ padding: '14px 0' }}>读取中…</div>
+        ) : !data ? (
+          <div className="error">{err || '读取失败'}</div>
+        ) : (
+          <>
+            <div className="muted small" style={{ lineHeight: 1.6 }}>
+              当 KasmVNC/Xvnc 长跑泄漏内存时，面板的 watchdog 会自动重启实例。两档阈值（单位 MiB）：
+              <br />
+              <b>soft</b>：超过且<b>无人在远程会话</b>时柔和重启（不打扰使用者）。
+              <br />
+              <b>hard</b>：超过即<b>强制重启</b>，无视会话，防止 OOM 拖垮宿主。
+            </div>
+
+            <div className="security-status">
+              <div className="security-row">
+                <span>当前内存</span>
+                <b>{data.currentMB > 0 ? `${data.currentMB} MiB` : '—'}</b>
+              </div>
+              <div className="security-row">
+                <span>面板默认</span>
+                <span className="muted">soft {data.defaultSoft} · hard {data.defaultHard}</span>
+              </div>
+              <div className="security-row">
+                <span>巡检间隔</span>
+                <span className="muted">
+                  {data.watchdogEnabled ? `每 ${data.intervalSec}s` : 'watchdog 已关闭'}
+                </span>
+              </div>
+            </div>
+
+            <div className="field-label" style={{ marginTop: 12 }}>soft 阈值（留空 = 用默认 {data.defaultSoft}）</div>
+            <input
+              className="input"
+              inputMode="numeric"
+              placeholder={`${data.defaultSoft}`}
+              value={softStr}
+              onChange={(e) => setSoftStr(e.target.value.replace(/[^0-9]/g, ''))}
+            />
+            <div className="field-label" style={{ marginTop: 8 }}>hard 阈值（留空 = 用默认 {data.defaultHard}）</div>
+            <input
+              className="input"
+              inputMode="numeric"
+              placeholder={`${data.defaultHard}`}
+              value={hardStr}
+              onChange={(e) => setHardStr(e.target.value.replace(/[^0-9]/g, ''))}
+            />
+            <div className="muted small" style={{ marginTop: 6 }}>
+              提示：日常活跃内存约 1500 MiB；soft 建议略高于此（如 2000），hard 建议远低于宿主可用内存（如 3000~4000）。
+            </div>
+            {err && <div className="error">{err}</div>}
+          </>
+        )}
+        <div className="modal-actions">
+          <button type="button" className="btn-text" onClick={resetToDefault} disabled={busy}>
+            ↺ 恢复默认
+          </button>
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>
+            取消
+          </button>
+          <button className="btn btn-primary" disabled={busy || !loaded || !data}>
+            保存
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function DeleteInstance({ inst, onClose, onDone }: { inst: InstanceWithStatus; onClose: () => void; onDone: () => void }) {
   const [purge, setPurge] = useState(false);
   const [err, setErr] = useState('');
@@ -459,6 +680,7 @@ function InstanceAdminCard({
   onRename,
   onAssign,
   onDelete,
+  onSecurity,
 }: {
   inst: InstanceWithStatus;
   userCount: number;
@@ -472,6 +694,7 @@ function InstanceAdminCard({
   onRename: () => void;
   onAssign: () => void;
   onDelete: () => void;
+  onSecurity: () => void;
 }) {
   const wx = inst.wechat;
   const busy = BUSY_PHASES.includes(wx.phase);
@@ -556,6 +779,9 @@ function InstanceAdminCard({
             </button>
             <button className="btn-text" onClick={() => window.open(api.instanceLogsUrl(inst.id), '_blank')} title="查看实例容器日志（排错）">
               日志
+            </button>
+            <button className="btn-text" onClick={onSecurity} title="设置内存阈值：超过 soft 且无人会话时柔和重启；超过 hard 强制重启">
+              安全
             </button>
             <button className="btn-text danger" onClick={onDelete}>
               删除
@@ -656,13 +882,29 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  // 未使用的旧数据卷（之前删除实例但未勾选「彻底清除」时保留下来的），允许在此复用以继承聊天记录。
+  const [orphans, setOrphans] = useState<{ name: string; createdAt?: string }[]>([]);
+  const [reuse, setReuse] = useState<string>(''); // '' = 不复用，新建空卷
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .listOrphanVolumes()
+      .then(({ volumes }) => alive && setOrphans(volumes))
+      .catch(() => {
+        /* 读取失败时不阻塞创建：列表为空即可，照常新建空卷 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr('');
     setBusy(true);
     try {
-      await api.createInstance(name.trim(), [...sel]);
+      await api.createInstance(name.trim(), [...sel], reuse || undefined);
       onDone();
     } catch (e: any) {
       setErr(e.message || '创建失败');
@@ -683,6 +925,23 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
           onToggle={(id) => setSel((s) => toggleSet(s, id))}
           empty="暂无子账号"
         />
+        {orphans.length > 0 && (
+          <>
+            <div className="field-label" style={{ marginTop: 12 }}>数据卷（可选）</div>
+            <select className="input" value={reuse} onChange={(e) => setReuse(e.target.value)}>
+              <option value="">新建空卷（全新登录）</option>
+              {orphans.map((v) => (
+                <option key={v.name} value={v.name}>
+                  复用 · {v.name}
+                  {v.createdAt ? `（${v.createdAt.slice(0, 10)} 创建）` : ''}
+                </option>
+              ))}
+            </select>
+            <div className="muted small" style={{ marginTop: 4 }}>
+              复用旧卷需**用原微信号扫码登录**才能解密历史消息；用别的号登录将看不到旧记录。
+            </div>
+          </>
+        )}
         {err && <div className="error">{err}</div>}
         <div className="muted small" style={{ marginTop: 4 }}>创建后会拉起一个新的微信容器，进入后扫码登录。</div>
         <div className="modal-actions">

@@ -24,6 +24,17 @@ export interface PanelInstance {
   name: string;
   createdAt: string;
   createdBy: string;
+  memSoftLimitMB?: number;
+  memHardLimitMB?: number;
+}
+export interface MemLimits {
+  soft: number | null;
+  hard: number | null;
+  defaultSoft: number;
+  defaultHard: number;
+  currentMB: number;
+  watchdogEnabled: boolean;
+  intervalSec: number;
 }
 export interface InstanceWithStatus extends PanelInstance {
   runtime: RuntimeState;
@@ -75,11 +86,22 @@ export const api = {
 
   // 微信实例
   listInstances: () => req<{ instances: InstanceWithStatus[] }>('/api/instances'),
-  createInstance: (name: string, allowedUserIds: string[] = []) =>
+  createInstance: (name: string, allowedUserIds: string[] = [], reuseVolume?: string) =>
     req<{ instance: PanelInstance }>('/api/admin/instances', {
       method: 'POST',
-      body: JSON.stringify({ name, allowedUserIds }),
+      body: JSON.stringify({ name, allowedUserIds, reuseVolume: reuseVolume || undefined }),
     }),
+  getInstanceMemLimits: (id: string) =>
+    req<MemLimits>(`/api/admin/instances/${id}/mem-limits`),
+  setInstanceMemLimits: (id: string, soft: number | null | undefined, hard: number | null | undefined) =>
+    req<{ instance: PanelInstance }>(`/api/admin/instances/${id}/mem-limits`, {
+      method: 'PUT',
+      body: JSON.stringify({ soft, hard }),
+    }),
+  listOrphanVolumes: () =>
+    req<{ volumes: { name: string; createdAt?: string; sizeBytes?: number }[] }>('/api/admin/orphan-volumes'),
+  deleteOrphanVolume: (name: string) =>
+    req(`/api/admin/orphan-volumes/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   renameInstance: (id: string, name: string) =>
     req<{ instance: PanelInstance }>(`/api/admin/instances/${id}/rename`, { method: 'POST', body: JSON.stringify({ name }) }),
   deleteInstance: (id: string, purge = false) =>

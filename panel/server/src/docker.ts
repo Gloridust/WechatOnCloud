@@ -9,6 +9,17 @@ const PGID = process.env.PGID || '1000';
 const TZ = process.env.TZ || 'Asia/Shanghai';
 const SHM_SIZE = 1024 * 1024 * 1024; // 1gb
 
+// 默认关闭 KasmVNC 的 GPU 硬件编码（baseimage 检测到 /dev/dri/renderD* 时会给 Xvnc 加 -hw3d）：
+// 在 WSL2 / 虚拟 GPU 环境下该路径会导致 Xvnc 内存持续膨胀（实测反馈 21h 涨到 ~9GB）。
+// 我们已设 LIBGL_ALWAYS_SOFTWARE=1 走软件渲染，hw3d 对微信这类静态界面收益甚微。
+// 真实可用 GPU 想启用硬件编码：面板侧设 WOC_ENABLE_GPU=1。
+const ENABLE_GPU = process.env.WOC_ENABLE_GPU === '1';
+
+// 可选：给每个实例容器设内存上限（GiB），作为 Xvnc 等异常增长时的兜底，避免拖垮宿主。
+// 默认 0 = 不限制（保持原行为）。命中上限时容器内 OOM 杀进程、由 s6 自动重启 VNC。
+const INSTANCE_MEM_GB = Number(process.env.WOC_INSTANCE_MEM_GB) || 0;
+const INSTANCE_MEM = INSTANCE_MEM_GB > 0 ? Math.floor(INSTANCE_MEM_GB * 1024 * 1024 * 1024) : 0;
+
 const docker = new Docker(); // 默认连 /var/run/docker.sock
 
 // 面板自身所在的 docker 网络名；新实例都 attach 到它，便于按容器名互访。
@@ -58,13 +69,16 @@ function videoDevices(): string[] {
 }
 
 function envList(inst: Instance): string[] {
-  return [
+  const env = [
     `PUID=${PUID}`,
     `PGID=${PGID}`,
     `TZ=${TZ}`,
     `CUSTOM_USER=${inst.kasmUser}`,
     `PASSWORD=${inst.kasmPassword}`,
   ];
+  // baseimage 仅检查该变量是否「已设置」（值无关），设上即不再给 Xvnc 加 -hw3d。
+  if (!ENABLE_GPU) env.push('DISABLE_DRI=1');
+  return env;
 }
 
 // 确保微信镜像在本地存在；缺失则从 GHCR 拉取（首次新建实例时镜像通常还没拉过）。
@@ -98,6 +112,10 @@ export async function runInstance(inst: Instance): Promise<void> {
     ShmSize: SHM_SIZE,
     RestartPolicy: { Name: 'unless-stopped' },
   };
+  if (INSTANCE_MEM > 0) {
+    hostConfig.Memory = INSTANCE_MEM;
+    hostConfig.MemorySwap = INSTANCE_MEM; // 禁止 swap 膨胀：限制即为硬上限
+  }
   if (vids.length) {
     hostConfig.Devices = vids.map((d) => ({ PathOnHost: d, PathInContainer: d, CgroupPermissions: 'rwm' }));
     hostConfig.GroupAdd = ['video']; // 让容器内 abc 用户能访问 /dev/videoN
@@ -158,6 +176,48 @@ export async function removeInstance(inst: Instance, purgeVolume: boolean): Prom
     } catch {
       /* 卷可能不存在 */
     }
+  }
+}
+
+// 列出"未被任何实例引用的 woc-data-* 数据卷"。删除实例时默认保留卷（聊天记录），但 panel 里没有
+// UI 能看到这些孤儿卷；本接口让管理员可显式：在新建实例时复用旧卷继承聊天记录，或彻底删除。
+// 仅看名字前缀 + docker 卷视角，不读卷内文件（避免提权访问）。
+export async function listOrphanVolumes(referencedVolumes: Set<string>): Promise<
+  Array<{ name: string; createdAt?: string; sizeBytes?: number }>
+> {
+  const { Volumes } = (await (docker as any).listVolumes()) || { Volumes: [] };
+  if (!Array.isArray(Volumes)) return [];
+  return Volumes
+    .filter((v: any) => typeof v?.Name === 'string' && v.Name.startsWith('woc-data-') && !referencedVolumes.has(v.Name))
+    .map((v: any) => ({
+      name: v.Name,
+      createdAt: v.CreatedAt,
+      // UsageData 仅在 docker engine 启用 -v size=true 时返回，常见情况下没有；缺失就不展示，避免一次 inspect 风暴
+      sizeBytes: typeof v?.UsageData?.Size === 'number' && v.UsageData.Size >= 0 ? v.UsageData.Size : undefined,
+    }))
+    .sort((a, b) => (a.createdAt && b.createdAt ? (a.createdAt < b.createdAt ? 1 : -1) : 0));
+}
+
+// 显式删除一个数据卷（管理员清理孤儿卷用）。调用方负责确认它不被现存实例引用。
+export async function removeVolume(name: string): Promise<void> {
+  await docker.getVolume(name).remove({ force: true } as any);
+}
+
+// 取实例容器的"working set"内存（MB）：等同 docker stats 显示值 = usage - inactive_file。
+// 用于 watchdog 检测 KasmVNC/Xvnc 长跑泄漏（21 小时可涨到 ~9 GiB），无法读取时返回 0（视为"暂未知"，
+// 不触发自愈，避免容器刚启动 stats 不可用就被误杀）。一次性 stats、不订阅 stream。
+export async function instanceMemoryMB(inst: Instance): Promise<number> {
+  try {
+    const c = docker.getContainer(inst.containerName);
+    const s: any = await c.stats({ stream: false } as any);
+    const usage = Number(s?.memory_stats?.usage) || 0;
+    const inactive = Number(
+      s?.memory_stats?.stats?.inactive_file ?? s?.memory_stats?.stats?.total_inactive_file,
+    ) || 0;
+    const bytes = Math.max(0, usage - inactive);
+    return Math.round(bytes / 1024 / 1024);
+  } catch {
+    return 0;
   }
 }
 
