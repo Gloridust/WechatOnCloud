@@ -9,7 +9,7 @@ export interface User {
   id: string;
   username: string;
   role: Role;
-  passwordHash: string;
+  passwordHash?: string;
   disabled: boolean;
   createdAt: string;
   // 该账户可访问的微信实例 id 列表。admin 隐式全部，忽略此字段。
@@ -20,6 +20,9 @@ export interface User {
   // 兼容下划线写法 reset_password。
   resetPassword?: boolean;
   reset_password?: boolean;
+  // OIDC 相关字段
+  displayName?: string;   // 人类可读名称（OIDC 登录时从 claims 提取）
+  oidcSub?: string;       // OIDC IdP 的唯一 subject
 }
 
 // 初始默认管理员密码；管理员仍在用它时强烈提示改密。
@@ -50,7 +53,7 @@ const FILE = process.env.PANEL_DATA || '/data/panel/accounts.json';
 
 let data: Data = { users: [], instances: [] };
 
-function persist() {
+export function persist() {
   mkdirSync(dirname(FILE), { recursive: true });
   const tmp = `${FILE}.tmp`;
   writeFileSync(tmp, JSON.stringify(data, null, 2));
@@ -92,7 +95,7 @@ export function initStore() {
     // 兼容旧账号文件：管理员若仍能用默认密码登录，补打"需改密"标记
     for (const u of data.users) {
       if (u.role === 'admin' && u.mustChangePassword === undefined) {
-        u.mustChangePassword = bcrypt.compareSync(DEFAULT_ADMIN_PASSWORD, u.passwordHash);
+        u.mustChangePassword = bcrypt.compareSync(DEFAULT_ADMIN_PASSWORD, u.passwordHash!);
       }
     }
   }
@@ -117,6 +120,7 @@ export function publicUser(u: User) {
   return {
     id: u.id,
     username: u.username,
+    displayName: u.displayName || u.username,
     role: u.role,
     disabled: u.disabled,
     createdAt: u.createdAt,
@@ -140,15 +144,20 @@ export function listUsers() {
     .map(publicUser);
 }
 
-export function verifyPassword(u: User, password: string) {
-  return bcrypt.compareSync(password, u.passwordHash);
+export function listRawUsers() {
+  return data.users;
 }
 
-export function createSub(username: string, password: string, allowedInstances: string[] = []) {
+export function verifyPassword(u: User, password: string) {
+  return bcrypt.compareSync(password, u.passwordHash!);
+}
+
+export function createSub(username: string, password: string, allowedInstances: string[] = [], extra: Partial<User> = {}) {
   if (findByUsername(username)) throw new Error('用户名已存在');
   const u = makeUser(username, password, 'sub');
   u.allowedInstances = sanitizeInstanceIds(allowedInstances);
   data.users.push(u);
+  Object.assign(u, extra);
   persist();
   return publicUser(u);
 }

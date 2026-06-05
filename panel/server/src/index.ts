@@ -28,8 +28,7 @@ import {
   renameInstance,
   setInstanceUsers,
   publicInstance,
-  type User,
-  type Instance,
+    type Instance,
 } from './store.js';
 import {
   ensureNetwork,
@@ -56,6 +55,8 @@ import {
 } from './docker.js';
 import { createSession, getSession, destroySession, destroyUserSessions } from './sessions.js';
 import { parseHost, parseAllowedHosts, isAllowedHost } from './host-guard.js';
+import { createAuthProvider } from './auth/index.js';
+import type { User } from './auth/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -74,6 +75,10 @@ function basicAuth(inst: Instance) {
 }
 
 initStore();
+
+// ---------- Auth Provider ----------
+const auth = createAuthProvider();
+await auth.init();
 
 const app = Fastify({ logger: true, trustProxy: true });
 
@@ -98,32 +103,21 @@ await app.register(cookie);
 app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
 
 // ---------- 鉴权辅助 ----------
-function currentUser(req: FastifyRequest): User | null {
-  const token = req.cookies?.[COOKIE];
-  const s = getSession(token);
-  if (!s) return null;
-  const u = findById(s.userId);
-  if (!u || u.disabled) return null;
-  return u;
+async function currentUser(req: FastifyRequest): Promise<User | null> {
+  return auth.currentUser(req);
 }
 
-function requireAuth(req: FastifyRequest, reply: FastifyReply): User | null {
-  const u = currentUser(req);
-  if (!u) {
-    reply.code(401).send({ error: '未登录' });
-    return null;
-  }
-  return u;
+async function requireAuth(req: FastifyRequest, reply: FastifyReply): Promise<User | null> {
+  return auth.requireAuth(req, reply);
 }
 
-function requireAdmin(req: FastifyRequest, reply: FastifyReply): User | null {
-  const u = requireAuth(req, reply);
-  if (!u) return null;
-  if (u.role !== 'admin') {
-    reply.code(403).send({ error: '需要管理员权限' });
-    return null;
-  }
-  return u;
+async function requireAdmin(req: FastifyRequest, reply: FastifyReply): Promise<User | null> {
+  return auth.requireAdmin(req, reply);
+}
+
+function allowLocalUserManagement(): boolean {
+  const mode = process.env.WOC_AUTH_MODE || 'local';
+  return mode !== 'oidc_full';
 }
 
 // ---------- 登录 / 会话 ----------
@@ -136,6 +130,7 @@ app.post('/api/auth/login', async (req, reply) => {
   const token = createSession(u.id);
   reply.setCookie(COOKIE, token, {
     httpOnly: true,
+    secure: true,
     sameSite: 'lax',
     path: '/',
     maxAge: 60 * 60 * 12,
@@ -143,24 +138,41 @@ app.post('/api/auth/login', async (req, reply) => {
   return { user: publicUser(u) };
 });
 
+// Auth mode endpoint
+app.get('/api/auth/mode', async (_req, reply) => {
+  reply.send({ mode: process.env.WOC_AUTH_MODE || 'local', oidcLabel: process.env.WOC_OIDC_LABEL || '统一身份登录' });
+});
+
+// OIDC routes
+app.get('/api/auth/oidc/login', async (req, reply) => {
+  return auth.login(req, reply);
+});
+
+app.get('/api/auth/oidc/callback', async (req, reply) => {
+  return auth.callback(req, reply);
+});
+
 app.post('/api/auth/logout', async (req, reply) => {
   destroySession(req.cookies?.[COOKIE]);
-  reply.clearCookie(COOKIE, { path: '/' });
+  reply.clearCookie(COOKIE, { secure: true, path: '/' });
   return { ok: true };
 });
 
 app.get('/api/auth/me', async (req, reply) => {
-  const u = currentUser(req);
+  const u = await currentUser(req);
   if (!u) return reply.code(401).send({ error: '未登录' });
-  return { user: publicUser(u) };
+  return { user: u };
 });
 
 // ---------- 自助改密 ----------
 app.post('/api/account/password', async (req, reply) => {
-  const u = requireAuth(req, reply);
+  const u = await requireAuth(req, reply);
   if (!u) return;
+  if (!allowLocalUserManagement()) return reply.code(403).send({ error: '当前认证模式下不支持本地改密' });
+  const fullUser = findById(u.id);
+  if (!fullUser) return reply.code(401).send({ error: '用户不存在' });
   const { oldPassword, newPassword } = (req.body as any) ?? {};
-  if (!verifyPassword(u, oldPassword ?? '')) return reply.code(400).send({ error: '原密码错误' });
+  if (!verifyPassword(fullUser, oldPassword ?? '')) return reply.code(400).send({ error: '原密码错误' });
   if (!newPassword || String(newPassword).length < 6) return reply.code(400).send({ error: '新密码至少 6 位' });
   resetPassword(u.id, newPassword);
   return { ok: true };
@@ -168,12 +180,13 @@ app.post('/api/account/password', async (req, reply) => {
 
 // ---------- 管理员：子账号管理 ----------
 app.get('/api/admin/users', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
   return { users: listUsers() };
 });
 
 app.post('/api/admin/users', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
+  if (!allowLocalUserManagement()) return reply.code(403).send({ error: '当前认证模式下不支持本地用户管理' });
   const { username, password } = (req.body as any) ?? {};
   if (!username || !/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
     return reply.code(400).send({ error: '用户名为 3-20 位字母、数字或下划线' });
@@ -189,7 +202,7 @@ app.post('/api/admin/users', async (req, reply) => {
 
 // 账户侧：设置某账户可访问的实例
 app.post('/api/admin/users/:id/instances', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
   const id = (req.params as any).id;
   const instanceIds = Array.isArray((req.body as any)?.instanceIds) ? (req.body as any).instanceIds : [];
   try {
@@ -200,7 +213,8 @@ app.post('/api/admin/users/:id/instances', async (req, reply) => {
 });
 
 app.post('/api/admin/users/:id/disable', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
+  if (!allowLocalUserManagement()) return reply.code(403).send({ error: '当前认证模式下不支持本地用户管理' });
   const { disabled } = (req.body as any) ?? {};
   const id = (req.params as any).id;
   try {
@@ -213,7 +227,8 @@ app.post('/api/admin/users/:id/disable', async (req, reply) => {
 });
 
 app.post('/api/admin/users/:id/reset', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
+  if (!allowLocalUserManagement()) return reply.code(403).send({ error: '当前认证模式下不支持本地用户管理' });
   const { newPassword } = (req.body as any) ?? {};
   const id = (req.params as any).id;
   if (!newPassword || String(newPassword).length < 6) return reply.code(400).send({ error: '密码至少 6 位' });
@@ -227,7 +242,8 @@ app.post('/api/admin/users/:id/reset', async (req, reply) => {
 });
 
 app.delete('/api/admin/users/:id', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
+  if (!allowLocalUserManagement()) return reply.code(403).send({ error: '当前认证模式下不支持本地用户管理' });
   const id = (req.params as any).id;
   try {
     deleteUser(id);
@@ -241,7 +257,7 @@ app.delete('/api/admin/users/:id', async (req, reply) => {
 // ---------- 微信实例管理 ----------
 // 列出当前用户可见实例（含运行态 + 微信安装状态）
 app.get('/api/instances', async (req, reply) => {
-  const u = requireAuth(req, reply);
+  const u = await requireAuth(req, reply);
   if (!u) return;
   const visible = userInstances(u);
   const out = await Promise.all(
@@ -256,7 +272,7 @@ app.get('/api/instances', async (req, reply) => {
 
 // 新建实例（仅管理员）：生成凭据 + docker run + 分配访问账户
 app.post('/api/admin/instances', async (req, reply) => {
-  const admin = requireAdmin(req, reply);
+  const admin = await requireAdmin(req, reply);
   if (!admin) return;
   const { name, reuseVolume } = (req.body as any) ?? {};
   const allowedUserIds = Array.isArray((req.body as any)?.allowedUserIds) ? (req.body as any).allowedUserIds : [];
@@ -397,7 +413,7 @@ app.put('/api/admin/instances/:id/mem-limits', async (req, reply) => {
 
 // 删除实例（仅管理员）：默认保留数据卷，?purge=1 才永久删聊天记录
 app.delete('/api/admin/instances/:id', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
   const id = (req.params as any).id;
   const purge = (req.query as any)?.purge === '1' || (req.query as any)?.purge === 'true';
   const inst = findInstance(id);
@@ -410,7 +426,7 @@ app.delete('/api/admin/instances/:id', async (req, reply) => {
 
 // 重命名实例（仅管理员）：只改显示名，不动容器/卷。
 app.post('/api/admin/instances/:id/rename', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
   const { name } = (req.body as any) ?? {};
   try {
     return { instance: renameInstance((req.params as any).id, String(name ?? '')) };
@@ -421,7 +437,7 @@ app.post('/api/admin/instances/:id/rename', async (req, reply) => {
 
 // 启动实例容器（仅管理员）：容器停止或被删后，一键拉起（不重建数据卷）。
 app.post('/api/admin/instances/:id/start', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
   const inst = findInstance((req.params as any).id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
   try {
@@ -434,7 +450,7 @@ app.post('/api/admin/instances/:id/start', async (req, reply) => {
 
 // 停止实例容器（仅管理员）：保留容器与数据卷。
 app.post('/api/admin/instances/:id/stop', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
   const inst = findInstance((req.params as any).id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
   try {
@@ -447,7 +463,7 @@ app.post('/api/admin/instances/:id/stop', async (req, reply) => {
 
 // 重启实例容器（仅管理员）：按当前本地镜像重建（保留数据卷 → 登录态不丢；快速，不联网拉取）。
 app.post('/api/admin/instances/:id/restart', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
   const inst = findInstance((req.params as any).id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
   try {
@@ -461,7 +477,7 @@ app.post('/api/admin/instances/:id/restart', async (req, reply) => {
 // 升级实例（仅管理员）：拉取最新微信镜像后重建（保留数据卷）。用于把旧实例更新到新版镜像
 // （如修复"最小化丢失"等），类似「更新微信」但更新的是实例容器镜像本身。
 app.post('/api/admin/instances/:id/upgrade', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
   const inst = findInstance((req.params as any).id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
   try {
@@ -474,7 +490,7 @@ app.post('/api/admin/instances/:id/upgrade', async (req, reply) => {
 
 // 实例侧：设置该实例可被哪些账户访问
 app.post('/api/admin/instances/:id/users', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
   const id = (req.params as any).id;
   const userIds = Array.isArray((req.body as any)?.userIds) ? (req.body as any).userIds : [];
   try {
@@ -488,7 +504,7 @@ app.post('/api/admin/instances/:id/users', async (req, reply) => {
 // ---------- 文件中转（有访问权限即可用；走面板鉴权，不额外暴露） ----------
 // 上传：原始二进制直传，落到实例 ~/Desktop，微信文件选择器可直接选到。
 app.post('/api/instances/:id/upload', { bodyLimit: 512 * 1024 * 1024 }, async (req, reply) => {
-  const u = requireAuth(req, reply);
+  const u = await requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
@@ -505,7 +521,7 @@ app.post('/api/instances/:id/upload', { bodyLimit: 512 * 1024 * 1024 }, async (r
 
 // 列出可下载的中转文件
 app.get('/api/instances/:id/files', async (req, reply) => {
-  const u = requireAuth(req, reply);
+  const u = await requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
@@ -518,7 +534,7 @@ app.get('/api/instances/:id/files', async (req, reply) => {
 
 // 删除某个中转文件（有访问权限即可）
 app.delete('/api/instances/:id/files', async (req, reply) => {
-  const u = requireAuth(req, reply);
+  const u = await requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
@@ -533,7 +549,7 @@ app.delete('/api/instances/:id/files', async (req, reply) => {
 
 // 下载某个中转文件
 app.get('/api/instances/:id/download', async (req, reply) => {
-  const u = requireAuth(req, reply);
+  const u = await requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
@@ -556,7 +572,7 @@ const controlHolders = new Map<string, { userId: string; username: string; at: n
 
 // 续约/认领：无人持有、已超时、或本来就是我 → 我成为操作者；否则返回当前操作者。
 app.post('/api/instances/:id/control/beat', async (req, reply) => {
-  const u = requireAuth(req, reply);
+  const u = await requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
@@ -571,7 +587,7 @@ app.post('/api/instances/:id/control/beat', async (req, reply) => {
 
 // 只读查询当前操作者（前端轮询；不认领）。超 TTL 视为空闲。
 app.get('/api/instances/:id/control', async (req, reply) => {
-  const u = requireAuth(req, reply);
+  const u = await requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
@@ -582,7 +598,7 @@ app.get('/api/instances/:id/control', async (req, reply) => {
 
 // 主动接管（"申请控制"）：强制把操作权抢过来。
 app.post('/api/instances/:id/control/take', async (req, reply) => {
-  const u = requireAuth(req, reply);
+  const u = await requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
@@ -592,7 +608,7 @@ app.post('/api/instances/:id/control/take', async (req, reply) => {
 
 // 通过 xdotool 在实例容器内输入文字（绕过 VNC XKB keysym 容量限制，修复中文 IME 吞字）
 app.post('/api/instances/:id/type', async (req, reply) => {
-  const u = requireAuth(req, reply);
+  const u = await requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
@@ -623,7 +639,7 @@ app.get('/api/admin/instances/:id/logs', async (req, reply) => {
 
 // 该实例的微信安装状态（有访问权限即可看）
 app.get('/api/instances/:id/wechat/status', async (req, reply) => {
-  const u = requireAuth(req, reply);
+  const u = await requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
@@ -643,12 +659,12 @@ async function triggerInstanceWechat(id: string, cmd: 'install' | 'update', repl
 }
 
 app.post('/api/admin/instances/:id/wechat/install', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
   return triggerInstanceWechat((req.params as any).id, 'install', reply);
 });
 
 app.post('/api/admin/instances/:id/wechat/update', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return;
+  if (!await requireAdmin(req, reply)) return;
   return triggerInstanceWechat((req.params as any).id, 'update', reply);
 });
 
@@ -693,8 +709,8 @@ function parseDesktopUrl(rawUrl: string): { id: string; rest: string } | null {
   return { id, rest };
 }
 
-const desktopHandler = (req: FastifyRequest, reply: FastifyReply) => {
-  const u = currentUser(req);
+const desktopHandler = async (req: FastifyRequest, reply: FastifyReply) => {
+  const u = await currentUser(req);
   if (!u) {
     reply.code(302).header('location', '/login').send();
     return;
@@ -715,7 +731,7 @@ app.all('/desktop/:id', desktopHandler);
 app.all('/desktop/:id/*', desktopHandler);
 
 // ---------- 静态 SPA + 前端路由回退 ----------
-await app.register(fstatic, { root: STATIC_DIR, wildcard: false, index: ['index.html'] });
+await app.register(fstatic, { root: STATIC_DIR, wildcard: true, index: ['index.html'] });
 app.setNotFoundHandler((req, reply) => {
   const url = req.raw.url || '';
   if (url.startsWith('/api') || url.startsWith('/desktop')) {

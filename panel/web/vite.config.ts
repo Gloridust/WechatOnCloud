@@ -2,7 +2,6 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
-// 开发时把 /api 与 /desktop 代理到本地后端（npm run dev 时用）
 const BACKEND = process.env.BACKEND || 'http://localhost:8080';
 
 export default defineConfig({
@@ -10,6 +9,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      injectRegister: false,  // 手动注册，完全可控
       includeAssets: ['favicon.svg', 'icon-180.png'],
       manifest: {
         name: '云微',
@@ -27,9 +27,7 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // 桌面反代与 API 不能被 SW 拦截
         navigateFallbackDenylist: [/^\/desktop/, /^\/api/],
-        // 新版本立即接管 + 清理旧缓存，避免更新后仍跑旧代码（硬刷新绕不过 SW）
         clientsClaim: true,
         skipWaiting: true,
         cleanupOutdatedCaches: true,

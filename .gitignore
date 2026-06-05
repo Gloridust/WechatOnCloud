@@ -141,3 +141,9 @@ dist
 /data-panel/
 /.claude
 .DS_Store
+
+# WechatOnCloud: 迭代记录、Code Review、私有笔记（含基础设施/敏感信息，勿提交）
+# 这些文件应存放于 ~/.hermes/notes/ 等外部目录
+/docs/CODE_REVIEW*
+/docs/ITERATION*
+/docs/*.private.md

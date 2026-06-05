@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, type PanelUser, type InstanceWithStatus } from '../api';
 import { useUI, PasswordInput } from '../ui';
 import { useAuth } from '../auth';
+import { useAuthConfig } from '../hooks/useAuthConfig';
 
 const BUSY_PHASES = ['downloading', 'extracting', 'installing'];
 
@@ -16,6 +17,8 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
   const nav = useNavigate();
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
+  const { mode } = useAuthConfig();
+  const allowLocalMgmt = mode !== 'oidc_full';
   const { toast, confirm } = useUI();
   const [users, setUsers] = useState<PanelUser[]>([]);
   const [instances, setInstances] = useState<InstanceWithStatus[]>([]);
@@ -238,9 +241,11 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
 
             <div className="section-row" style={{ marginTop: 22 }}>
               <span className="section-title">子账号</span>
-              <button className="btn-text" onClick={() => setCreatingUser(true)}>
-                + 新建子账号
-              </button>
+              {allowLocalMgmt && (
+                <button className="btn-text" onClick={() => setCreatingUser(true)}>
+                  + 新建子账号
+                </button>
+              )}
             </div>
             {subs.length === 0 ? (
               <div className="list">
@@ -268,15 +273,19 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                       <button className="btn-text" onClick={() => setAssignUser(u)}>
                         可访问实例
                       </button>
-                      <button className="btn-text" onClick={() => toggle(u)}>
-                        {u.disabled ? '启用' : '禁用'}
-                      </button>
-                      <button className="btn-text" onClick={() => setResetTarget(u)}>
-                        重置密码
-                      </button>
-                      <button className="btn-text danger" onClick={() => removeUser(u)}>
-                        删除
-                      </button>
+                      {allowLocalMgmt && (
+                        <>
+                          <button className="btn-text" onClick={() => toggle(u)}>
+                            {u.disabled ? '启用' : '禁用'}
+                          </button>
+                          <button className="btn-text" onClick={() => setResetTarget(u)}>
+                            重置密码
+                          </button>
+                          <button className="btn-text danger" onClick={() => removeUser(u)}>
+                            删除
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                 ))}

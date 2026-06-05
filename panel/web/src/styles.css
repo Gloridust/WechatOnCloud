@@ -280,6 +280,59 @@ button {
 .btn-danger:active:not(:disabled) {
   background: #e84444;
 }
+
+/* OIDC 统一登录按钮 */
+.oidc-button {
+  display: block;
+  width: 100%;
+  height: 48px;
+  line-height: 48px;
+  text-align: center;
+  background: var(--wx-green);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 500;
+  border-radius: var(--r-small);
+  text-decoration: none;
+  box-shadow: var(--crease-accent);
+  transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.oidc-button::before {
+  content: \'\';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    ellipse at 50% 22%,
+    rgba(255, 255, 255, 0.28) 0%,
+    rgba(255, 255, 255, 0.08) 42%,
+    transparent 72%
+  );
+  pointer-events: none;
+}
+.oidc-button:active {
+  transform: scale(0.97);
+  box-shadow: var(--crease-press);
+  background: var(--wx-green-dark);
+}
+
+/* 登录分隔线 */
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.login-divider::before,
+.login-divider::after {
+  content: \'\';
+  flex: 1;
+  height: 1px;
+  background: rgba(var(--shadow) / 0.12);
+}
+
 .btn:disabled {
   opacity: 0.6;
   cursor: default;

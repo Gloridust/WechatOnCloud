@@ -35,6 +35,19 @@ services:
       # DNS-rebinding 防护：套 HTTPS 反代部署时把对外域名加进 .env（详见 .env.example）。
       # 默认仅放行 loopback + RFC1918 私网，直连 NAS / 局域网无需改动。
       - PANEL_ALLOWED_HOSTS=${PANEL_ALLOWED_HOSTS:-}
+      # OIDC Authentication
+      - WOC_AUTH_MODE=${WOC_AUTH_MODE:-local}
+      - WOC_OIDC_ISSUER=${WOC_OIDC_ISSUER:-}
+      - WOC_OIDC_CLIENT_ID=${WOC_OIDC_CLIENT_ID:-}
+      - WOC_OIDC_CLIENT_SECRET=${WOC_OIDC_CLIENT_SECRET:-}
+      - WOC_OIDC_REDIRECT_URI=${WOC_OIDC_REDIRECT_URI:-}
+      - WOC_OIDC_ROLE_CLAIM=${WOC_OIDC_ROLE_CLAIM:-}
+      - WOC_OIDC_ADMIN_ROLE=${WOC_OIDC_ADMIN_ROLE:-}
+      - WOC_OIDC_USER_ROLE=${WOC_OIDC_USER_ROLE:-}
+      - WOC_OIDC_AUTO_PROVISION=${WOC_OIDC_AUTO_PROVISION:-true}
+      - WOC_OIDC_LABEL=${WOC_OIDC_LABEL:-统一身份登录}
+      - WOC_KEYCLOAK_ADMIN_PASS=${WOC_KEYCLOAK_ADMIN_PASS:-}
+      - WOC_KEYCLOAK_ADMIN_URL=${WOC_KEYCLOAK_ADMIN_URL:-}
 
     volumes:
       # 面板账号数据（用户、实例元信息、密码哈希）
