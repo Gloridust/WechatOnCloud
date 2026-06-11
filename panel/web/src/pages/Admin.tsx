@@ -565,6 +565,21 @@ function InstanceSecurity({ inst, onClose, onDone }: { inst: InstanceWithStatus;
     }
   };
 
+  // 复制 machine-id 到剪贴板
+  const copyMachineId = async () => {
+    try {
+      const txt = inst.volumeName ?? '';
+      if (!txt) {
+        toast('无可复制的设备 ID', 'error');
+        return;
+      }
+      await navigator.clipboard.writeText(txt);
+      toast('设备 ID 已复制到剪贴板', 'ok');
+    } catch (e: any) {
+      toast(e?.message || '复制失败', 'error');
+    }
+  };
+
   // 首次加载 + 每 5s 刷新 currentMB（运行实例的实时内存）
   useEffect(() => {
     let alive = true;
@@ -688,7 +703,15 @@ function InstanceSecurity({ inst, onClose, onDone }: { inst: InstanceWithStatus;
               提示：日常活跃内存约 1500 MiB；soft 建议略高于此（如 2000），hard 建议远低于宿主可用内存（如 3000~4000）。
             </div>
 
-            <div className="field-label" style={{ marginTop: 16 }}>设备身份（machine-id）</div>
+            <div style={{ marginTop: 16 }}>
+              <div className="field-label">设备身份（machine-id）</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+                <div style={{ fontFamily: 'monospace', fontSize: 13, wordBreak: 'break-all' }}>{inst.volumeName}</div>
+                <button type="button" className="btn-text" onClick={copyMachineId} title="复制设备 ID 到剪贴板">
+                  复制
+                </button>
+              </div>
+            </div>
             <div className="muted small" style={{ lineHeight: 1.6 }}>
               微信会用设备标识做风控。若该账号被判定<b>设备风险</b>、登录后被强制退出且反复循环，
               可重置为一个全新的唯一设备 ID（相当于换台新设备），再重新扫码登录。会重启该实例。

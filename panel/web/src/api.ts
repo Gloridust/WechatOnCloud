@@ -26,6 +26,7 @@ export interface PanelInstance {
   createdBy: string;
   memSoftLimitMB?: number;
   memHardLimitMB?: number;
+  volumeName: string;
 }
 export interface MemLimits {
   soft: number | null;
