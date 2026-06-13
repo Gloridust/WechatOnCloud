@@ -55,8 +55,8 @@ ENV LANG=zh_CN.UTF-8 \
     LIBGL_ALWAYS_SOFTWARE=1
 
 # 改 KasmVNC web 客户端的 webpack 产物 dist/*.bundle.js：
-#  (1) 默认开启 IME 输入模式：本地（客户端）输入法打中文，拼音联想在本地完成、只把成品汉字
-#      发进容器，无需容器内装 IME。默认值仅在浏览器未存过该设置时生效，不覆盖用户手动改过的偏好。
+#  (1) 保持 KasmVNC IME 模式默认关闭：面板使用透明输入代理承接本机输入法，上屏后经
+#      剪贴板 + Ctrl+V 送进微信，避免 noVNC 差分输入损坏混合文本。
 #  (2) 修复 noVNC 中文 IME 输入：原实现靠隐藏 textarea 差分逐字符重发 keysym，会泄漏中间拼音、
 #      累积不 reset、退格风暴，导致大量丢字 / ~21 字卡住 / 跨浏览器不稳。改为只在 compositionend
 #      用 e.data 直发成品字符串（详见 woc-www-patch.sh / woc-ime.pl）。

@@ -47,6 +47,18 @@ export interface VolEntry {
   size: number;
   mtime: number; // epoch ms
 }
+export interface ImeServerDiagnosticEntry {
+  at: number;
+  action: 'type' | 'paste' | 'click' | 'key' | 'clipboard';
+  instanceId: string;
+  durationMs: number;
+  ok: boolean;
+  textLength?: number;
+  key?: string;
+  xRatio?: number;
+  yRatio?: number;
+  error?: string;
+}
 
 // 原始二进制上传（File 直传 application/octet-stream），用于数据卷上传/解压/恢复
 async function rawUpload(url: string, file: File): Promise<any> {
@@ -181,5 +193,17 @@ export const api = {
   controlStatus: (id: string) => req<{ free: boolean; mine: boolean; holder: string | null }>(`/api/instances/${id}/control`),
   controlBeat: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/beat`, { method: 'POST' }),
   controlTake: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/take`, { method: 'POST' }),
-  typeInInstance: (id: string, text: string) => req(`/api/instances/${id}/type`, { method: 'POST', body: JSON.stringify({ text }) }),
+  imeDiagnostics: (clear = false) =>
+    req<{ entries: ImeServerDiagnosticEntry[] }>(
+      `/api/admin/ime-diagnostics${clear ? '?clear=1' : ''}`,
+    ),
+  readInstanceClipboard: (id: string) => req<{ text: string }>(`/api/instances/${id}/clipboard`),
+  typeInInstance: (id: string, text: string, focus?: { xRatio: number; yRatio: number }) =>
+    req(`/api/instances/${id}/type`, { method: 'POST', body: JSON.stringify({ text, ...focus }) }),
+  clickInInstance: (id: string, xRatio: number, yRatio: number) =>
+    req(`/api/instances/${id}/click`, { method: 'POST', body: JSON.stringify({ xRatio, yRatio }) }),
+  pasteClipboardInInstance: (id: string, xRatio: number, yRatio: number, text?: string) =>
+    req(`/api/instances/${id}/paste`, { method: 'POST', body: JSON.stringify({ xRatio, yRatio, text }) }),
+  sendKeyToInstance: (id: string, key: string) =>
+    req(`/api/instances/${id}/key`, { method: 'POST', body: JSON.stringify({ key }) }),
 };

@@ -55,6 +55,10 @@ import {
   instanceMemoryMB,
   instanceHttpHealthy,
   regenInstanceMachineId,
+  keyInInstance,
+  pasteClipboardInInstance,
+  readClipboardInInstance,
+  clickInInstance,
   listVolume,
   volMkdir,
   volMove,
@@ -67,6 +71,7 @@ import {
 } from './docker.js';
 import { createSession, getSession, destroySession, destroyUserSessions } from './sessions.js';
 import { parseHost, parseAllowedHosts, isRequestHostAllowed } from './host-guard.js';
+import { ImeServerDiagnostics, normalizeImeDiagnosticError } from './imeDiagnostics.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -79,6 +84,7 @@ const COOKIE = 'woc_sess';
 // deploys (Caddy/nginx/飞牛 内置反代) where the public hostname differs from
 // the LAN IP. See .env.example.
 const ALLOWED_HOSTS = parseAllowedHosts(process.env.PANEL_ALLOWED_HOSTS);
+const imeDiagnostics = new ImeServerDiagnostics();
 
 function basicAuth(inst: Instance) {
   return 'Basic ' + Buffer.from(`${inst.kasmUser}:${inst.kasmPassword}`).toString('base64');
@@ -622,14 +628,148 @@ app.post('/api/instances/:id/type', async (req, reply) => {
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
-  const { text } = (req.body as any) ?? {};
+  const startedAt = Date.now();
+  const { text, xRatio, yRatio } = (req.body as any) ?? {};
   if (!text || typeof text !== 'string' || text.length > 500) return reply.code(400).send({ error: '文字为空或过长' });
+  const focus =
+    typeof xRatio === 'number' || typeof yRatio === 'number'
+      ? typeof xRatio === 'number' && typeof yRatio === 'number'
+        ? { xRatio, yRatio }
+        : null
+      : undefined;
+  if (focus === null) return reply.code(400).send({ error: '点击坐标不合法' });
   try {
-    await typeInInstance(findInstance(id)!, text);
+    await typeInInstance(findInstance(id)!, text, focus);
+    imeDiagnostics.record({
+      action: 'type',
+      instanceId: id,
+      startedAt,
+      ok: true,
+      textLength: text.length,
+      xRatio: focus?.xRatio,
+      yRatio: focus?.yRatio,
+    });
     return { ok: true };
   } catch (e: any) {
-    return reply.code(500).send({ error: e?.message || '输入失败' });
+    const error = normalizeImeDiagnosticError(e);
+    imeDiagnostics.record({
+      action: 'type',
+      instanceId: id,
+      startedAt,
+      ok: false,
+      textLength: text.length,
+      xRatio: focus?.xRatio,
+      yRatio: focus?.yRatio,
+      error,
+    });
+    return reply.code(500).send({ error: error || '输入失败' });
   }
+});
+
+app.post('/api/instances/:id/key', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const startedAt = Date.now();
+  const { key } = (req.body as any) ?? {};
+  if (!key || typeof key !== 'string') return reply.code(400).send({ error: '按键不合法' });
+  try {
+    await keyInInstance(findInstance(id)!, key);
+    imeDiagnostics.record({ action: 'key', instanceId: id, startedAt, ok: true, key });
+    return { ok: true };
+  } catch (e: any) {
+    const error = normalizeImeDiagnosticError(e);
+    imeDiagnostics.record({ action: 'key', instanceId: id, startedAt, ok: false, key, error });
+    return reply.code(400).send({ error: error || '按键发送失败' });
+  }
+});
+
+app.post('/api/instances/:id/paste', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const startedAt = Date.now();
+  const { xRatio, yRatio, text } = (req.body as any) ?? {};
+  if (typeof xRatio !== 'number' || typeof yRatio !== 'number') return reply.code(400).send({ error: '点击坐标不合法' });
+  if (text !== undefined && (typeof text !== 'string' || text.length > 500)) return reply.code(400).send({ error: '文字过长' });
+  try {
+    await pasteClipboardInInstance(findInstance(id)!, xRatio, yRatio, text);
+    imeDiagnostics.record({
+      action: 'paste',
+      instanceId: id,
+      startedAt,
+      ok: true,
+      textLength: typeof text === 'string' ? text.length : undefined,
+      xRatio,
+      yRatio,
+    });
+    return { ok: true };
+  } catch (e: any) {
+    const error = normalizeImeDiagnosticError(e);
+    imeDiagnostics.record({
+      action: 'paste',
+      instanceId: id,
+      startedAt,
+      ok: false,
+      textLength: typeof text === 'string' ? text.length : undefined,
+      xRatio,
+      yRatio,
+      error,
+    });
+    return reply.code(500).send({ error: error || '粘贴失败' });
+  }
+});
+
+app.get('/api/instances/:id/clipboard', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const startedAt = Date.now();
+  try {
+    const text = await readClipboardInInstance(findInstance(id)!);
+    imeDiagnostics.record({
+      action: 'clipboard',
+      instanceId: id,
+      startedAt,
+      ok: true,
+      textLength: text.length,
+    });
+    return { text };
+  } catch (e: any) {
+    const error = normalizeImeDiagnosticError(e);
+    imeDiagnostics.record({ action: 'clipboard', instanceId: id, startedAt, ok: false, error });
+    return reply.code(500).send({ error: error || '读取剪贴板失败' });
+  }
+});
+
+app.post('/api/instances/:id/click', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const startedAt = Date.now();
+  const { xRatio, yRatio } = (req.body as any) ?? {};
+  if (typeof xRatio !== 'number' || typeof yRatio !== 'number') return reply.code(400).send({ error: '点击坐标不合法' });
+  try {
+    await clickInInstance(findInstance(id)!, xRatio, yRatio);
+    imeDiagnostics.record({ action: 'click', instanceId: id, startedAt, ok: true, xRatio, yRatio });
+    return { ok: true };
+  } catch (e: any) {
+    const error = normalizeImeDiagnosticError(e);
+    imeDiagnostics.record({ action: 'click', instanceId: id, startedAt, ok: false, xRatio, yRatio, error });
+    return reply.code(500).send({ error: error || '点击失败' });
+  }
+});
+
+app.get('/api/admin/ime-diagnostics', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const clear = String((req.query as any)?.clear || '') === '1';
+  const entries = imeDiagnostics.entries();
+  if (clear) imeDiagnostics.clear();
+  return { entries };
 });
 
 // 查看实例容器日志（仅管理员）：排查"无法进入/未安装/卡死"等。inline 文本，浏览器可直接看/另存。

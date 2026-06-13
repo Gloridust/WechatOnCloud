@@ -565,20 +565,168 @@ export async function instanceLogs(inst: Instance, tail = 600): Promise<string> 
   return out || buf.toString('utf8'); // 兜底：TTY 模式非多路复用
 }
 
+export interface TypeInInstanceFocusPoint {
+  xRatio: number;
+  yRatio: number;
+}
+
+function displayShellPrefix(): string[] {
+  return [
+    'display="${DISPLAY:-}"',
+    'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
+    'export DISPLAY="${display:-:1}"',
+  ];
+}
+
+function remoteClickShell(xRatio: number, yRatio: number): string[] {
+  if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio)) throw new Error('点击坐标不合法');
+  const x = Math.max(0, Math.min(1, xRatio));
+  const y = Math.max(0, Math.min(1, yRatio));
+  return [
+    'set -- $(xdotool getdisplaygeometry)',
+    'screen_w="$1"',
+    'screen_h="$2"',
+    `px=$(awk -v x="${x}" -v w="$screen_w" 'BEGIN { printf "%d", x * (w - 1) }')`,
+    `py=$(awk -v y="${y}" -v h="$screen_h" 'BEGIN { printf "%d", y * (h - 1) }')`,
+    'xdotool mousemove "$px" "$py" click 1',
+  ];
+}
+
+function waitClipboardTextShell(
+  b64: string,
+  options: { attempts?: number; readTimeout?: string; sleep?: string } = {},
+): string[] {
+  const attempts = Math.max(1, Math.floor(options.attempts ?? 5));
+  const readTimeout = options.readTimeout ?? '0.2s';
+  const sleep = options.sleep ?? '0.03';
+  const loopItems = Array.from({ length: attempts }, (_, i) => String(i + 1)).join(' ');
+  return [
+    `target_b64='${b64}'`,
+    'current_b64=""',
+    `for i in ${loopItems}; do :`,
+    `  current_b64="$(timeout ${readTimeout} xclip -selection clipboard -o 2>/dev/null | base64 | tr -d '\\n' || true)"`,
+    '  [ "$current_b64" = "$target_b64" ] && break',
+    `  sleep ${sleep}`,
+    'done',
+    '[ "$current_b64" = "$target_b64" ] || { echo "clipboard did not sync expected text" >&2; exit 2; }',
+  ];
+}
+
+function writeClipboardOnceShell(b64: string): string[] {
+  return [
+    `printf '%s' '${b64}' | base64 -d | xclip -selection clipboard -loops 2 -i >/dev/null 2>&1 & clip_pid="$!"`,
+    'sleep 0.03',
+  ];
+}
+
+export function buildTypeInInstanceCommand(text: string, focus?: TypeInInstanceFocusPoint): string {
+  const b64 = Buffer.from(text, 'utf8').toString('base64');
+  return [
+    'set -e',
+    ...displayShellPrefix(),
+    'command -v xclip >/dev/null 2>&1 || { echo "xclip not installed in instance image" >&2; exit 127; }',
+    'command -v xdotool >/dev/null 2>&1 || { echo "xdotool not installed in instance image" >&2; exit 127; }',
+    ...(focus ? remoteClickShell(focus.xRatio, focus.yRatio) : []),
+    ...writeClipboardOnceShell(b64),
+    'xdotool key --clearmodifiers ctrl+v',
+    'sleep 0.25',
+    'kill "$clip_pid" 2>/dev/null || true',
+    'wait "$clip_pid" 2>/dev/null || true',
+  ].join('; ');
+}
+
 // 通过 xdotool 在实例容器内输入文字（绕过 VNC keysym 限制，解决中文 IME 吞字问题）。
 // 用 base64 传递文本避免 shell 转义问题，xclip 写入剪贴板后 xdotool 模拟 Ctrl+V 粘贴。
-export async function typeInInstance(inst: Instance, text: string): Promise<void> {
-  const b64 = Buffer.from(text, 'utf8').toString('base64');
+export async function typeInInstance(inst: Instance, text: string, focus?: TypeInInstanceFocusPoint): Promise<void> {
+  const cmd = buildTypeInInstanceCommand(text, focus);
+  await execCapture(inst, ['bash', '-c', cmd]);
+}
+
+export async function readClipboardInInstance(inst: Instance): Promise<string> {
   const cmd = [
-    'set -e',
     'display="${DISPLAY:-}"',
     'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
     'export DISPLAY="${display:-:1}"',
     'command -v xclip >/dev/null 2>&1 || { echo "xclip not installed in instance image" >&2; exit 127; }',
+    'timeout 1s xclip -selection clipboard -o 2>/dev/null || true',
+  ].join('; ');
+  return await execCapture(inst, ['bash', '-c', cmd]);
+}
+
+const KEY_ALIASES: Record<string, string> = {
+  Backspace: 'BackSpace',
+  Delete: 'Delete',
+  Enter: 'Return',
+  Tab: 'Tab',
+  Escape: 'Escape',
+  ArrowLeft: 'Left',
+  ArrowRight: 'Right',
+  ArrowUp: 'Up',
+  ArrowDown: 'Down',
+  Home: 'Home',
+  End: 'End',
+  Paste: 'ctrl+v',
+  'Ctrl+A': 'ctrl+a',
+  'Ctrl+C': 'ctrl+c',
+  'Ctrl+V': 'ctrl+v',
+  'Ctrl+X': 'ctrl+x',
+  'Ctrl+Y': 'ctrl+y',
+  'Ctrl+Z': 'ctrl+z',
+};
+
+export async function keyInInstance(inst: Instance, key: string): Promise<void> {
+  const cmd = buildKeyInInstanceCommand(key);
+  await execCapture(inst, ['bash', '-c', cmd]);
+}
+
+export function buildKeyInInstanceCommand(key: string): string {
+  const xKey = KEY_ALIASES[key];
+  if (!xKey) throw new Error('按键不支持');
+  return [
+    'set -e',
+    ...displayShellPrefix(),
     'command -v xdotool >/dev/null 2>&1 || { echo "xdotool not installed in instance image" >&2; exit 127; }',
-    `echo '${b64}' | base64 -d | xclip -selection clipboard -i`,
+    `xdotool key --clearmodifiers ${xKey}`,
+  ].join('; ');
+}
+
+export function buildPasteClipboardInInstanceCommand(xRatio: number, yRatio: number, expectedText?: string): string {
+  const expectedB64 = expectedText ? Buffer.from(expectedText, 'utf8').toString('base64') : null;
+  return [
+    'set -e',
+    ...displayShellPrefix(),
+    'command -v xdotool >/dev/null 2>&1 || { echo "xdotool not installed in instance image" >&2; exit 127; }',
+    ...(expectedB64
+      ? [
+          'command -v xclip >/dev/null 2>&1 || { echo "xclip not installed in instance image" >&2; exit 127; }',
+          ...waitClipboardTextShell(expectedB64, {
+            attempts: 1,
+            readTimeout: '0.03s',
+            sleep: '0',
+          }),
+        ]
+      : []),
+    ...remoteClickShell(xRatio, yRatio),
     'xdotool key --clearmodifiers ctrl+v',
   ].join('; ');
+}
+
+export async function pasteClipboardInInstance(inst: Instance, xRatio: number, yRatio: number, expectedText?: string): Promise<void> {
+  const cmd = buildPasteClipboardInInstanceCommand(xRatio, yRatio, expectedText);
+  await execCapture(inst, ['bash', '-c', cmd]);
+}
+
+export function buildClickInInstanceCommand(xRatio: number, yRatio: number): string {
+  return [
+    'set -e',
+    ...displayShellPrefix(),
+    'command -v xdotool >/dev/null 2>&1 || { echo "xdotool not installed in instance image" >&2; exit 127; }',
+    ...remoteClickShell(xRatio, yRatio),
+  ].join('; ');
+}
+
+export async function clickInInstance(inst: Instance, xRatio: number, yRatio: number): Promise<void> {
+  const cmd = buildClickInInstanceCommand(xRatio, yRatio);
   await execCapture(inst, ['bash', '-c', cmd]);
 }
 

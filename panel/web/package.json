@@ -6,7 +6,8 @@
     "icons": "node scripts/gen-icons.mjs",
     "dev": "vite",
     "build": "npm run icons && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "tsx --test src/*.test.ts"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -14,9 +15,11 @@
     "react-router-dom": "^6.26.2"
   },
   "devDependencies": {
+    "@types/node": "^25.9.3",
     "@types/react": "^18.3.10",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "tsx": "^4.22.4",
     "typescript": "^5.6.2",
     "vite": "^5.4.8",
     "vite-plugin-pwa": "^0.20.5"
