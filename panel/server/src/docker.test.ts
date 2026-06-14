@@ -72,6 +72,13 @@ test('typing command starts a short-lived clipboard owner before pasting', () =>
   assert.ok(cmd.indexOf('clip_pid="$!"') < cmd.indexOf('xdotool key --clearmodifiers ctrl+v'));
 });
 
+test('typing command does not add a fixed delay after pasting', () => {
+  const cmd = buildTypeInInstanceCommand('快');
+
+  assertValidBash(cmd);
+  assert.doesNotMatch(cmd, /sleep 0\.25/);
+});
+
 test('focused paste command clicks the target point before sending paste', () => {
   const cmd = buildPasteClipboardInInstanceCommand(0.5, 0.8);
 

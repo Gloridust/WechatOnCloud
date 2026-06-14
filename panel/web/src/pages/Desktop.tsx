@@ -30,6 +30,7 @@ import {
   imeProxyShouldPreClickRemoteFocus,
   imeProxyShouldProbeOnFocusActivation,
   imeProxyShouldSkipDuplicateActivation,
+  imeProxyShouldFocus,
 } from '../imeProxy';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
@@ -384,7 +385,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               clientY: point.clientY,
               at: now,
             };
-          } else {
+          } else if (!imeProxyMobile) {
             blurImeProxy();
           }
         }
@@ -508,10 +509,6 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
 
   // 同源 iframe：把键盘焦点交给 VNC，帮助宿主机输入法把合成的字送进去
   const focusFrame = () => {
-    if (imeProxyEnabled) {
-      focusImeProxy();
-      return;
-    }
     try {
       frameRef.current?.focus();
       frameRef.current?.contentWindow?.focus();
@@ -676,8 +673,16 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   );
 
   function focusImeProxy() {
-    if (!imeProxyEnabled || !showVnc || !frameLoaded) return;
-    if (control && !control.free && !control.mine) return;
+    if (
+      !imeProxyShouldFocus({
+        enabled: imeProxyEnabled,
+        showVnc,
+        frameLoaded,
+        blockedByControl: !!(control && !control.free && !control.mine),
+        hasRemoteFocus: !!imeRemoteFocus.current,
+      })
+    )
+      return;
     const ta = imeProxyRef.current;
     if (!ta) return;
     imeProxyActivitySeq.current++;
@@ -1003,10 +1008,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
         </div>
       ) : (
         <div className="iv-stage iv-stage--vnc">
-          <div
-            className="iv-canvas"
-            onMouseDown={() => window.setTimeout(focusImeProxy, 0)}
-          >
+          <div className="iv-canvas">
             <iframe
               key={`${id}:${vncNonce}`}
               ref={frameRef}
@@ -1018,7 +1020,6 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 setFrameLoaded(true);
                 setTimeout(() => {
                   focusFrame(); // 加载完把键盘焦点交给 VNC
-                  window.setTimeout(focusImeProxy, 0);
                   injectVncStyle(); // 让原生控制条在深色背景下可见
                   // 注意：不再调用 patchVncIme —— enable_ime 已关；中文由透明输入代理承接，
                   // 上屏后通过剪贴板 + Ctrl+V 进微信，输入条只作为兜底。

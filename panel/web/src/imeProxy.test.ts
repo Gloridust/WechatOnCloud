@@ -18,6 +18,7 @@ import {
   imeProxyClassName,
   imeProxyMobileViewportPosition,
   imeProxyPositionFromFrameClick,
+  imeProxyShouldFocus,
   imeProxyShouldApplySwitchCleanup,
   imeProxyShortcutKey,
   imeProxyShouldProbeOnFocusActivation,
@@ -2064,5 +2065,28 @@ test('marks proxy active after focusing the remote input area', () => {
   assert.equal(
     imeProxyClassName({ mobile: true, typing: false, active: true }),
     'iv-ime-proxy mobile active',
+  );
+});
+
+test('does not focus the proxy before a remote input area is activated', () => {
+  assert.equal(
+    imeProxyShouldFocus({
+      enabled: true,
+      showVnc: true,
+      frameLoaded: true,
+      blockedByControl: false,
+      hasRemoteFocus: false,
+    }),
+    false,
+  );
+  assert.equal(
+    imeProxyShouldFocus({
+      enabled: true,
+      showVnc: true,
+      frameLoaded: true,
+      blockedByControl: false,
+      hasRemoteFocus: true,
+    }),
+    true,
   );
 });

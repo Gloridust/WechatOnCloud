@@ -733,6 +733,24 @@ export function imeProxyShouldProbeOnFocusActivation(input: { mobile: boolean })
   return false;
 }
 
+export interface ImeProxyFocusInput {
+  enabled: boolean;
+  showVnc: boolean;
+  frameLoaded: boolean;
+  blockedByControl: boolean;
+  hasRemoteFocus: boolean;
+}
+
+export function imeProxyShouldFocus(input: ImeProxyFocusInput): boolean {
+  return (
+    input.enabled &&
+    input.showVnc &&
+    input.frameLoaded &&
+    !input.blockedByControl &&
+    input.hasRemoteFocus
+  );
+}
+
 export function imeProxyShouldApplySwitchCleanup(input: {
   alive: boolean;
   startedSeq: number;

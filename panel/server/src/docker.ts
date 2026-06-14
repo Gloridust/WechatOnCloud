@@ -629,7 +629,6 @@ export function buildTypeInInstanceCommand(text: string, focus?: TypeInInstanceF
     ...(focus ? remoteClickShell(focus.xRatio, focus.yRatio) : []),
     ...writeClipboardOnceShell(b64),
     'xdotool key --clearmodifiers ctrl+v',
-    'sleep 0.25',
     'kill "$clip_pid" 2>/dev/null || true',
     'wait "$clip_pid" 2>/dev/null || true',
   ].join('; ');
