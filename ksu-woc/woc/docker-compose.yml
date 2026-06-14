@@ -1,0 +1,30 @@
+# WechatOnCloud —— 面板为唯一服务；微信实例由面板按需动态创建（docker run）。
+# 此文件用于 KSU 模块部署，与仓库根 docker-compose.yml 等价。
+services:
+  panel:
+    image: ${WOC_IMAGE_PREFIX:-docker.io/gloridust}/woc-panel:${WOC_VERSION:-latest}
+    container_name: woc-panel
+    environment:
+      - PORT=8080
+      - WOC_WECHAT_IMAGE=${WOC_IMAGE_PREFIX:-docker.io/gloridust}/wechat-on-cloud:${WOC_VERSION:-latest}
+      - PUID=${WOC_PUID:-1000}
+      - PGID=${WOC_PGID:-1000}
+      - TZ=${WOC_TZ:-Asia/Shanghai}
+      - WOC_VIDEO_DEVICES=${WOC_VIDEO_DEVICES:-}
+      - WOC_ENABLE_GPU=${WOC_ENABLE_GPU:-}
+      - WOC_INSTANCE_MEM_GB=${WOC_INSTANCE_MEM_GB:-}
+      - WOC_INSTANCE_MEM_SOFT_MB=${WOC_INSTANCE_MEM_SOFT_MB:-1500}
+      - WOC_INSTANCE_MEM_HARD_MB=${WOC_INSTANCE_MEM_HARD_MB:-2500}
+      - WOC_WATCHDOG_INTERVAL_SEC=${WOC_WATCHDOG_INTERVAL_SEC:-300}
+      - WOC_SPOOF_OS=${WOC_SPOOF_OS:-1}
+      - PANEL_ADMIN_USER=${WOC_USER:-admin}
+      - PANEL_ADMIN_PASSWORD=${WOC_PASSWORD:-wechat}
+      - PANEL_DATA=/data/accounts.json
+      - PANEL_ALLOWED_HOSTS=${PANEL_ALLOWED_HOSTS:-}
+    volumes:
+      - ./data-panel:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /dev:/host-dev:ro
+    ports:
+      - "${WOC_HTTP_PORT:-36080}:8080"
+    restart: unless-stopped

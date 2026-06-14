@@ -1,0 +1,6 @@
+id=woc-docker
+name=云微 WechatOnCloud - Docker 运行环境
+version=v1.0.0
+versionCode=10000
+author=Gloridust
+description=为 WechatOnCloud（云微）安装 Docker 运行环境，包含 Docker Engine、Docker Compose、iptables、cgroup 工具及所需内核模块。安装后自动启动 Docker 守护进程并部署云微面板。
