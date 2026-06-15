@@ -352,6 +352,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       if (document.visibilityState === 'hidden') {
         hiddenAt = Date.now();
       } else if (hiddenAt && Date.now() - hiddenAt >= RESUME_RELOAD_AFTER_MS) {
+        if (id) api.clientLog(id, '回前台（离开较久）→ 整页重连');
         window.location.reload();
       } else {
         hiddenAt = 0;
@@ -359,27 +360,42 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
-  }, [showVnc]);
+  }, [showVnc, id]);
 
-  // VNC 连接健康监测 + 自动恢复。kasmweb 会在 iframe 的 <html> 上打连接态 class（noVNC_connected /
-  // noVNC_connecting / noVNC_reconnecting / noVNC_disconnected），同源 iframe 可直接读，可靠。
-  // iframe 已加载、但 VNC 持续 ~15s 不在 connected（卡在"正在连接"、或 noVNC 自动重连反复失败）→ 整页
-  // 重载干净重连，不让用户被晾在"正在连接…超时…无响应"。sessionStorage 限流：2 分钟内最多自动重连 2 次，
-  // 避免实例服务端真卡死时陷入无限重载（那种情况需重启实例，下面会停手）。
+  // VNC 连接健康监测 + 自动恢复 + 客户端连接日志。
+  // kasmweb 在 iframe 的 <html> 上打连接态 class（noVNC_connected/connecting/reconnecting/disconnected），
+  // 同源可靠读取。状态变化与动作都回传服务端（[client] 日志），与服务端 [vnc] 日志对齐便于排查。
+  // 要点：刚创建/重启的实例 KasmVNC 需约 10-15s 预热，期间 noVNC 会反复"connecting"——故阈值放宽到 30s，
+  // 先让预热 + noVNC 自带重连自行连上，不过早打断；持续连不上才整页重连，再不行才请求重启（都限流）。
   useEffect(() => {
     if (!showVnc || !frameLoaded || !id) return;
     const KEY = 'woc_vncReload_' + id;
+    const STUCK_MS = 30000;
     let badSince = 0;
+    let lastState = '';
     const t = window.setInterval(() => {
-      let connected: boolean | null = null;
+      let state = '';
       try {
-        const html = frameRef.current?.contentDocument?.documentElement;
-        if (html) connected = html.classList.contains('noVNC_connected');
+        const c = frameRef.current?.contentDocument?.documentElement?.classList;
+        if (!c) return;
+        state = c.contains('noVNC_connected')
+          ? 'connected'
+          : c.contains('noVNC_reconnecting')
+            ? 'reconnecting'
+            : c.contains('noVNC_connecting')
+              ? 'connecting'
+              : c.contains('noVNC_disconnected')
+                ? 'disconnected'
+                : 'other';
       } catch {
         return; // 理论上同源；偶发不可读则跳过本次
       }
-      if (connected === null) return;
-      if (connected) {
+      if (!state) return;
+      if (state !== lastState) {
+        lastState = state;
+        api.clientLog(id, `VNC状态→${state}`);
+      }
+      if (state === 'connected') {
         badSince = 0;
         try {
           sessionStorage.removeItem(KEY);
@@ -392,7 +408,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
         badSince = Date.now();
         return;
       }
-      if (Date.now() - badSince < 15000) return;
+      if (Date.now() - badSince < STUCK_MS) return; // 给预热 + noVNC 自带重连足够时间，别过早打断
       badSince = 0;
       let rec = { n: 0, t: 0 };
       try {
@@ -400,10 +416,9 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       } catch {
         /* ignore */
       }
-      if (Date.now() - rec.t > 120000) rec.n = 0; // 出 2 分钟窗口重置计数
+      if (Date.now() - rec.t > 180000) rec.n = 0; // 出 3 分钟窗口重置计数
       if (rec.n >= 2) {
-        // 干净重连 2 次仍连不上 → 多半是实例 KasmVNC 的 ws 接收器卡死（刷新/重启面板都无效，只有重启容器能恢复）。
-        // 请求面板重启该实例自愈；客户端侧也 3 分钟限一次，避免反复触发。重启后整页重载连到全新容器。
+        // 整页重连 2 次仍连不上 → 多半是实例 KasmVNC 接收器卡死（刷新/重启面板无效，只有重启容器能恢复）。
         const HEAL_KEY = 'woc_vncHeal_' + id;
         let lastHeal = 0;
         try {
@@ -417,6 +432,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
         } catch {
           /* ignore */
         }
+        api.clientLog(id, '持续连不上（2 次整页重连无效）→ 请求重启实例自愈');
         api
           .healInstance(id)
           .catch(() => {})
@@ -430,6 +446,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       } catch {
         /* ignore */
       }
+      api.clientLog(id, `卡住 ${Math.round(STUCK_MS / 1000)}s（状态=${lastState}）→ 整页重连（第 ${rec.n} 次）`);
       window.location.reload();
     }, 3000);
     return () => window.clearInterval(t);
@@ -753,6 +770,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             allow="clipboard-read; clipboard-write; microphone; camera; autoplay"
             onLoad={() => {
               setFrameLoaded(true);
+              if (id) api.clientLog(id, 'iframe 已加载（noVNC 页面就绪，开始连 VNC）');
               setTimeout(() => {
                 focusFrame(); // 加载完把键盘焦点交给 VNC
                 injectVncStyle(); // 让原生控制条在深色背景下可见

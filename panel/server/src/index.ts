@@ -311,6 +311,19 @@ app.post('/api/instances/:id/heal', async (req, reply) => {
   }
 });
 
+// 客户端连接日志：前端把 VNC 连接态/动作回传，记进实例持久日志（[client] 前缀），与 [vnc] 服务端日志对齐排查。
+app.post('/api/instances/:id/clientlog', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const msg = String((req.body as any)?.msg ?? '')
+    .replace(/[\r\n]+/g, ' ')
+    .slice(0, 200);
+  if (msg) appendInstanceLog(id, `[client] ${msg}（${u.username}）`);
+  return { ok: true };
+});
+
 // 新建实例（仅管理员）：生成凭据 + docker run + 分配访问账户
 app.post('/api/admin/instances', async (req, reply) => {
   const admin = requireAdmin(req, reply);
