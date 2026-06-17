@@ -1,5 +1,5 @@
 import { hostname } from 'node:os';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, mkdirSync } from 'node:fs';
 import { appendInstanceLog, deleteInstanceLog, appendPanelLog, readInstanceLog, readPanelLog, filterSince } from './logs.js';
 import http from 'node:http';
 import zlib from 'node:zlib';
@@ -11,6 +11,8 @@ const PUID = process.env.PUID || '1000';
 const PGID = process.env.PGID || '1000';
 const TZ = process.env.TZ || 'Asia/Shanghai';
 const SHM_SIZE = 1024 * 1024 * 1024; // 1gb
+
+const DATA_ROOT = (process.env.WOC_DATA_ROOT || '').replace(/\/+$/, '');
 
 // 默认关闭 KasmVNC 的 GPU 硬件编码（baseimage 检测到 /dev/dri/renderD* 时会给 Xvnc 加 -hw3d）：
 // 在 WSL2 / 虚拟 GPU 环境下该路径会导致 Xvnc 内存持续膨胀（实测反馈 21h 涨到 ~9GB）。
@@ -148,6 +150,11 @@ async function ensureImage(): Promise<void> {
 export async function runInstance(inst: Instance): Promise<void> {
   const net = await ensureNetwork();
   await ensureImage();
+  // 如果配置了自定义数据根目录，确保宿主目录存在
+  if (DATA_ROOT) {
+    const hostDataDir = `${DATA_ROOT}/${inst.volumeName}`;
+    mkdirSync(hostDataDir, { recursive: true });
+  }
   try {
     const existing = docker.getContainer(inst.containerName);
     await existing.inspect();
@@ -160,7 +167,7 @@ export async function runInstance(inst: Instance): Promise<void> {
   // 摄像头设备（探测不到则为空数组 → 仅摄像头不可用，音频/麦克风照常）
   const vids = videoDevices();
   const hostConfig: Docker.HostConfig = {
-    Binds: [`${inst.volumeName}:/config`],
+    Binds: [DATA_ROOT ? `${DATA_ROOT}/${inst.volumeName}:/config` : `${inst.volumeName}:/config`],
     NetworkMode: net || undefined,
     SecurityOpt: ['seccomp=unconfined'],
     ShmSize: SHM_SIZE,
@@ -268,7 +275,7 @@ export async function removeInstance(inst: Instance, purgeVolume: boolean): Prom
   } catch {
     /* 容器可能已不存在 */
   }
-  if (purgeVolume) {
+  if (purgeVolume && !DATA_ROOT) {
     try {
       await docker.getVolume(inst.volumeName).remove({ force: true } as any);
     } catch {
