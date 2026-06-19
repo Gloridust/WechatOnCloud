@@ -69,7 +69,7 @@ import {
   volDownloadFile,
   volBackupStream,
   volRestoreArchive,
-} from './docker.js';
+} from './runtime/index.js';
 import { createSession, getSession, destroySession, destroyUserSessions } from './sessions.js';
 import { parseHost, parseAllowedHosts, isRequestHostAllowed } from './host-guard.js';
 import { CURRENT_VERSION, versionInfo, ensureChecked, checkForUpdate, startUpdateChecker } from './version.js';
