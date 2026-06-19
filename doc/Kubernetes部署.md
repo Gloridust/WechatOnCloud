@@ -10,11 +10,16 @@ Docker / Compose 部署完全不受影响；本文只覆盖 Kubernetes 模式。
 ## 快速部署
 
 ```bash
+# （推荐）先设置自己的管理员口令；省略则回退到默认 admin/wechat 并强制改密
+kubectl create namespace wechat-on-cloud
+kubectl -n wechat-on-cloud create secret generic woc-panel-admin \
+  --from-literal=username=admin --from-literal=password='你的强口令'
+
 kubectl apply -k k8s
 kubectl -n wechat-on-cloud port-forward svc/woc-panel 8080:8080
 ```
 
-访问 `http://127.0.0.1:8080`，默认管理员为 `admin / wechat`。生产使用前必须改密码，或者在 `k8s/deployment.yaml` 中修改 `PANEL_ADMIN_PASSWORD` 后再部署。
+访问 `http://127.0.0.1:8080`。管理员账号来自可选 Secret `woc-panel-admin`（模板见 `k8s/secret.example.yaml`）：未创建该 Secret 时，面板回退到默认 `admin / wechat` 并在首次登录强制改密——生产环境务必创建 Secret 或尽快改密。`kubectl apply -k k8s` 不会应用该 Secret（不在 kustomization 内），避免把口令提交进源码。
 
 ## 资源模型
 
@@ -24,6 +29,7 @@ kubectl -n wechat-on-cloud port-forward svc/woc-panel 8080:8080
 - Service：`woc-panel`
 - PVC：`woc-panel-data`，保存账号、实例登记、日志
 - ServiceAccount：`woc-panel`（绑定的 Role 仅在本 namespace 内可管理 pods / pods/log / pods/exec / services / persistentvolumeclaims）
+- Secret（可选）：`woc-panel-admin`，设置首个管理员账号 / 密码
 
 每个实例：
 

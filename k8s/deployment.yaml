@@ -36,10 +36,22 @@ spec:
               value: docker.io/gloridust/wechat-on-cloud:latest
             - name: PANEL_DATA
               value: /data/accounts.json
+            # First-admin credentials come from an optional Secret so no password is baked into this
+            # committed manifest. Create k8s/secret.yaml (see secret.example.yaml) before deploying.
+            # If the Secret is absent the panel falls back to admin/wechat and forces a password change
+            # on first login — change it immediately.
             - name: PANEL_ADMIN_USER
-              value: admin
+              valueFrom:
+                secretKeyRef:
+                  name: woc-panel-admin
+                  key: username
+                  optional: true
             - name: PANEL_ADMIN_PASSWORD
-              value: wechat
+              valueFrom:
+                secretKeyRef:
+                  name: woc-panel-admin
+                  key: password
+                  optional: true
             - name: TZ
               value: Asia/Shanghai
             - name: PUID

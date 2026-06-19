@@ -1,12 +1,11 @@
 import http from 'node:http';
 import zlib from 'node:zlib';
-import { Readable } from 'node:stream';
 import * as k8s from '@kubernetes/client-node';
 import { appendInstanceLog, deleteInstanceLog, filterSince, readInstanceLog, readPanelLog } from '../logs.js';
 import { instanceAppType, type Instance } from '../store.js';
 import type { RuntimeDriver, RuntimeState, TransferFile, VolEntry, WechatStatus } from './types.js';
 import { loadKubernetesConfig, parseKubernetesRuntimeConfig } from './kubernetes-config.js';
-import { buildInstancePod, buildInstancePvc, buildInstanceService } from './kubernetes-manifests.js';
+import { INSTANCE_CONTAINER_NAME, buildInstancePod, buildInstancePvc, buildInstanceService } from './kubernetes-manifests.js';
 import {
   KubernetesExecHelper,
   TRANSFER_DIR,
@@ -24,6 +23,12 @@ const DEFAULT_STATUS: WechatStatus = { phase: 'idle', percent: 0, installed: fal
 export function isNotFoundError(e: any): boolean {
   return e?.response?.statusCode === 404 || e?.statusCode === 404 || e?.code === 404;
 }
+
+function isConflictError(e: any): boolean {
+  return e?.response?.statusCode === 409 || e?.statusCode === 409 || e?.code === 409;
+}
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export function podPhaseToRuntimeState(phase: string | undefined): RuntimeState {
   return phase === 'Running' ? 'running' : 'stopped';
@@ -66,8 +71,9 @@ export class KubernetesRuntime implements RuntimeDriver {
   async runInstance(inst: Instance): Promise<void> {
     await this.ensurePvc(inst);
     await this.ensureService(inst);
+    await this.snapshotPodLog(inst);
     await this.deletePod(inst);
-    await this.core.createNamespacedPod({ namespace: this.cfg.namespace, body: buildInstancePod(inst, this.cfg) });
+    await this.createPod(inst);
     appendInstanceLog(inst.id, 'Pod 已启动');
   }
 
@@ -87,7 +93,12 @@ export class KubernetesRuntime implements RuntimeDriver {
   }
 
   async regenInstanceMachineId(inst: Instance): Promise<void> {
-    await this.exec.execCapture(inst, ['sh', '-c', 'test -f /custom-cont-init.d/00-woc-identity && echo yes || echo no']);
+    // Old images lack the identity hook, so a restart would NOT roll a new machine-id — reject loudly
+    // instead of silently no-op'ing (parity with the Docker runtime).
+    const hasHook = (await this.exec.execCapture(inst, ['sh', '-c', 'test -f /custom-cont-init.d/00-woc-identity && echo yes || echo no'])).trim();
+    if (hasHook !== 'yes') {
+      throw new Error('该实例运行的是旧镜像（无设备身份模块），请先「升级实例」后再重置设备 ID');
+    }
     await this.exec.execCapture(inst, ['sh', '-c', 'rm -f /config/.woc-machine-id']);
     await this.stopInstance(inst);
     await this.runInstance(inst);
@@ -186,7 +197,13 @@ export class KubernetesRuntime implements RuntimeDriver {
   async triggerWechat(inst: Instance, cmd: 'install' | 'update'): Promise<void> {
     const at = instanceAppType(inst);
     const action = cmd === 'update' ? 'update' : 'install';
-    await this.exec.execCapture(inst, ['bash', '-c', `if [ -x /woc/app-ctl.sh ]; then /woc/app-ctl.sh ${at} ${action}; else /woc/wechat-ctl.sh ${action}; fi`]);
+    // Docker fires install/update with a detached exec and returns immediately while it runs (the UI
+    // polls wechatStatus for progress). Mirror that: background the work with detached stdio and exit
+    // the foreground shell so the exec session closes right away, instead of blocking the HTTP request
+    // for the whole multi-minute install (which would hang or time out). at/action come from fixed
+    // enums, so the interpolation is safe.
+    const inner = `if [ -x /woc/app-ctl.sh ]; then /woc/app-ctl.sh ${at} ${action}; else /woc/wechat-ctl.sh ${action}; fi`;
+    await this.exec.execCapture(inst, ['sh', '-c', `nohup sh -c '${inner}' >/dev/null 2>&1 </dev/null & exit 0`]);
   }
 
   async wechatStatus(inst: Instance): Promise<WechatStatus> {
@@ -243,7 +260,7 @@ export class KubernetesRuntime implements RuntimeDriver {
   }
 
   async instanceLogs(inst: Instance, tail = 600): Promise<string> {
-    return await this.core.readNamespacedPodLog({ namespace: this.cfg.namespace, name: inst.containerName, container: 'instance', tailLines: tail });
+    return await this.core.readNamespacedPodLog({ namespace: this.cfg.namespace, name: inst.containerName, container: INSTANCE_CONTAINER_NAME, tailLines: tail, timestamps: true });
   }
 
   async typeInInstance(inst: Instance, text: string): Promise<void> {
@@ -323,8 +340,12 @@ export class KubernetesRuntime implements RuntimeDriver {
   }
 
   async volBackupStream(inst: Instance): Promise<NodeJS.ReadableStream> {
-    const tar = await this.exec.getTar(inst, VOL_ROOT);
-    return Readable.from(zlib.gzipSync(tar));
+    // Stream the tar straight through gzip to the HTTP response instead of buffering the whole
+    // /config volume (and its gzip) in panel memory — mirrors Docker's getArchive().pipe(createGzip()).
+    const tarStream = await this.exec.getTarStream(inst, VOL_ROOT);
+    const gzip = zlib.createGzip();
+    tarStream.on('error', (e) => gzip.destroy(e));
+    return tarStream.pipe(gzip);
   }
 
   async volRestoreArchive(inst: Instance, archive: Buffer): Promise<void> {
@@ -345,18 +366,72 @@ export class KubernetesRuntime implements RuntimeDriver {
   }
 
   private async ensureService(inst: Instance): Promise<void> {
-    const body = buildInstanceService(inst, this.cfg);
     try {
+      // The selector/ports never change between rebuilds, so an existing Service is left as-is.
+      // Replacing it with a fresh body would clear the immutable spec.clusterIP → rejected with 422.
       await this.core.readNamespacedService({ namespace: this.cfg.namespace, name: inst.containerName });
-      await this.core.replaceNamespacedService({ namespace: this.cfg.namespace, name: inst.containerName, body });
+      return;
     } catch (e) {
       if (!isNotFoundError(e)) throw e;
-      await this.core.createNamespacedService({ namespace: this.cfg.namespace, body });
+    }
+    await this.core.createNamespacedService({ namespace: this.cfg.namespace, body: buildInstanceService(inst, this.cfg) });
+  }
+
+  private async createPod(inst: Instance): Promise<void> {
+    const body = buildInstancePod(inst, this.cfg);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.core.createNamespacedPod({ namespace: this.cfg.namespace, body });
+        return;
+      } catch (e) {
+        // A prior Pod with the same name may still be Terminating; wait for it to disappear and retry.
+        if (isConflictError(e) && attempt < 30) {
+          await this.waitForPodGone(inst.containerName, 1000);
+          continue;
+        }
+        throw e;
+      }
     }
   }
 
   private async deletePod(inst: Instance): Promise<void> {
-    await ignoreNotFound(() => this.core.deleteNamespacedPod({ namespace: this.cfg.namespace, name: inst.containerName, gracePeriodSeconds: 5 }));
+    try {
+      // gracePeriodSeconds: 0 force-deletes immediately (parity with Docker's remove({ force: true })).
+      await this.core.deleteNamespacedPod({ namespace: this.cfg.namespace, name: inst.containerName, gracePeriodSeconds: 0 });
+    } catch (e) {
+      if (isNotFoundError(e)) return;
+      throw e;
+    }
+    // Deletion is asynchronous — the API accepts it while the Pod lingers in Terminating. Wait until it
+    // is actually gone so a same-named create on rebuild/upgrade/self-heal does not hit a 409 conflict.
+    await this.waitForPodGone(inst.containerName);
+  }
+
+  private async waitForPodGone(name: string, timeoutMs = 30000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      try {
+        await this.core.readNamespacedPod({ namespace: this.cfg.namespace, name });
+      } catch (e) {
+        if (isNotFoundError(e)) return;
+        throw e;
+      }
+      if (Date.now() >= deadline) return;
+      await delay(300);
+    }
+  }
+
+  private async snapshotPodLog(inst: Instance): Promise<void> {
+    // Persist the dying Pod's last lines before a rebuild so "上次为何停/崩" survives (parity with
+    // Docker's snapshotContainerLog). Best-effort: on first create there is no Pod yet.
+    try {
+      const logs = (await this.instanceLogs(inst, 200)).trimEnd();
+      if (logs) {
+        appendInstanceLog(inst.id, `──── 容器重建（重启/升级/自愈），保留上一容器最后日志 ────\n${logs}\n──── 上一容器日志快照结束 ────`);
+      }
+    } catch {
+      /* 首次创建时尚无 Pod，忽略 */
+    }
   }
 
   private async hasPvcOrService(inst: Instance): Promise<boolean> {

@@ -7,6 +7,17 @@ import { INSTANCE_CONTAINER_NAME } from './kubernetes-manifests.js';
 export const TRANSFER_DIR = '/config/Desktop';
 export const VOL_ROOT = '/config';
 
+// Docker runs every in-container exec as the unprivileged app user ('abc', PUID 1000) via dockerode's
+// `User` option. The Kubernetes exec API has no user parameter, so wrap each command to drop privileges
+// with the linuxserver baseimage's s6-setuidgid. The `command -v` guard means a missing helper degrades
+// to running as-is (root) rather than failing every exec. Using `exec` keeps the command's own exit code.
+export const EXEC_USER = 'abc';
+const DROP_PRIV_PROLOGUE = `if command -v s6-setuidgid >/dev/null 2>&1; then exec s6-setuidgid ${EXEC_USER} "$@"; else exec "$@"; fi`;
+
+export function asAppUser(command: string[]): string[] {
+  return ['sh', '-c', DROP_PRIV_PROLOGUE, '--', ...command];
+}
+
 export function safeName(name: string): boolean {
   return !!name && name.length <= 200 && !name.includes('/') && !name.includes('\0') && name !== '.' && name !== '..';
 }
@@ -98,7 +109,7 @@ export class KubernetesExecHelper {
       this.namespace,
       inst.containerName,
       INSTANCE_CONTAINER_NAME,
-      command,
+      asAppUser(command),
       stdout,
       stderr,
       input,
@@ -140,7 +151,7 @@ export class KubernetesExecHelper {
       this.namespace,
       inst.containerName,
       INSTANCE_CONTAINER_NAME,
-      ['tar', '-cf', '-', path],
+      asAppUser(['tar', '-cf', '-', path]),
       stdout,
       stderr,
       null,
@@ -155,5 +166,38 @@ export class KubernetesExecHelper {
     });
     if (exitCode !== 0) throw new Error((err || `tar 读取失败，退出码 ${exitCode}`).trim());
     return Buffer.concat(chunks);
+  }
+
+  // Streaming counterpart to getTar: the tar bytes flow straight to the returned stream instead of
+  // being buffered into memory. Used for whole-volume backup, which can be multiple GB.
+  async getTarStream(inst: Instance, path: string): Promise<NodeJS.ReadableStream> {
+    const stdout = new PassThrough();
+    let err = '';
+    let exitCode = 0;
+    const stderr = new Writable({
+      write(chunk, _enc, cb) {
+        err += Buffer.from(chunk).toString('utf8');
+        cb();
+      },
+    });
+    const ws = await this.exec.exec(
+      this.namespace,
+      inst.containerName,
+      INSTANCE_CONTAINER_NAME,
+      asAppUser(['tar', '-cf', '-', path]),
+      stdout,
+      stderr,
+      null,
+      false,
+      (status) => {
+        exitCode = Number((status as any)?.details?.causes?.find((c: any) => c.reason === 'ExitCode')?.message || 0);
+      },
+    );
+    ws.on('close', () => {
+      if (exitCode !== 0) stdout.destroy(new Error((err || `tar 读取失败，退出码 ${exitCode}`).trim()));
+      else if (!stdout.writableEnded) stdout.end();
+    });
+    ws.on('error', (e) => stdout.destroy(e as Error));
+    return stdout;
   }
 }
