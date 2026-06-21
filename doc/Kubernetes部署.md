@@ -28,7 +28,7 @@ kubectl -n wechat-on-cloud port-forward svc/woc-panel 8080:8080
 - Deployment：`woc-panel`
 - Service：`woc-panel`
 - PVC：`woc-panel-data`，保存账号、实例登记、日志
-- ServiceAccount：`woc-panel`（绑定的 Role 仅在本 namespace 内可管理 pods / pods/log / pods/exec / services / persistentvolumeclaims）
+- ServiceAccount：`woc-panel`（绑定的 Role 仅在本 namespace 内可管理 pods / pods/log / pods/exec / services / persistentvolumeclaims，以及 apps/statefulsets）
 - Secret（可选）：`woc-panel-admin`，设置首个管理员账号 / 密码
 
 每个实例：
