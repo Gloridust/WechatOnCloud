@@ -140,15 +140,36 @@ function DiagnosticsSection({ runtimeKind }: { runtimeKind: 'docker' | 'kubernet
 
 // 「关于」：显示真实构建版本号 + 检测新版（后台已每 6h 查 Docker Hub/GHCR；这里读缓存并可手动重查）。
 function AboutSection({ isAdmin }: { isAdmin: boolean }) {
-  const { toast } = useUI();
+  const { toast, confirm } = useUI();
   const [info, setInfo] = useState<VersionInfo | null>(null);
   const [checking, setChecking] = useState(false);
-  const [runtimeKind, setRuntimeKind] = useState<'docker' | 'kubernetes'>('docker');
+  const [runtimeKind, setRuntimeKind] = useState<'docker' | 'kubernetes' | null>(null);
+  const [updating, setUpdating] = useState(false);
 
   useEffect(() => {
     api.getVersion().then(setInfo).catch(() => {});
     api.getRuntime().then((r) => setRuntimeKind(r.runtime)).catch(() => {});
   }, []);
+
+  // 一键更新面板：拉新镜像 + 派生 helper 容器重建 woc-panel（数据保留，带失败回滚）。
+  // 触发后面板会被重建、本连接短暂中断，约 20s 后自动刷新到新版本。
+  const selfUpdate = async () => {
+    const ok = await confirm({
+      title: '一键更新面板？',
+      body: `将拉取最新镜像并重建面板容器（数据/登录保留），约十几秒、期间面板会短暂重启，完成后自动刷新。${info?.latest ? `\n目标版本：${info.latest}` : ''}`,
+      confirmText: '更新',
+    });
+    if (!ok) return;
+    setUpdating(true);
+    try {
+      const r = await api.selfUpdatePanel();
+      toast(r.message || '已开始更新，面板将重启，请稍候…', 'ok');
+      window.setTimeout(() => window.location.reload(), 25000); // 等新面板起来后自动刷新
+    } catch (e: any) {
+      toast(e.message || '更新失败', 'error');
+      setUpdating(false);
+    }
+  };
 
   // 当前版本是否为正式发布版（语义化 vX.Y.Z）。dev / dev-<sha> 等本地构建无法与发布版比较，
   // 既不显示「已是最新」也不显示红点，只把最新发布版作为信息展示。
@@ -201,21 +222,28 @@ function AboutSection({ isAdmin }: { isAdmin: boolean }) {
               <>
                 在集群中更新面板 Deployment 的镜像并重新部署升级面板；各实例镜像可在「管理 → 升级」单独重建。
               </>
+            ) : runtimeKind === 'docker' ? (
+              isAdmin
+                ? '点「一键更新面板」即可自动拉新镜像并重建面板容器（数据/登录保留，约十几秒、期间会短暂重启，完成后自动刷新）。各实例镜像可在「管理 → 升级」单独更新。'
+                : '面板有新版本，请联系管理员更新。'
             ) : (
-              <>
-                在宿主执行 <code>docker compose pull &amp;&amp; docker compose up -d</code> 升级面板；各实例镜像可在「管理 → 升级」单独更新。
-              </>
+              '面板有新版本，正在获取运行时信息。'
             )}
           </div>
         )}
         <div className="settings-actions">
+          {info?.hasUpdate && isAdmin && runtimeKind === 'docker' && (
+            <button className="btn btn-primary s-btn" disabled={updating} onClick={selfUpdate}>
+              {updating ? '更新中…请稍候' : '一键更新面板'}
+            </button>
+          )}
           {info?.hasUpdate && (
-            <a className="btn btn-primary s-btn" href={RELEASES_URL + '/latest'} target="_blank" rel="noreferrer">
-              查看新版
+            <a className="btn-text" href={RELEASES_URL + '/latest'} target="_blank" rel="noreferrer">
+              查看新版 ›
             </a>
           )}
           {isAdmin && (
-            <button className="btn-text" disabled={checking} onClick={check}>
+            <button className="btn-text" disabled={checking || updating} onClick={check}>
               {checking ? '检查中…' : '检查更新'}
             </button>
           )}

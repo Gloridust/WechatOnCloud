@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "updater": "tsx src/updater-entry.ts",
     "test": "node --test --import tsx \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },

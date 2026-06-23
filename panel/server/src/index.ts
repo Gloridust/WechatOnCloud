@@ -29,6 +29,8 @@ import {
   setInstanceIcon,
   setInstanceUsers,
   publicInstance,
+  getDesktopDark,
+  setDesktopDark,
   APP_TYPES,
   type AppType,
   type User,
@@ -74,6 +76,7 @@ import {
 import { createSession, getSession, destroySession, destroyUserSessions } from './sessions.js';
 import { parseHost, parseAllowedHosts, isRequestHostAllowed } from './host-guard.js';
 import { CURRENT_VERSION, versionInfo, ensureChecked, checkForUpdate, startUpdateChecker } from './version.js';
+import { triggerSelfUpdate } from './self-update.js';
 import { appendInstanceLog, readInstanceLog, appendPanelLog, readPanelLog, pruneOldLogs, filterSince, rangeToMs, DIAG_RANGES } from './logs.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -200,6 +203,36 @@ app.get('/api/runtime', async (req, reply) => {
 app.post('/api/admin/version/check', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   return await checkForUpdate();
+});
+
+// 一键更新面板自身（管理员）：拉新镜像 → 派生 helper 容器重建 woc-panel（带健康检查 + 失败回滚）。
+// 返回后面板会在十几秒内被 helper 重启，前端提示用户稍候刷新。
+app.post('/api/admin/version/self-update', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  try {
+    const { target } = await triggerSelfUpdate();
+    return { ok: true, target, message: '已开始更新：面板将在十几秒内重启为新版本，请稍候刷新页面' };
+  } catch (e: any) {
+    appendPanelLog('ERROR', `面板自更新失败：${e?.message || e}`);
+    return reply.code(500).send({ error: '更新失败：' + (e?.message || e) });
+  }
+});
+
+// ---------- 实例桌面深色（与面板主题统一的那个开关）----------
+// 读取当前实例深色状态（任何登录用户可读，用于前端同步主题开关与实例的一致性）。
+app.get('/api/desktop-theme', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  return { dark: getDesktopDark() };
+});
+// 设置实例深色（管理员）。面板顶栏主题开关切到 深/浅 时调用：持久化即可。它作为浏览器(Chromium)实例
+// 启动时的明暗（经 envList → WOC_DARK 下发，autostart 据此加 --force-dark-mode），故**重启实例后生效**，
+// 不做在线切换（极简容器内无稳定的桌面 portal，微信也不跟随，详见 docker/autostart 注释）。
+app.post('/api/admin/desktop-theme', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const dark = !!(req.body as any)?.dark;
+  setDesktopDark(dark);
+  appendPanelLog('INFO', `实例深色设为 ${dark ? '深色' : '浅色'}（浏览器实例重启后生效）`);
+  return { ok: true, dark };
 });
 
 // ---------- 自助改密 ----------

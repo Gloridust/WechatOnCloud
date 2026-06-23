@@ -59,9 +59,17 @@ export interface Instance {
   memHardLimitMB?: number;
 }
 
+// 面板级全局设置（持久化进 accounts.json）。
+export interface Settings {
+  // 实例桌面深色模式：由面板顶栏的主题开关统一控制（管理员）。true=实例内应用走深色。
+  // 既作为新建/重启实例的初始明暗（经容器环境 WOC_DARK 下发），也用于对运行中实例实时切换。
+  desktopDark?: boolean;
+}
+
 interface Data {
   users: User[];
   instances: Instance[];
+  settings?: Settings;
 }
 
 const FILE = process.env.PANEL_DATA || '/data/panel/accounts.json';
@@ -127,6 +135,20 @@ export function initStore() {
       console.log(`[store] 已重置用户 '${u.username}' 的密码（resetPassword 标记，密码=PANEL_ADMIN_PASSWORD 或默认 wechat）`);
     }
   }
+  persist();
+}
+
+// ---------- 全局设置 ----------
+export function getSettings(): Settings {
+  return data.settings || (data.settings = {});
+}
+
+export function getDesktopDark(): boolean {
+  return !!getSettings().desktopDark;
+}
+
+export function setDesktopDark(v: boolean) {
+  getSettings().desktopDark = !!v;
   persist();
 }
 

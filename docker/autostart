@@ -18,6 +18,16 @@ APP_TYPE="${WOC_APP_TYPE:-wechat}"
 . /woc/app-defs.sh
 woc_app_def "$APP_TYPE"
 
+# 深色模式（实例环境 WOC_DARK=1 时；由面板顶栏主题开关持久化、经容器环境下发，改后需重启实例生效）。
+# 仅浏览器(Chromium)：加 --force-dark-mode 让其 UI + 网页走深色——这是极简容器里实测唯一稳的办法。
+# 微信：内核虽是 Chromium 但不吃命令行参数，也不订阅桌面 portal 的 color-scheme 信号（实测 portal 方案在
+# 极简容器里 session 总线不稳、微信也不跟随），故本开关对微信无效；微信深色请在微信「设置→通用→深色模式」
+# 里手动选（设置随数据卷持久化）。
+if { [ "${WOC_DARK:-}" = "1" ] || [ "${WOC_DARK:-}" = "true" ]; } && [ "$APP_TYPE" = "chromium" ]; then
+    APP_LAUNCH="${APP_LAUNCH} --force-dark-mode --enable-features=WebContentsForceDark"
+    echo "[autostart] 浏览器深色已启用（--force-dark-mode）"
+fi
+
 # 防“最小化后丢失”：本桌面（openbox）无任务栏，窗口被最小化就无处恢复 → 黑屏。
 # 看守进程：每 2s 把“被最小化（不可见）”的顶层窗口重新激活，相当于禁用最小化。对任意应用通用。
 (

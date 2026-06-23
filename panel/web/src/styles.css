@@ -33,6 +33,36 @@
     rgba(255, 255, 255, 0.16) 38%,
     transparent 74%
   );
+  color-scheme: light;
+}
+
+/* ---------- 深色模式（牛奶布艺·暗）：base=亮蓝黑、surface 更高一档、阴影近纯黑、顶面高光极淡 ---------- */
+/* data-theme=dark 强制深色；data-theme=auto 跟随系统 prefers-color-scheme；data-theme=light 维持亮色。 */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --base: #14161c;
+  --surface: #23262f;
+  --trough: #0e0f14;
+  --shadow: 0 0 0;
+  --text: #e7eaef;
+  --muted: #969ca6;
+  --crease: 0 1px 3px rgba(0 0 0 / 0.55), 0 2px 10px rgba(0 0 0 / 0.45);
+  --crease-press: 0 1px 2px rgba(0 0 0 / 0.4), 0 1px 3px rgba(0 0 0 / 0.25);
+  --sheen: radial-gradient(ellipse at 50% 28%, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.02) 40%, transparent 75%);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme='auto'] {
+    color-scheme: dark;
+    --base: #14161c;
+    --surface: #23262f;
+    --trough: #0e0f14;
+    --shadow: 0 0 0;
+    --text: #e7eaef;
+    --muted: #969ca6;
+    --crease: 0 1px 3px rgba(0 0 0 / 0.55), 0 2px 10px rgba(0 0 0 / 0.45);
+    --crease-press: 0 1px 2px rgba(0 0 0 / 0.4), 0 1px 3px rgba(0 0 0 / 0.25);
+    --sheen: radial-gradient(ellipse at 50% 28%, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.02) 40%, transparent 75%);
+  }
 }
 
 * {
@@ -1607,6 +1637,32 @@ button {
   border-radius: 999px;
   cursor: pointer;
   box-shadow: var(--crease);
+}
+/* 主题切换：顶栏最右的图标按钮 */
+.theme-toggle {
+  margin-left: auto;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--muted);
+  border-radius: 10px;
+  transition:
+    background 0.15s,
+    color 0.15s,
+    transform 0.15s;
+}
+.theme-toggle:hover {
+  color: var(--text);
+  background: rgba(var(--shadow) / 0.06);
+}
+.theme-toggle:active {
+  transform: scale(0.94);
 }
 .ws-action:active {
   transform: scale(0.96);

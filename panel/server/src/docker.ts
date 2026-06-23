@@ -4,7 +4,7 @@ import { appendInstanceLog, deleteInstanceLog, appendPanelLog, readInstanceLog, 
 import http from 'node:http';
 import zlib from 'node:zlib';
 import Docker from 'dockerode';
-import { instanceAppType, type Instance } from './store.js';
+import { instanceAppType, getDesktopDark, type Instance } from './store.js';
 import { realisticHostname, realisticMac } from './identity.js';
 import { buildTarGz, tarSingleFile } from './tar.js';
 
@@ -98,6 +98,10 @@ function envList(inst: Instance): string[] {
   const appType = instanceAppType(inst);
   env.push(`WOC_APP_TYPE=${appType}`);
   if (appType === 'custom' && inst.customLaunch) env.push(`WOC_CUSTOM_LAUNCH=${inst.customLaunch}`);
+  // 深色模式：作为新实例启动时的初始明暗下发给 autostart（autostart 据此设 portal color-scheme，
+  // 微信等 Chromium 系应用即跟随系统深色）。开关由面板顶栏主题统一控制、持久化在 accounts.json，
+  // 运行中的实例则通过 setInstanceDark 实时切换（见下）。
+  if (getDesktopDark()) env.push('WOC_DARK=1');
   return env;
 }
 

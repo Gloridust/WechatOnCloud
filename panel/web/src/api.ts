@@ -128,6 +128,16 @@ export const api = {
   // 版本与更新检测
   getVersion: () => req<VersionInfo>('/api/version'),
   checkUpdate: () => req<VersionInfo>('/api/admin/version/check', { method: 'POST' }),
+  // 一键更新面板自身：拉新镜像 + 派生 helper 容器重建 woc-panel（带回滚）。返回后面板会重启。
+  selfUpdatePanel: () => req<{ ok: boolean; target: string; message: string }>('/api/admin/version/self-update', { method: 'POST' }),
+
+  // 实例桌面深色（与面板主题统一的那个开关）：读取当前态 + 设置（管理员，实时切换运行中实例）。
+  getDesktopTheme: () => req<{ dark: boolean }>('/api/desktop-theme'),
+  setDesktopTheme: (dark: boolean) =>
+    req<{ ok: boolean; dark: boolean; applied: number; failed: number }>('/api/admin/desktop-theme', {
+      method: 'POST',
+      body: JSON.stringify({ dark }),
+    }),
 
   // 运行时后端（docker / kubernetes）：前端据此切换运维提示与资源标签
   getRuntime: () => req<{ runtime: 'docker' | 'kubernetes' }>('/api/runtime'),

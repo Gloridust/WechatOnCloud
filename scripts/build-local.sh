@@ -18,11 +18,15 @@ VER="${WOC_VERSION:-dev-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || e
 PANEL_IMAGE="ghcr.io/${OWNER}/woc-panel:${TAG}"
 WECHAT_IMAGE="ghcr.io/${OWNER}/wechat-on-cloud:${TAG}"
 
+# --provenance=false --sbom=false：本地构建出「单一镜像」而非带 attestation 的 manifest list。
+# 否则在 Docker 29 + containerd 镜像存储下，经典 API（docker image inspect / docker run / 面板用的
+# dockerode）解析 :tag 时不会跟到新 manifest list、仍指向同名旧镜像 → 重建实例还是用旧镜像（实测踩过）。
+# 面板靠 dockerode 跑实例，故实例镜像尤其必须用这俩参数。
 echo "==> 构建面板镜像 ${PANEL_IMAGE} （版本号 ${VER}）"
-docker build --build-arg "WOC_VERSION=${VER}" -t "${PANEL_IMAGE}" "${ROOT}/panel"
+docker build --provenance=false --sbom=false --build-arg "WOC_VERSION=${VER}" -t "${PANEL_IMAGE}" "${ROOT}/panel"
 
 echo "==> 构建微信实例镜像 ${WECHAT_IMAGE}"
-docker build -t "${WECHAT_IMAGE}" "${ROOT}/docker"
+docker build --provenance=false --sbom=false -t "${WECHAT_IMAGE}" "${ROOT}/docker"
 
 echo
 echo "完成。本地镜像："

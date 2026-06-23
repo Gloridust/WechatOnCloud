@@ -95,6 +95,44 @@ function humanSize(n: number) {
   return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
 }
 
+// KasmVNC/noVNC 客户端 bundle 偶发未捕获异常（实测长时间空闲后报 "Cannot read properties of undefined
+// (reading 'lastActiveAt')"），会弹出其致命错误浮层（#noVNC_fallback_error 加 .noVNC_open）并卡死桌面，
+// 此时底层 ws 已死、自带重连也救不回。返回错误文案以便记日志；无致命错误则返回 null。
+function fatalErrorMsg(doc: Document | null | undefined): string | null {
+  try {
+    const el = doc?.getElementById('noVNC_fallback_error');
+    if (el && el.classList.contains('noVNC_open')) {
+      return doc?.getElementById('noVNC_fallback_errormsg')?.textContent?.trim() || 'KasmVNC 致命错误';
+    }
+  } catch {
+    /* 同源正常不会到这 */
+  }
+  return null;
+}
+
+// 致命崩溃自愈限频：同一实例 5 分钟内最多自动重连 4 次，超限改走手动恢复，杜绝"崩溃→重载→又崩"的死循环。
+function allowAutoRecover(iid: string): boolean {
+  const key = `woc_fatal_${iid}`;
+  let n = 0;
+  let last = 0;
+  try {
+    const o = JSON.parse(sessionStorage.getItem(key) || '{}');
+    n = Number(o.n) || 0;
+    last = Number(o.t) || 0;
+  } catch {
+    /* ignore */
+  }
+  const now = Date.now();
+  if (now - last > 5 * 60 * 1000) n = 0; // 距上次自愈超 5min → 计数清零（视作长时间稳定后的新一轮崩溃）
+  if (n >= 4) return false;
+  try {
+    sessionStorage.setItem(key, JSON.stringify({ n: n + 1, t: now }));
+  } catch {
+    /* ignore */
+  }
+  return true;
+}
+
 const MenuIcon = (
   <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
     <path d="M4 6h16M4 12h16M4 18h16" />
@@ -185,6 +223,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const dragDepth = useRef(0);
   const lastBeat = useRef(0);
   const audioRef = useRef<VncAudio | null>(null);
+  const recovering = useRef(false); // 致命崩溃自愈进行中（防错误浮层轮询与 error 事件重复触发重载）
 
   const inst = instances.find((i) => i.id === id);
   const profile = appProfile(inst?.appType); // 按应用类型显示正确文案（微信/Chromium…）
@@ -206,6 +245,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     setClipText('');
     setImeText('');
     setProbing(true);
+    recovering.current = false;
   }, [id]);
 
   // 桌面久未加载出来 → 判为"无响应"，把无限转圈换成可操作的重试/重启，不让用户干等。
@@ -376,17 +416,41 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showVnc, id, soundOn]);
 
-  // VNC 连接态监测——仅记录、不自动重连/重启。
-  // 1.1.7 本就没有任何"面板侧自动重连/自动重启"，连接很稳；本会话加的自动重载/自动重启(heal)/回前台重载
-  // 反而造成"频繁卡死/重启"的churn，故全部撤掉，回到 1.1.7 的行为：由 noVNC 自带重连兜底，仍不行用户手动
-  // 「重新连接/重启」。这里只把 kasmweb 在 iframe <html> 上的连接态 class 变化回传 [client] 日志，用于排查。
+  // 致命崩溃自愈：仅在 KasmVNC 真的弹出致命错误浮层时触发——整页重载是干净重连的唯一可靠路径
+  // （旧 ws 已死，重载后干净重连；与 setMode/restartInstance 同理，不会引发新旧 ws 并存卡死 Xvnc）。
+  // 与本会话曾撤掉的"激进自动重连"本质不同：那是连接态一抖就重连导致 churn；这里只在【确认致命崩溃】
+  // 时重载一次，且 5min 内限 4 次、超限转手动恢复浮层，绝不死循环。
+  const recoverFromFatal = (msg: string) => {
+    if (recovering.current || !id) return;
+    recovering.current = true;
+    if (allowAutoRecover(id)) {
+      api.clientLog(id, `KasmVNC 致命错误，自动重连：${msg}`);
+      toast('桌面连接异常，正在自动重连…', 'error');
+      window.setTimeout(() => window.location.reload(), 800);
+    } else {
+      api.clientLog(id, `KasmVNC 反复致命错误，停止自动重连、转手动恢复：${msg}`);
+      setFrameLoaded(false);
+      setLoadStuck(true); // 露出"桌面无响应"浮层，由用户「重新连接/重启实例」
+      recovering.current = false;
+    }
+  };
+
+  // VNC 连接态监测 + 致命崩溃检测。
+  // 连接态：把 kasmweb 在 iframe <html> 上的连接态 class 变化回传 [client] 日志，用于排查（仅记录、不因抖动重连）。
+  // 致命崩溃：每 3s 检查 KasmVNC 致命错误浮层是否弹出（如长时间空闲后的 'lastActiveAt' 崩溃），弹出即自愈重连。
   useEffect(() => {
     if (!showVnc || !frameLoaded || !id) return;
     let lastState = '';
     const t = window.setInterval(() => {
+      const doc = frameRef.current?.contentDocument;
+      const fatal = fatalErrorMsg(doc);
+      if (fatal) {
+        recoverFromFatal(fatal);
+        return;
+      }
       let state = '';
       try {
-        const c = frameRef.current?.contentDocument?.documentElement?.classList;
+        const c = doc?.documentElement?.classList;
         if (!c) return;
         state = c.contains('noVNC_connected')
           ? 'connected'
@@ -406,6 +470,34 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       }
     }, 3000);
     return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showVnc, frameLoaded, id]);
+
+  // 更快的致命崩溃捕获：直接监听同源 iframe window 的 'error'（KasmVNC 报 Uncaught 时同步触发，比 3s 轮询快），
+  // 但仅在延迟复核确认致命错误浮层真的弹出后才重连——排除良性报错，杜绝误重载。
+  useEffect(() => {
+    if (!showVnc || !frameLoaded || !id) return;
+    const win = frameRef.current?.contentWindow;
+    if (!win) return;
+    const onErr = () => {
+      window.setTimeout(() => {
+        const msg = fatalErrorMsg(frameRef.current?.contentDocument);
+        if (msg) recoverFromFatal(msg);
+      }, 400);
+    };
+    try {
+      win.addEventListener('error', onErr);
+    } catch {
+      return;
+    }
+    return () => {
+      try {
+        win.removeEventListener('error', onErr);
+      } catch {
+        /* ignore */
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showVnc, frameLoaded, id]);
 
   if (!id) {

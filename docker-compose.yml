@@ -30,6 +30,7 @@ services:
       - WOC_WATCHDOG_INTERVAL_SEC=${WOC_WATCHDOG_INTERVAL_SEC:-300}
       # 设备伪装：os-release 伪装成 deepin（默认开，=0 关恢复 Debian）。详见 .env.example / doc/设备伪装.md。
       - WOC_SPOOF_OS=${WOC_SPOOF_OS:-1}
+      # 实例桌面深色：由面板顶栏的主题开关统一控制（管理员），持久化在 accounts.json，无需在此配 env。
       # 面板首个管理员账号（仅首次启动、无账号文件时写入；务必改掉默认密码）
       - PANEL_ADMIN_USER=${WOC_USER:-admin}
       - PANEL_ADMIN_PASSWORD=${WOC_PASSWORD:-wechat}
