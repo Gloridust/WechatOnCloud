@@ -1,5 +1,5 @@
 import { hostname } from 'node:os';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { appendInstanceLog, deleteInstanceLog, appendPanelLog, readInstanceLog, readPanelLog, filterSince } from './logs.js';
 import http from 'node:http';
 import zlib from 'node:zlib';
@@ -15,7 +15,8 @@ const SHM_SIZE = 1024 * 1024 * 1024; // 1gb
 // 默认关闭 KasmVNC 的 GPU 硬件编码（baseimage 检测到 /dev/dri/renderD* 时会给 Xvnc 加 -hw3d）：
 // 在 WSL2 / 虚拟 GPU 环境下该路径会导致 Xvnc 内存持续膨胀（实测反馈 21h 涨到 ~9GB）。
 // 我们已设 LIBGL_ALWAYS_SOFTWARE=1 走软件渲染，hw3d 对微信这类静态界面收益甚微。
-// 真实可用 GPU 想启用硬件编码：面板侧设 WOC_ENABLE_GPU=1。
+// 真实可用 GPU 想启用硬件编码：面板侧设 WOC_ENABLE_GPU=1，并让面板可见宿主 /dev/dri
+// （如同摄像头，把宿主 /dev 挂到 /host-dev，或设 WOC_DRI_DEVICES 显式指定）。
 const ENABLE_GPU = process.env.WOC_ENABLE_GPU === '1';
 
 // 可选：给每个实例容器设内存上限（GiB），作为 Xvnc 等异常增长时的兜底，避免拖垮宿主。
@@ -114,6 +115,47 @@ function videoDevices(): string[] {
   return [];
 }
 
+// GPU 直通：把宿主 /dev/dri 渲染节点映射进实例容器，仅 WOC_ENABLE_GPU=1 时生效。
+// 来源优先级：
+//   1) WOC_DRI_DEVICES 显式指定（逗号分隔，如 /dev/dri/renderD128,/dev/dri/card0）；
+//   2) 自动探测：扫描面板可见的 /host-dev/dri 或 /dev/dri 中的 renderD*/card*。
+// 一个都找不到则返回空：硬件编码不可用，但实例照常创建（优雅降级）。
+function driDevices(): string[] {
+  const explicit = (process.env.WOC_DRI_DEVICES || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (explicit.length) return explicit;
+  for (const dir of ['/host-dev/dri', '/dev/dri']) {
+    try {
+      if (!existsSync(dir)) continue;
+      const dris = readdirSync(dir)
+        .filter((n) => /^(renderD\d+|card\d+)$/.test(n))
+        .map((n) => `/dev/dri/${n}`); // 宿主侧设备路径
+      if (dris.length) return dris;
+    } catch {
+      /* 无权限/不可读，忽略 */
+    }
+  }
+  return [];
+}
+
+// 读取这些 DRI 设备文件的属主数字 GID。宿主上 /dev/dri/renderD* 常归属一个「动态分配」的
+// render 组（其 GID 因发行版而异），与镜像内 render 组的 GID 未必一致；仅靠组名加 GroupAdd
+// 时，容器内 abc 用户可能仍打不开渲染节点（permission denied）。把宿主侧真实数字 GID 一并
+// 加进 GroupAdd，才能保证可访问。读取失败/无权限则跳过（退回仅组名，优雅降级）。
+function driDeviceGids(devices: string[]): string[] {
+  const gids = new Set<string>();
+  for (const dev of devices) {
+    try {
+      gids.add(String(statSync(dev).gid));
+    } catch {
+      /* 设备不可 stat（面板未挂 /host-dev 等），忽略 */
+    }
+  }
+  return Array.from(gids);
+}
+
 function envList(inst: Instance): string[] {
   const env = [
     `PUID=${PUID}`,
@@ -174,6 +216,7 @@ export async function runInstance(inst: Instance): Promise<void> {
   }
   // 摄像头设备（探测不到则为空数组 → 仅摄像头不可用，音频/麦克风照常）
   const vids = videoDevices();
+  const dris = ENABLE_GPU ? driDevices() : [];
   const hostConfig: Docker.HostConfig = {
     Binds: [`${inst.volumeName}:/config`],
     NetworkMode: net || undefined,
@@ -189,6 +232,17 @@ export async function runInstance(inst: Instance): Promise<void> {
     hostConfig.Devices = vids.map((d) => ({ PathOnHost: d, PathInContainer: d, CgroupPermissions: 'rwm' }));
     hostConfig.GroupAdd = ['video']; // 让容器内 abc 用户能访问 /dev/videoN
     console.log(`[docker] 实例 ${inst.id} 挂载摄像头设备: ${vids.join(', ')}`);
+  }
+  if (dris.length) {
+    hostConfig.Devices = [
+      ...(hostConfig.Devices || []),
+      ...dris.map((d) => ({ PathOnHost: d, PathInContainer: d, CgroupPermissions: 'rwm' })),
+    ];
+    // 组名 render/video + 宿主侧真实数字 GID（应对 render 组 GID 在宿主与镜像间不一致的常见情况）。
+    hostConfig.GroupAdd = Array.from(
+      new Set([...(hostConfig.GroupAdd || []), 'render', 'video', ...driDeviceGids(dris)]),
+    );
+    console.log(`[docker] 实例 ${inst.id} 挂载 GPU 渲染设备: ${dris.join(', ')}`);
   }
   // 伪装成真实有线网卡 MAC（厂商 OUI），替代容器默认的本地管理位 MAC。
   const mac = realisticMac(inst.id);
