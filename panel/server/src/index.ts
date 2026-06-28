@@ -118,6 +118,9 @@ app.addHook('onRequest', async (req, reply) => {
 await app.register(cookie);
 // 文件上传走原始二进制（前端以 application/octet-stream 直传 File）
 app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
+// Heartbeat and other no-body POST routes send no Content-Type; fall through to this wildcard
+// instead of being rejected with 415. Fastify's exact-match parsers above take priority.
+app.addContentTypeParser('*', { parseAs: 'buffer' }, (_req, _body, done) => done(null, null));
 
 // ---------- 鉴权辅助 ----------
 function currentUser(req: FastifyRequest): User | null {
