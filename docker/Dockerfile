@@ -1,12 +1,22 @@
 # WechatOnCloud —— 在浏览器里访问服务端微信
 # 基于 linuxserver 的 KasmVNC 基础镜像（多架构 amd64/arm64）：
 # 自带 Xvfb + openbox + KasmVNC + web 客户端(3000/3001)
-FROM lscr.io/linuxserver/baseimage-kasmvnc:debianbookworm
+FROM ghcr.io/linuxserver/baseimage-kasmvnc:debianbookworm
 
 # 微信本体不再在构建时下载/安装，改为运行时由面板点击下载、解压到数据卷 /config
 #（见 wechat-ctl.sh）。构建时只装：中文字体、语言环境、下载工具，以及微信运行所
 # 需的全部系统库（这些需 root/apt，必须 bake 进镜像）。
-ENV DEBIAN_FRONTEND=noninteractive
+ENV     DEBIAN_FRONTEND=noninteractive
+
+RUN set -eux; \
+    # 替换为国内镜像源（中国用户加速，海外用户可删此行）
+    rm -f /etc/apt/sources.list.d/debian.sources; \
+    printf '%s\n' \
+        'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main contrib non-free non-free-firmware' \
+        'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware' \
+        'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-backports main contrib non-free non-free-firmware' \
+        'deb https://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware' \
+        > /etc/apt/sources.list
 
 RUN set -eux; \
     # 中文字体（否则界面/消息显示方块）+ 语言环境 + 下载/解压工具
