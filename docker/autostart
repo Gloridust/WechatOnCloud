@@ -47,7 +47,107 @@ if [ "$APP_TYPE" = "custom" ] && [ -z "${APP_LAUNCH:-}" ]; then
     exit 0
 fi
 
-# 1) 等待应用安装就绪（首次需在面板点「下载并安装」）
+# 1) 应用壁纸（若用户设置了自定义背景图）
+WALLPAPER_FILE="/config/.wallpaper"
+WALLPAPER_DIR="/config/backgrounds"
+if [ -f "$WALLPAPER_FILE" ]; then
+    wp=$(cat "$WALLPAPER_FILE")
+    if [ -n "$wp" ] && [ -f "$WALLPAPER_DIR/$wp" ]; then
+        export DISPLAY="${DISPLAY:-:1}"
+        xwallpaper --zoom "$WALLPAPER_DIR/$wp" 2>/dev/null && \
+            echo "[autostart] 壁纸已应用: $wp"
+    fi
+fi
+
+# 2) 应用自定义字体（若用户设置了）
+# 从持久卷恢复系统级 fontconfig 配置（跨越容器重建）
+if [ -f /config/.woc-fc-local.conf ]; then
+    cp /config/.woc-fc-local.conf /etc/fonts/local.conf
+    echo "[autostart] 系统字体配置已恢复"
+fi
+#     确保 ~/.local/share/fonts → /config/.fonts symlink 存在（旧容器升级兼容）
+mkdir -p /config/.fonts 2>/dev/null || true
+if [ ! -L /home/abc/.local/share/fonts ] && [ ! -d /home/abc/.local/share/fonts ]; then
+    mkdir -p /home/abc/.local/share 2>/dev/null || true
+    ln -sfn /config/.fonts /home/abc/.local/share/fonts 2>/dev/null || true
+fi
+FONT_CONF="/home/abc/.config/fontconfig/fonts.conf"
+FONT_FAMILY_FILE="/config/.woc-font-family"
+if [ -f "$FONT_FAMILY_FILE" ]; then
+    family=$(cat "$FONT_FAMILY_FILE")
+    if [ -n "$family" ]; then
+        mkdir -p "$(dirname "$FONT_CONF")" 2>/dev/null || true
+        cat > "$FONT_CONF" << EOF
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <!-- generic families -->
+  <alias>
+    <family>sans-serif</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>serif</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>monospace</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <!-- system CJK fonts that WeChat/CEF may request -->
+  <alias>
+    <family>WenQuanYi Micro Hei</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>WenQuanYi Zen Hei</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>Noto Sans CJK SC</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>Noto Sans CJK</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <!-- force user font for any zh text regardless of requested family -->
+  <match target="pattern">
+    <test name="lang" compare="contains"><string>zh</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>${family}</string></edit>
+  </match>
+</fontconfig>
+EOF
+        echo "[autostart] 自定义字体已恢复: ${family}"
+        fc-cache -f 2>/dev/null || true
+    fi
+elif [ -f "$FONT_CONF" ]; then
+    echo "[autostart] 自定义字体配置已就绪"
+    fc-cache -f 2>/dev/null || true
+fi
+
+# 3) 启动 xsettingsd（让 GTK/Qt 应用实时响应字体/DPI 等 XSETTINGS 变更，无需重启）
+XSETTINGS_CONF="/home/abc/.xsettingsd"
+if command -v xsettingsd >/dev/null 2>&1; then
+    XSETTINGS_FONT="WenQuanYi Micro Hei"
+    # 若用户保存了字体偏好，优先使用
+    if [ -f "$FONT_FAMILY_FILE" ]; then
+        family=$(cat "$FONT_FAMILY_FILE")
+        [ -n "$family" ] && XSETTINGS_FONT="$family"
+    fi
+    cat > "${XSETTINGS_CONF}" << EOF
+Xft/Antialias 1
+Xft/Hinting 1
+Xft/HintStyle "hintslight"
+Xft/RGBA "rgb"
+Xft/DPI 96
+Gtk/FontName "${XSETTINGS_FONT} 10"
+EOF
+    xsettingsd --config="${XSETTINGS_CONF}" 2>/dev/null &
+    echo "[autostart] xsettingsd 已启动"
+fi
+
+# 4) 等待应用安装就绪（首次需在面板点「下载并安装」）
 notified=0
 while [ -n "${APP_BIN:-}" ] && [ ! -x "${APP_BIN}" ]; do
     if [ "${notified}" -eq 0 ]; then

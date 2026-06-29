@@ -212,6 +212,16 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const [uploading, setUploading] = useState(false);
   const [starting, setStarting] = useState(false);
   const [control, setControl] = useState<{ free: boolean; mine: boolean; holder: string | null } | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<'bg' | 'font'>('bg');
+  const [bgList, setBgList] = useState<string[]>([]);
+  const [fontList, setFontList] = useState<string[]>([]);
+  const [bgUploading, setBgUploading] = useState(false);
+  const [fontUploading, setFontUploading] = useState(false);
+  const [currentBg, setCurrentBg] = useState('');
+  const [currentFont, setCurrentFont] = useState('');
+  const bgInput = useRef<HTMLInputElement>(null);
+  const fontInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
   const dragDepth = useRef(0);
@@ -578,6 +588,100 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     }
   };
 
+  // ---------- 桌面壁纸 ----------
+  const refreshBgList = async () => {
+    if (!id) return;
+    try { const r = await api.listBackgrounds(id); setBgList(r.backgrounds); } catch { /* ignore */ }
+    try { const r = await api.getCurrentBackground(id); setCurrentBg(r.background); } catch { /* ignore */ }
+  };
+
+  const uploadBg = async () => {
+    const input = bgInput.current;
+    if (!input?.files?.length) return;
+    setBgUploading(true);
+    for (const f of Array.from(input.files)) {
+      try {
+        await api.uploadBackground(id, f.name, f);
+        toast(`壁纸「${f.name}」已上传`, 'ok');
+      } catch (e: any) { toast(e.message || '上传失败', 'error'); }
+    }
+    setBgUploading(false);
+    input.value = '';
+    refreshBgList();
+  };
+
+  const applyBg = async (name: string) => {
+    try {
+      await api.applyBackground(id, name);
+      setCurrentBg(name);
+      toast('壁纸已应用', 'ok');
+    } catch (e: any) { toast(e.message || '应用失败', 'error'); }
+  };
+
+  const clearBg = async () => {
+    try {
+      await api.clearBackground(id);
+      setCurrentBg('');
+      toast('已恢复默认黑屏', 'ok');
+    } catch (e: any) { toast(e.message || '清除失败', 'error'); }
+  };
+
+  const deleteBg = async (name: string) => {
+    if (!(await confirm({ title: `删除壁纸「${name}」？`, danger: true, confirmText: '删除' }))) return;
+    try {
+      await api.deleteBackground(id, name);
+      toast('已删除', 'ok');
+      refreshBgList();
+    } catch (e: any) { toast(e.message || '删除失败', 'error'); }
+  };
+
+  // ---------- 字体管理 ----------
+  const refreshFontList = async () => {
+    if (!id) return;
+    try { const r = await api.listFonts(id); setFontList(r.fonts); } catch { /* ignore */ }
+    try { const r = await api.getCurrentFont(id); setCurrentFont(r.fontFile); } catch { /* ignore */ }
+  };
+
+  const uploadFont = async () => {
+    const input = fontInput.current;
+    if (!input?.files?.length) return;
+    setFontUploading(true);
+    for (const f of Array.from(input.files)) {
+      try {
+        await api.uploadFont(id, f.name, f);
+        toast(`字体「${f.name}」已安装`, 'ok');
+      } catch (e: any) { toast(e.message || '上传失败', 'error'); }
+    }
+    setFontUploading(false);
+    input.value = '';
+    refreshFontList();
+  };
+
+  const deleteFont = async (name: string) => {
+    if (!(await confirm({ title: `删除字体「${name}」？`, danger: true, confirmText: '删除' }))) return;
+    try {
+      await api.deleteFont(id, name);
+      toast('已删除，字体缓存已刷新', 'ok');
+      refreshFontList();
+    } catch (e: any) { toast(e.message || '删除失败', 'error'); }
+  };
+
+  const applyUserFont = async (name: string) => {
+    try {
+      await api.applyFont(id, name);
+      setCurrentFont(name);
+      toast('字体已应用，重启微信后完全生效', 'ok');
+    } catch (e: any) { toast(e.message || '应用失败', 'error'); }
+  };
+
+  const resetFontDefault = async () => {
+    try {
+      await api.resetFontDefault(id);
+      setCurrentFont('');
+      toast('已恢复系统默认字体（文泉驿），重启微信后生效', 'ok');
+    } catch (e: any) { toast(e.message || '重置失败', 'error'); }
+  };
+
   // 同源 iframe：把键盘焦点交给 VNC，帮助宿主机输入法把合成的字送进去
   const focusFrame = () => {
     try {
@@ -779,9 +883,14 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               </button>
             )}
             {isAdmin && (
-              <button className="ws-action" title="重启实例（修复卡死/最小化丢失）" onClick={restartInstance}>
-                重启
-              </button>
+              <>
+                <button className={'ws-action' + (showSettings ? ' on' : '')} title="桌面设置（壁纸/字体）" onClick={() => { setShowSettings((v) => !v); if (!showSettings) { refreshBgList(); refreshFontList(); } }}>
+                  桌面
+                </button>
+                <button className="ws-action" title="重启实例（修复卡死/最小化丢失）" onClick={restartInstance}>
+                  重启
+                </button>
+              </>
             )}
           </>
         )}
@@ -1003,6 +1112,76 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               <div className="files-hint">
                 局域网 http 访问时浏览器会禁用系统级剪贴板同步，故用此框中转：文本→容器剪贴板，再在应用里 Ctrl+V。
               </div>
+            </div>
+          )}
+
+          {showSettings && (
+            <div className="iv-files">
+              <div className="files-head">
+                <span>桌面设置</span>
+                <button className="btn-text" onClick={() => setShowSettings(false)}>关闭</button>
+              </div>
+              <div className="settings-tabs">
+                <button className={'settings-tab' + (settingsTab === 'bg' ? ' on' : '')} onClick={() => setSettingsTab('bg')}>壁纸</button>
+                <button className={'settings-tab' + (settingsTab === 'font' ? ' on' : '')} onClick={() => setSettingsTab('font')}>字体</button>
+              </div>
+
+              {settingsTab === 'bg' && (
+                <div className="settings-panel">
+                  <input ref={bgInput} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={uploadBg} />
+                  <button className="btn btn-primary files-upload" disabled={bgUploading} onClick={() => bgInput.current?.click()}>
+                    {bgUploading ? '上传中…' : '＋ 上传壁纸'}
+                  </button>
+                  {currentBg && (
+                    <button className="btn-text" style={{ alignSelf: 'flex-start', color: 'var(--danger)', fontSize: 12 }} onClick={clearBg}>
+                      清除壁纸，恢复默认黑屏
+                    </button>
+                  )}
+                  <div className="files-hint">单击缩略图即可应用。支持 JPG / PNG 等常见格式。</div>
+                  {bgList.length === 0 && <div className="muted small" style={{ padding: '10px 2px' }}>暂无壁纸</div>}
+                  <div className="bg-grid">
+                    {bgList.map((name) => (
+                      <div key={name} className={'bg-card' + (currentBg === name ? ' active' : '')} onClick={() => applyBg(name)} title="单击应用">
+                        <div className="bg-thumb-wrap">
+                          <img className="bg-thumb" src={`/api/admin/instances/${id}/backgrounds/${encodeURIComponent(name)}/image`} alt={name} loading="lazy" />
+                          {currentBg !== name && <div className="bg-hint">单击应用</div>}
+                          {currentBg === name && <span className="bg-active-badge">✓ 使用中</span>}
+                          <button className="bg-del" title="删除" onClick={(e) => { e.stopPropagation(); deleteBg(name); }}>✕</button>
+                        </div>
+                        <span className="bg-name">{name}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {settingsTab === 'font' && (
+                <div className="settings-panel">
+                  <input ref={fontInput} type="file" accept=".ttf,.otf,.ttc" multiple style={{ display: 'none' }} onChange={uploadFont} />
+                  <button className="btn btn-primary files-upload" disabled={fontUploading} onClick={() => fontInput.current?.click()}>
+                    {fontUploading ? '上传中…' : '＋ 上传字体'}
+                  </button>
+                  {currentFont && (
+                    <button className="btn-text" style={{ alignSelf: 'flex-start', color: 'var(--danger)', fontSize: 12 }} onClick={resetFontDefault}>
+                      恢复默认（文泉驿）
+                    </button>
+                  )}
+                  <div className="files-hint">支持 TTF / OTF / TTC 格式。应用字体后需重启微信（在面板杀一次）才能完全生效。</div>
+                  {fontList.length === 0 && <div className="muted small" style={{ padding: '10px 2px' }}>暂无字体</div>}
+                  <div className="font-grid">
+                    {fontList.map((name) => (
+                      <div key={name} className={'font-card' + (currentFont === name ? ' active' : '')} onClick={() => applyUserFont(name)} title="点击应用">
+                        {currentFont === name && <span className="font-badge">✓ 使用中</span>}
+                        <button className="font-del" title="删除" onClick={(e) => { e.stopPropagation(); deleteFont(name); }}>✕</button>
+                        <div className="font-preview">
+                          <span className="font-preview-text">Aa</span>
+                        </div>
+                        <span className="font-name">{name}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
           </div>

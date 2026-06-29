@@ -212,6 +212,8 @@ export async function runInstance(inst: Instance): Promise<void> {
   try {
     await container.start();
     appendInstanceLog(inst.id, '容器已启动');
+    // 容器重建后恢复持久化的字体配置 / xsettingsd
+    restoreFontFromVolume(inst).catch(() => {});
   } catch (e) {
     // 启动失败但容器已被创建出来（Created 状态），不清理的话会成为"幽灵容器"——
     // 它仍占着卷名 woc-data-<id>，让后续删卷报 409。修复 #23 时发现 4 个此类残留。
@@ -433,9 +435,9 @@ async function execCreate(c: any, opts: any): Promise<any> {
 }
 
 // 在实例容器内执行命令，返回 stdout；若命令失败，把 stderr 透出给调用方。
-async function execCapture(inst: Instance, cmd: string[]): Promise<string> {
+async function execCapture(inst: Instance, cmd: string[], user = 'abc'): Promise<string> {
   const c = docker.getContainer(inst.containerName);
-  const exec = await execCreate(c, { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: 'abc' });
+  const exec = await execCreate(c, { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: user });
   const stream = await exec.start({ hijack: true, stdin: false });
   return await new Promise<string>((resolve, reject) => {
     let out = '';
@@ -937,6 +939,202 @@ export async function volBackupStream(inst: Instance): Promise<NodeJS.ReadableSt
 // 整卷恢复：仅适用于本系统导出的备份（条目前缀 config/），解到容器根 → 落回 /config。要求实例已停止。
 export async function volRestoreArchive(inst: Instance, archive: Buffer): Promise<void> {
   await docker.getContainer(inst.containerName).putArchive(maybeGunzip(archive), { path: '/' });
+}
+
+// ---------- 桌面壁纸 ----------
+const BG_DIR = '/config/backgrounds';
+const WP_FILE = '/config/.wallpaper';
+
+export async function listBackgrounds(inst: Instance): Promise<string[]> {
+  try {
+    const out = await execCapture(inst, ['sh', '-c', `ls -1 ${BG_DIR} 2>/dev/null || true`]);
+    return out.split('\n').filter(Boolean);
+  } catch { return []; }
+}
+
+export async function getBackgroundImage(inst: Instance, name: string, thumb = false): Promise<Buffer> {
+  if (!safeName(name)) throw new Error('文件名不合法');
+  let path = `${BG_DIR}/${name}`;
+  if (thumb) {
+    const tmp = `/tmp/.woc-thumb-${name}`;
+    try {
+      await execCapture(inst, ['sh', '-c', `convert '${BG_DIR}/${name}' -resize 400x '${tmp}'`], 'root');
+      path = tmp;
+    } catch {
+      // convert 不可用或失败，回退原始图
+    }
+  }
+  const stream = (await docker.getContainer(inst.containerName).getArchive({ path })) as NodeJS.ReadableStream;
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    stream.on('data', (d: Buffer) => chunks.push(d));
+    stream.on('end', () => resolve());
+    stream.on('error', reject);
+  });
+  const buf = extractSingleFileFromTar(Buffer.concat(chunks));
+  if (thumb) {
+    // 清理临时缩略图
+    execCapture(inst, ['rm', '-f', `/tmp/.woc-thumb-${name}`], 'root').catch(() => {});
+  }
+  return buf;
+}
+
+export async function uploadBackground(inst: Instance, name: string, content: Buffer): Promise<void> {
+  if (!safeName(name)) throw new Error('文件名不合法');
+  await execCapture(inst, ['mkdir', '-p', BG_DIR]);
+  await docker.getContainer(inst.containerName).putArchive(tarSingleFile(name, content), { path: BG_DIR });
+}
+
+export async function applyBackground(inst: Instance, name: string): Promise<void> {
+  if (!safeName(name)) throw new Error('文件名不合法');
+  await execCapture(inst, ['sh', '-c', `DISPLAY=:1 xwallpaper --zoom '${BG_DIR}/${name}' 2>/dev/null`]);
+  await execCapture(inst, ['sh', '-c', `echo '${name}' > '${WP_FILE}'`]);
+}
+
+export async function deleteBackground(inst: Instance, name: string): Promise<void> {
+  if (!safeName(name)) throw new Error('文件名不合法');
+  await execCapture(inst, ['rm', '-f', `${BG_DIR}/${name}`]);
+  await execCapture(inst, ['sh', '-c', `if [ -f '${WP_FILE}' ] && [ "$(cat '${WP_FILE}')" = '${name}' ]; then rm -f '${WP_FILE}'; fi`]);
+}
+
+export async function getCurrentBackground(inst: Instance): Promise<string> {
+  try {
+    const out = await execCapture(inst, ['sh', '-c', `cat ${WP_FILE} 2>/dev/null || true`]);
+    return out.trim();
+  } catch { return ''; }
+}
+
+export async function clearBackground(inst: Instance): Promise<void> {
+  await execCapture(inst, ['sh', '-c', 'DISPLAY=:1 xsetroot -solid black 2>/dev/null']);
+  await execCapture(inst, ['rm', '-f', WP_FILE]);
+}
+
+// ---------- 字体管理 ----------
+const FONT_DIR = '/config/.fonts';
+
+export async function listFonts(inst: Instance): Promise<string[]> {
+  try {
+    const out = await execCapture(inst, ['sh', '-c', `ls -1 ${FONT_DIR} 2>/dev/null || true`]);
+    return out.split('\n').filter(Boolean);
+  } catch { return []; }
+}
+
+export async function uploadFont(inst: Instance, name: string, content: Buffer): Promise<void> {
+  if (!safeName(name)) throw new Error('文件名不合法');
+  await execCapture(inst, ['mkdir', '-p', FONT_DIR]);
+  await docker.getContainer(inst.containerName).putArchive(tarSingleFile(name, content), { path: FONT_DIR });
+  await execCapture(inst, ['fc-cache', '-f'], 'root');
+}
+
+export async function deleteFont(inst: Instance, name: string): Promise<void> {
+  if (!safeName(name)) throw new Error('文件名不合法');
+  await execCapture(inst, ['rm', '-f', `${FONT_DIR}/${name}`]);
+  await execCapture(inst, ['fc-cache', '-f'], 'root');
+}
+
+const FONT_SEL_FILE = '/config/.woc-font';
+
+// 将字体的 fontconfig family name 设为用户首选（fallback 仍用文泉驿等系统字体）。
+// 设空字符串或 "default" 则清除偏好，回退系统默认。
+export async function applyFont(inst: Instance, fontFile: string): Promise<void> {
+  if (fontFile && !safeName(fontFile)) throw new Error('文件名不合法');
+  if (fontFile && fontFile !== 'default') {
+    // 用 fc-scan 读取字体实际 family name（取第一个）
+    const out = await execCapture(inst, ['sh', '-c', `fc-scan --format='%{family[0]}' '${FONT_DIR}/${fontFile}' 2>/dev/null`]);
+    const family = out.trim();
+    if (!family) throw new Error('未能识别该字体的 family name');
+    // 写 fontconfig 系统级配置（/etc/fonts/local.conf 保证被读取，用户级可能被 XDG 路径问题跳过）
+    const xml = `<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <!-- generic families -->
+  <alias>
+    <family>sans-serif</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>serif</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>monospace</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <!-- system CJK fonts that WeChat/CEF may request -->
+  <alias>
+    <family>WenQuanYi Micro Hei</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>WenQuanYi Zen Hei</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>Noto Sans CJK SC</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>Noto Sans CJK</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <!-- force user font for any zh text regardless of requested family -->
+  <match target="pattern">
+    <test name="lang" compare="contains"><string>zh</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>${family}</string></edit>
+  </match>
+</fontconfig>`;
+    await execCapture(inst, ['bash', '-c', `cat > /etc/fonts/local.conf << 'CONF'\n${xml}\nCONF`], 'root');
+    execCapture(inst, ['bash', '-c', `cat > /config/.woc-fc-local.conf << 'CONF'\n${xml}\nCONF`], 'root').catch(() => {});
+    await execCapture(inst, ['fc-cache', '-f'], 'root');
+    await execCapture(inst, ['sh', '-c', `echo '${fontFile}' > ${FONT_SEL_FILE}`]);
+    await execCapture(inst, ['bash', '-c', `cat > ${FONT_SEL_FILE}-family << 'FAMILYEOF'\n${family}\nFAMILYEOF`]);
+    // 更新 xsettingsd 配置 → GTK/Qt 应用实时响应
+    applyXsettingsFont(inst, family).catch(() => {});
+  } else {
+    // 清除偏好，回退默认（文泉驿等系统字体）
+    await execCapture(inst, ['rm', '-f', '/etc/fonts/local.conf', '/config/.woc-fc-local.conf'], 'root');
+    await execCapture(inst, ['rm', '-f', '/home/abc/.config/fontconfig/fonts.conf']);
+    await execCapture(inst, ['fc-cache', '-f'], 'root');
+    await execCapture(inst, ['rm', '-f', FONT_SEL_FILE, `${FONT_SEL_FILE}-family`]);
+    applyXsettingsFont(inst, 'WenQuanYi Micro Hei').catch(() => {});
+  }
+}
+
+async function applyXsettingsFont(inst: Instance, family: string): Promise<void> {
+  const conf = '/home/abc/.xsettingsd';
+  const lines = [
+    'Xft/Antialias 1',
+    'Xft/Hinting 1',
+    'Xft/HintStyle "hintslight"',
+    'Xft/RGBA "rgb"',
+    'Xft/DPI 96',
+    `Gtk/FontName "${family} 10"`,
+  ];
+  await execCapture(inst, ['sh', '-c', `printf '%s\\n' ${lines.map(l => `'${l}'`).join(' ')} > ${conf}`]);
+  await execCapture(inst, ['sh', '-c', 'pkill -HUP xsettingsd 2>/dev/null || xsettingsd --config=/home/abc/.xsettingsd 2>/dev/null &']);
+}
+
+// 返回当前选中的字体文件名，空字符串表示默认
+export async function getAppliedFont(inst: Instance): Promise<string> {
+  try {
+    const out = await execCapture(inst, ['sh', '-c', `cat ${FONT_SEL_FILE} 2>/dev/null || true`]);
+    return out.trim();
+  } catch { return ''; }
+}
+
+export async function getFontFamily(inst: Instance, fontFile: string): Promise<string> {
+  try {
+    const out = await execCapture(inst, ['sh', '-c', `fc-scan '${FONT_DIR}/${fontFile}' 2>/dev/null | grep 'family:' | head -1 | cut -d'"' -f2`]);
+    return out.trim();
+  } catch { return ''; }
+}
+
+// 容器重建后从挂载卷恢复字体配置 & xsettingsd（不依赖 autostart 镜像版本）
+async function restoreFontFromVolume(inst: Instance): Promise<void> {
+  await execCapture(inst, ['bash', '-c', 'if [ -f /config/.woc-fc-local.conf ]; then cp /config/.woc-fc-local.conf /etc/fonts/local.conf && fc-cache -f; fi'], 'root').catch(() => {});
+  const famOut = await execCapture(inst, ['sh', '-c', 'cat /config/.woc-font-family 2>/dev/null || true']).catch(() => '');
+  const family = famOut.trim();
+  if (family) applyXsettingsFont(inst, family).catch(() => {});
 }
 
 // 实例容器名（供反代构造 target）。
