@@ -112,6 +112,11 @@ app.addHook('onRequest', async (req, reply) => {
 });
 
 await app.register(cookie);
+// 允许 iframe 内嵌 noVNC 使用剪贴板/麦克风（Permissions-Policy 与 iframe allow 配合）
+const PERMS_POLICY = 'clipboard-read=(self), clipboard-write=(self), microphone=(self), camera=(self)';
+app.addHook('onSend', async (_req, reply) => {
+  reply.header('Permissions-Policy', PERMS_POLICY);
+});
 // 文件上传走原始二进制（前端以 application/octet-stream 直传 File）
 app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
 
@@ -976,8 +981,13 @@ proxy.on('proxyReqWs', (proxyReq, req) => {
 });
 // 兜底：剥掉 KasmVNC 401 的 WWW-Authenticate 头，避免浏览器弹出原生 Basic Auth 登录框。
 // 正常路径下我们已注入正确凭据（不会 401）；万一凭据失配，宁可桌面加载失败也绝不把登录弹窗暴露给用户。
-proxy.on('proxyRes', (proxyRes) => {
+proxy.on('proxyRes', (proxyRes, req) => {
   delete proxyRes.headers['www-authenticate'];
+  // 反代回来的 noVNC 页面也在 iframe 内，需允许其调用 navigator.clipboard（无缝剪贴板/图片）
+  const url = (req as { url?: string }).url || '';
+  if (url.includes('/vnc/') || url.endsWith('index.html')) {
+    proxyRes.headers['permissions-policy'] = 'clipboard-read=(self), clipboard-write=(self)';
+  }
 });
 proxy.on('error', (_err, _req, res) => {
   try {

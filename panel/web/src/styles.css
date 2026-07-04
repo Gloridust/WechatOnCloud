@@ -786,6 +786,15 @@ button {
   height: 42px;
   font-size: 15px;
 }
+.clip-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.clip-actions .files-upload {
+  flex: 1 1 auto;
+  min-width: 140px;
+}
 .clip-area {
   width: 100%;
   resize: vertical;
