@@ -47,6 +47,14 @@ if [ "$APP_TYPE" = "custom" ] && [ -z "${APP_LAUNCH:-}" ]; then
     exit 0
 fi
 
+cleanup_chromium_metrics() {
+    [ "$APP_TYPE" = "chromium" ] || return 0
+    metrics_dir=/config/chromium/DeferredBrowserMetrics
+    [ -e "$metrics_dir" ] || return 0
+    echo "[autostart] 清理 Chromium 延迟指标缓存: ${metrics_dir}"
+    rm -rf "$metrics_dir" 2>/dev/null || true
+}
+
 # 1) 应用壁纸（若用户设置了自定义背景图）。
 # 关键：Xvnc 启动时是默认分辨率，浏览器连上后 KasmVNC 会 resize-remote 到浏览器尺寸。若只在启动时设一次，
 # 屏幕一变大，X 会把当时设的小尺寸 root pixmap【平铺】填满新屏（表现为壁纸被 2×2 平铺，见 issue 反馈）。
@@ -176,7 +184,9 @@ while true; do
     fi
     echo "[autostart] 启动 ${APP_NAME}: ${APP_LAUNCH}"
     # APP_LAUNCH 可带参数，按 word-split 执行（各应用参数均不含空格，见 app-defs.sh）
+    cleanup_chromium_metrics
     ${APP_LAUNCH}
+    cleanup_chromium_metrics
     echo "[autostart] ${APP_NAME} 已退出，2 秒后重启"
     sleep 2
 done

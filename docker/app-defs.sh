@@ -15,8 +15,10 @@ woc_app_def() {
       # --disable-background-networking：关掉 Chromium 后台 phone-home（GCM 推送 / 组件更新 / 变体下载），
       #   在受限网络（NAS / 被墙）下这些会反复失败刷屏 "gcm ConnectionHandler failed net error: -2"。
       #   只影响后台流量，不影响前台网页加载与真实网络错误提示。
+      # --disable-metrics* / --disable-crash-reporter / --disable-breakpad：避免无头/容器场景下 Chromium
+      #   把延迟指标与崩溃上报缓存长期写进持久化数据卷（曾见 DeferredBrowserMetrics 异常膨胀到数百 GiB）。
       APP_BIN=/usr/bin/chromium
-      APP_LAUNCH="$APP_BIN --no-sandbox --no-first-run --no-default-browser-check --start-maximized --password-store=basic --disable-gpu --disable-background-networking --user-data-dir=/config/chromium"
+      APP_LAUNCH="$APP_BIN --no-sandbox --no-first-run --no-default-browser-check --start-maximized --password-store=basic --disable-gpu --disable-background-networking --disable-metrics --disable-metrics-reporting --disable-crash-reporter --disable-breakpad --user-data-dir=/config/chromium"
       APP_NAME=Chromium
       ;;
     custom)
