@@ -202,18 +202,26 @@ async function ensureImage(): Promise<void> {
 }
 
 // 创建并启动一个微信实例容器。若同名容器已存在则先移除（仅容器，不动卷）。
-export async function runInstance(inst: Instance): Promise<void> {
+// keepImage（稳定性关键）：重启/自愈必须幂等——沿用该实例当前正在跑的镜像重建，
+// 绝不因"本地 :latest 恰好被某次拉取更新过"就悄悄换镜像（那等于一次没人要求的隐式升级；
+// 若本地新镜像恰好是坏的，一次看门狗自愈就能弄坏一个用户从没升级过的实例）。
+// 换镜像只允许发生在显式「升级实例」（不带 keepImage）。
+export async function runInstance(inst: Instance, opts?: { keepImage?: boolean }): Promise<void> {
   const net = await ensureNetwork();
-  await ensureImage();
+  let imageOverride: string | undefined;
   try {
     const existing = docker.getContainer(inst.containerName);
-    await existing.inspect();
+    const info = await existing.inspect();
+    if (opts?.keepImage && info.Image) imageOverride = String(info.Image);
     // 删除前先把旧容器最后日志快照进持久日志，否则随容器删除就看不到"上次为何停/崩"。
     await snapshotContainerLog(inst, '容器重建（重启/升级/自愈），保留上一容器最后日志');
     await existing.remove({ force: true });
   } catch {
     /* 不存在，正常 */
   }
+  // 沿用旧镜像重建时无需 ensureImage（镜像 id 一定在本地——容器刚在用它）；
+  // 也避免"离线 + 本地无 :latest"时连重启都失败。
+  if (!imageOverride) await ensureImage();
   // 摄像头设备（探测不到则为空数组 → 仅摄像头不可用，音频/麦克风照常）
   const vids = videoDevices();
   const dris = ENABLE_GPU ? driDevices() : [];
@@ -251,7 +259,7 @@ export async function runInstance(inst: Instance): Promise<void> {
   const mac = realisticMac(inst.id);
   const createOpts: Docker.ContainerCreateOptions = {
     name: inst.containerName,
-    Image: WECHAT_IMAGE,
+    Image: imageOverride || WECHAT_IMAGE,
     // 内部 hostname 伪装成"个人电脑"名（不再用 woc-wx-<hex>，那是容器/服务器特征）。
     // 反代靠容器名 name 寻址，与此 hostname 无关。
     Hostname: realisticHostname(inst.id),

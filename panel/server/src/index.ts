@@ -373,7 +373,7 @@ app.post('/api/instances/:id/heal', async (req, reply) => {
   lastHealAt.set(id, now);
   appendPanelLog('WARN', `实例「${inst.name}」(id=${id}) 由 ${u.username} 触发卡死自愈（VNC 连不上 → 重启容器，数据保留）`);
   try {
-    await runInstance(inst);
+    await runInstance(inst, { keepImage: true }); // 自愈=重启，幂等：沿用当前镜像，绝不隐式换版
     return { ok: true, restarted: true };
   } catch (e: any) {
     appendPanelLog('ERROR', `实例「${inst.name}」(id=${id}) 卡死自愈重启失败：${e?.message || e}`);
@@ -631,7 +631,7 @@ app.post('/api/admin/instances/:id/restart', async (req, reply) => {
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
   try {
     appendPanelLog('INFO', `重启实例「${inst.name}」(id=${inst.id})`);
-    await runInstance(inst);
+    await runInstance(inst, { keepImage: true }); // 重启必须幂等：沿用当前镜像，换镜像只走显式「升级」
     return { ok: true };
   } catch (e: any) {
     appendPanelLog('ERROR', `重启实例「${inst.name}」(id=${inst.id}) 失败：${e?.message || e}`);
@@ -1280,6 +1280,16 @@ proxy.on('proxyReqWs', (proxyReq, req) => {
   const instId = (req as any)._wocInstId;
   if (instId) proxyReq.on('upgrade', () => appendInstanceLog(instId, '[vnc] 上游已接受(101) · 桌面连接建立'));
 });
+// 上游（面板→实例）套接字 TCP keepalive：客户端断网/切网（WiFi→4G、NAS 休眠）时 TCP 不会主动通知，
+// 半开死连接可挂数小时——对 KasmVNC 表现为"幽灵会话"占坑，与新连接并存是历史上 Xvnc 卡死的诱因之一。
+// 30s 探测让死连接分钟级被回收，而不是小时级。
+proxy.on('open', (proxySocket) => {
+  try {
+    proxySocket.setKeepAlive(true, 30_000);
+  } catch {
+    /* ignore */
+  }
+});
 // 兜底：剥掉 KasmVNC 401 的 WWW-Authenticate 头，避免浏览器弹出原生 Basic Auth 登录框。
 // 正常路径下我们已注入正确凭据（不会 401）；万一凭据失配，宁可桌面加载失败也绝不把登录弹窗暴露给用户。
 proxy.on('proxyRes', (proxyRes) => {
@@ -1412,6 +1422,12 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) =>
   const ip = (req.socket && req.socket.remoteAddress) || '?';
   const uname = (u as any).username || '?';
   appendInstanceLog(inst.id, `[vnc] 连接尝试 user=${uname} ip=${ip}`);
+  // 客户端侧 TCP keepalive（与上游侧成对，见 proxy.on('open')）：及时回收断网客户端留下的半开死连接
+  try {
+    socket.setKeepAlive(true, 30_000);
+  } catch {
+    /* ignore */
+  }
   const t0 = Date.now();
   socket.on('close', () => appendInstanceLog(inst.id, `[vnc] 连接关闭（持续 ${Math.round((Date.now() - t0) / 1000)}s）`));
   proxy.ws(req, socket, head, { target: instanceTarget(inst) }, (err: any) => {
@@ -1478,7 +1494,7 @@ if (WATCHDOG_ENABLED) {
     appendPanelLog('WARN', `[看门狗] 实例「${inst.name}」(id=${inst.id}) 自愈重启（${reason}）：${detail}`);
     try {
       await stopInstance(inst);
-      await runInstance(inst);
+      await runInstance(inst, { keepImage: true }); // 自愈幂等：沿用当前镜像，绝不因本地 :latest 变了就隐式升级
       healthFails.delete(inst.id);
       app.log.info(`[watchdog] ${inst.containerName} 自愈完成（${reason}）`);
     } catch (e: any) {
