@@ -1,7 +1,13 @@
 name: release
 
-# 推送 vX.Y.Z 标签或在 GitHub 上发布 Release 时，构建并推送多架构镜像到 GHCR。
-# 也可手动触发（workflow_dispatch）只打 latest，便于验证流水线。
+# 推送 vX.Y.Z 标签或发布 Release 时，构建并推送多架构镜像（GHCR + 可选 Docker Hub）。
+# workflow_dispatch 可手动触发（只打 latest），用于验证流水线本身。
+#
+# 关键（v1.4.3 之后重写）：改用【原生 arm64 runner】分架构构建，不再用 QEMU 模拟。
+# 教训：QEMU 下 arm64 的 apt-get update 会 OOM（getline: Cannot allocate memory），
+# 让实例镜像反复发不出去（1.4.1 / 1.4.3 均折在这）。原生 runner 从根上消除该问题，也更快。
+# 模式：每个 (镜像 × 架构) 在各自原生 runner 上按 digest 推送 → merge job 合成多架构 manifest 打 tag。
+
 on:
   push:
     tags:
@@ -12,33 +18,24 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  WECHAT_IMAGE: ${{ github.repository_owner }}/wechat-on-cloud
-  PANEL_IMAGE: ${{ github.repository_owner }}/woc-panel
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: wechat
-            image: wechat-on-cloud
-            context: ./docker
-            dockerfile: ./docker/Dockerfile
-          - name: panel
-            image: woc-panel
-            context: ./panel
-            dockerfile: ./panel/Dockerfile
+          - { name: wechat, image: wechat-on-cloud, context: ./docker, dockerfile: ./docker/Dockerfile, platform: linux/amd64, arch: amd64, runner: ubuntu-latest }
+          - { name: wechat, image: wechat-on-cloud, context: ./docker, dockerfile: ./docker/Dockerfile, platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+          - { name: panel, image: woc-panel, context: ./panel, dockerfile: ./panel/Dockerfile, platform: linux/amd64, arch: amd64, runner: ubuntu-latest }
+          - { name: panel, image: woc-panel, context: ./panel, dockerfile: ./panel/Dockerfile, platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -50,19 +47,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 可选：同时推 Docker Hub。仅当仓库设置里加了 vars.DOCKERHUB_USERNAME 时启用，
-      # 让 fork 用户开箱即可走 GHCR；想加 Docker Hub 双推只需配 1 个 Variable + 1 个 Secret。
-      # 配置方法：repo Settings → Secrets and variables → Actions：
-      #   · Variables → DOCKERHUB_USERNAME = 你的 Docker Hub 用户名
-      #   · Secrets   → DOCKERHUB_TOKEN    = Docker Hub Access Token（hub.docker.com → Account Settings → Personal access tokens）
-      - name: Log in to Docker Hub
-        if: vars.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@v3
-        with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # 解析烤进面板镜像的版本号：打 tag / 发 Release 时用 tag 名（vX.Y.Z），手动触发则用 dev-<短SHA>。
       - name: Resolve build version
         id: ver
         run: |
@@ -72,52 +56,29 @@ jobs:
             echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Docker metadata (tags + labels)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          # metadata-action 接受多行 images：每行一个目标 registry，build-push-action 会同时推。
-          # Docker Hub 那行只在配了 DOCKERHUB_USERNAME 时出现；否则只剩 GHCR 一行（与旧行为一致）。
-          images: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
-            ${{ vars.DOCKERHUB_USERNAME != '' && format('docker.io/{0}/{1}', vars.DOCKERHUB_USERNAME, matrix.image) || '' }}
-          # 语义化标签：vX.Y.Z → X.Y.Z / X.Y / X；默认分支额外打 latest
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
-
-# ⚠️ 产物门禁（doc/dev/发布门禁.md）：先构建 amd64 到本地并跑冒烟探针，全过才推送。
-      # 教训：v1.4.0 本地门禁全绿，但 CI 现场 apt 拉到更新的 Chromium(150) —— 产物与本地验证的
-      # 不是同一个东西，坏镜像直发全体用户。门禁必须跑在「即将发布的那个产物」上。
-      - name: Build amd64 for smoke test (instance image)
-        if: matrix.name == 'wechat'
+      # ── 产物门禁：仅在 wechat + amd64（原生 x86，可 docker run）上跑冒烟探针 ──
+      # 「验证的东西和发布的东西必须是同一个 artifact」；DPI/CEF 类问题与架构无关，amd64 探针即可覆盖。
+      - name: Build amd64 image for smoke test (instance only)
+        if: matrix.name == 'wechat' && matrix.arch == 'amd64'
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
-          push: false
           load: true
           tags: woc-probe:ci
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }}
 
-      - name: Smoke probes (CEF/DPI/crash-loop/wechat-mode)
-        if: matrix.name == 'wechat'
+      - name: Smoke probes (DPI / CEF 两次启动 / 崩溃循环 / 微信模式)
+        if: matrix.name == 'wechat' && matrix.arch == 'amd64'
         run: |
           set -eu
           fail() { echo "::error::$1"; docker logs probe 2>&1 | tail -40 || true; exit 1; }
           docker run -d --name probe --security-opt seccomp=unconfined --shm-size=1g \
             -e PUID=1000 -e PGID=1000 -e WOC_APP_TYPE=chromium woc-probe:ci
-          # 等桌面会话就绪
           for i in $(seq 1 30); do docker exec probe pgrep xsettingsd >/dev/null 2>&1 && break; sleep 3; done
-          # ① XSETTINGS DPI 单位（96 DPI = 98304；写 96 会让一切 CEF 崩溃）
           docker exec probe bash -c 'DISPLAY=:1 dump_xsettings | grep -q "Xft/DPI 98304"' || fail "DPI 探针失败"
           echo "① DPI ✓"
-          # ② CEF 探针连跑两次：第 2 次 = 非首次启动路径（Chromium 150 正是死在这里）
           docker exec probe bash -c '
             for round in 1 2; do
               DISPLAY=:1 timeout 8 chromium --no-sandbox --disable-gpu --user-data-dir=/tmp/probe-profile about:blank >/dev/null 2>&1 &
@@ -126,33 +87,109 @@ jobs:
               kill -9 $p 2>/dev/null; pkill -9 chromium 2>/dev/null; sleep 1
             done' || fail "CEF 探针崩溃（第 1 或第 2 次启动）"
           echo "② CEF 两次启动 ✓"
-          # ③ autostart 崩溃循环检测：干净 30s 窗口零退出
           sleep 30
           exits=$(docker logs --since 30s probe 2>&1 | grep -c '已退出' || true)
           [ "$exits" -eq 0 ] || fail "autostart 崩溃循环：30s 内退出 $exits 次"
           echo "③ 零崩溃 ✓"
           docker rm -f probe
-          # ④ 微信模式走到「等待安装」
           docker run -d --name probe --security-opt seccomp=unconfined --shm-size=1g \
             -e PUID=1000 -e PGID=1000 -e WOC_APP_TYPE=wechat woc-probe:ci
           ok=0
-          for i in $(seq 1 30); do
-            docker logs probe 2>&1 | grep -q "尚未安装" && ok=1 && break; sleep 3
-          done
+          for i in $(seq 1 30); do docker logs probe 2>&1 | grep -q "尚未安装" && ok=1 && break; sleep 3; done
           [ "$ok" = "1" ] || fail "微信模式未到达等待安装"
           echo "④ 微信模式 ✓"
           docker rm -f probe
 
-      - name: Build and push (amd64 + arm64)
+      # ── 按 digest 推送到 GHCR（不打 tag）。同一内容跨仓库 digest 相同，merge 时再复制到 Docker Hub ──
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          # 仅面板镜像消费 WOC_VERSION（实例镜像不展示版本号），避免「未使用的 build-arg」告警。
+          platforms: ${{ matrix.platform }}
           build-args: ${{ matrix.name == 'panel' && format('WOC_VERSION={0}', steps.ver.outputs.version) || '' }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}-${{ matrix.arch }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.name }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: wechat, image: wechat-on-cloud }
+          - { name: panel, image: woc-panel }
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-${{ matrix.name }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: vars.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+            ${{ vars.DOCKERHUB_USERNAME != '' && format('docker.io/{0}/{1}', vars.DOCKERHUB_USERNAME, matrix.image) || '' }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+
+      # 从两个 arch 的 digest（都在 GHCR）合成多架构 manifest，一条命令打上所有 tag（含 Docker Hub，
+      # imagetools 会把 blob 从 GHCR 复制到 Docker Hub）。
+      - name: Create and push multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          set -eux
+          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          srcs=""
+          for f in *; do srcs="$srcs ${REGISTRY}/${{ github.repository_owner }}/${{ matrix.image }}@sha256:$f"; done
+          docker buildx imagetools create $tags $srcs
+
+      - name: Verify multi-arch manifest
+        run: |
+          set -eux
+          docker buildx imagetools inspect "${REGISTRY}/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}"
