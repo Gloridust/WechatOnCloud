@@ -15,8 +15,13 @@ woc_app_def() {
       # --disable-background-networking：关掉 Chromium 后台 phone-home（GCM 推送 / 组件更新 / 变体下载），
       #   在受限网络（NAS / 被墙）下这些会反复失败刷屏 "gcm ConnectionHandler failed net error: -2"。
       #   只影响后台流量，不影响前台网页加载与真实网络错误提示。
+      # 稳定性关键（v1.3.1，修复升级实例后黑屏回归）：较新 Chromium（≥149）在本极简容器里，当 KasmVNC 的 Xvnc
+      #   尚无客户端连接时分辨率/DPI 为退化值（xrandr 显示空、device-scale-factor 读成 0）→ 合成器算出的显示变换矩阵
+      #   [0 0 0 0; 0 0 0 0; …] 不可逆 → transform.cc NOTREACHED → GPU/viz 进程连崩 3 次 → "GPU process isn't usable.
+      #   Goodbye." 整个浏览器退出 → autostart 每 2s 重启 → 死循环黑屏（只有鼠标、无窗口）。旧版 Chromium 能容忍退化
+      #   分辨率，149 变严格才暴露。--force-device-scale-factor=1 强制缩放为 1，使变换矩阵可逆，从根上消除该崩溃。
       APP_BIN=/usr/bin/chromium
-      APP_LAUNCH="$APP_BIN --no-sandbox --no-first-run --no-default-browser-check --start-maximized --password-store=basic --disable-gpu --disable-background-networking --user-data-dir=/config/chromium"
+      APP_LAUNCH="$APP_BIN --no-sandbox --no-first-run --no-default-browser-check --start-maximized --password-store=basic --disable-gpu --force-device-scale-factor=1 --disable-background-networking --user-data-dir=/config/chromium"
       APP_NAME=Chromium
       ;;
     custom)

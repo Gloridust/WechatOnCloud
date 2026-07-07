@@ -30,6 +30,11 @@ services:
       - WOC_WATCHDOG_INTERVAL_SEC=${WOC_WATCHDOG_INTERVAL_SEC:-300}
       # 设备伪装：os-release 伪装成 deepin（默认开，=0 关恢复 Debian）。详见 .env.example / doc/设备伪装.md。
       - WOC_SPOOF_OS=${WOC_SPOOF_OS:-1}
+      # 登录会话时长（天，默认 30）。会话已落盘持久化：面板重启/自更新不再踢人。调小更安全、调大更省事。
+      - WOC_SESSION_DAYS=${WOC_SESSION_DAYS:-30}
+      # 拉取实例镜像的"无进度"超时（分钟，默认 5）。NAS 直连 docker.io 卡死时据此快速失败而非无限转圈。
+      - WOC_PULL_STALL_MIN=${WOC_PULL_STALL_MIN:-5}
+      # 实例桌面深色：由面板顶栏的主题开关统一控制（管理员），持久化在 accounts.json，无需在此配 env。
       # 面板首个管理员账号（仅首次启动、无账号文件时写入；务必改掉默认密码）
       - PANEL_ADMIN_USER=${WOC_USER:-admin}
       - PANEL_ADMIN_PASSWORD=${WOC_PASSWORD:-wechat}
@@ -50,5 +55,13 @@ services:
 
     ports:
       - "${WOC_HTTP_PORT:-36080}:8080"   # 面板 = 唯一对外入口
+
+    # 日志硬上限：docker 默认 json-file 不限大小，长期运行/异常刷错会无限吃磁盘。
+    # （实例容器的同类上限由面板创建时注入，无需在此配置。）
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "2"
 
     restart: unless-stopped

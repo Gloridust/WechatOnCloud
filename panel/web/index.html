@@ -10,6 +10,15 @@
     <meta name="apple-mobile-web-app-title" content="云微" />
     <link rel="apple-touch-icon" href="/icon-180.png" />
     <title>云微</title>
+    <script>
+      // 首屏前置好主题，避免亮/暗闪烁。auto/light/dark；缺省 auto（CSS 用 prefers-color-scheme 决定）。
+      try {
+        var t = localStorage.getItem('woc_theme');
+        document.documentElement.dataset.theme = t === 'light' || t === 'dark' ? t : 'auto';
+      } catch (e) {
+        document.documentElement.dataset.theme = 'auto';
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

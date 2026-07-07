@@ -59,9 +59,17 @@ export interface Instance {
   memHardLimitMB?: number;
 }
 
+// 面板级全局设置（持久化进 accounts.json）。
+export interface Settings {
+  // 实例桌面深色模式：由面板顶栏的主题开关统一控制（管理员）。true=实例内应用走深色。
+  // 既作为新建/重启实例的初始明暗（经容器环境 WOC_DARK 下发），也用于对运行中实例实时切换。
+  desktopDark?: boolean;
+}
+
 interface Data {
   users: User[];
   instances: Instance[];
+  settings?: Settings;
 }
 
 const FILE = process.env.PANEL_DATA || '/data/panel/accounts.json';
@@ -130,6 +138,20 @@ export function initStore() {
   persist();
 }
 
+// ---------- 全局设置 ----------
+export function getSettings(): Settings {
+  return data.settings || (data.settings = {});
+}
+
+export function getDesktopDark(): boolean {
+  return !!getSettings().desktopDark;
+}
+
+export function setDesktopDark(v: boolean) {
+  getSettings().desktopDark = !!v;
+  persist();
+}
+
 // ---------- 用户 ----------
 export function publicUser(u: User) {
   return {
@@ -195,6 +217,18 @@ export function deleteUser(id: string) {
   if (u.role === 'admin') throw new Error('不能删除管理员');
   data.users = data.users.filter((x) => x.id !== id);
   persist();
+}
+
+// 改用户名（登录名）。格式校验在路由层；这里只查重并写入。会话以 userId 为准，改名后无需重新登录。
+export function renameUser(id: string, newUsername: string) {
+  const u = findById(id);
+  if (!u) throw new Error('用户不存在');
+  const name = String(newUsername || '').trim();
+  const existing = findByUsername(name);
+  if (existing && existing.id !== id) throw new Error('用户名已存在');
+  u.username = name;
+  persist();
+  return publicUser(u);
 }
 
 // 设置某账户可访问的实例（账户侧编辑）

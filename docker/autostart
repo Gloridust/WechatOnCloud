@@ -18,6 +18,16 @@ APP_TYPE="${WOC_APP_TYPE:-wechat}"
 . /woc/app-defs.sh
 woc_app_def "$APP_TYPE"
 
+# 深色模式（实例环境 WOC_DARK=1 时；由面板顶栏主题开关持久化、经容器环境下发，改后需重启实例生效）。
+# 仅浏览器(Chromium)：加 --force-dark-mode 让其 UI + 网页走深色——这是极简容器里实测唯一稳的办法。
+# 微信：内核虽是 Chromium 但不吃命令行参数，也不订阅桌面 portal 的 color-scheme 信号（实测 portal 方案在
+# 极简容器里 session 总线不稳、微信也不跟随），故本开关对微信无效；微信深色请在微信「设置→通用→深色模式」
+# 里手动选（设置随数据卷持久化）。
+if { [ "${WOC_DARK:-}" = "1" ] || [ "${WOC_DARK:-}" = "true" ]; } && [ "$APP_TYPE" = "chromium" ]; then
+    APP_LAUNCH="${APP_LAUNCH} --force-dark-mode --enable-features=WebContentsForceDark"
+    echo "[autostart] 浏览器深色已启用（--force-dark-mode）"
+fi
+
 # 防“最小化后丢失”：本桌面（openbox）无任务栏，窗口被最小化就无处恢复 → 黑屏。
 # 看守进程：每 2s 把“被最小化（不可见）”的顶层窗口重新激活，相当于禁用最小化。对任意应用通用。
 (
@@ -37,7 +47,121 @@ if [ "$APP_TYPE" = "custom" ] && [ -z "${APP_LAUNCH:-}" ]; then
     exit 0
 fi
 
-# 1) 等待应用安装就绪（首次需在面板点「下载并安装」）
+# 1) 应用壁纸（若用户设置了自定义背景图）。
+# 关键：Xvnc 启动时是默认分辨率，浏览器连上后 KasmVNC 会 resize-remote 到浏览器尺寸。若只在启动时设一次，
+# 屏幕一变大，X 会把当时设的小尺寸 root pixmap【平铺】填满新屏（表现为壁纸被 2×2 平铺，见 issue 反馈）。
+# 故用看守：每 2s 检查分辨率，一变就用 --zoom（填充裁切、保持比例）重设壁纸。也顺带跟随面板对壁纸文件的改动。
+WALLPAPER_FILE="/config/.wallpaper"
+WALLPAPER_DIR="/config/backgrounds"
+(
+    export DISPLAY="${DISPLAY:-:1}"
+    last=""
+    while sleep 2; do
+        [ -f "$WALLPAPER_FILE" ] || { last=""; continue; }
+        wp=$(cat "$WALLPAPER_FILE" 2>/dev/null) || continue
+        [ -n "$wp" ] && [ -f "$WALLPAPER_DIR/$wp" ] || { last=""; continue; }
+        # 用「分辨率 + 壁纸名」做签名：分辨率变(resize)或换了壁纸都会重设
+        sig="${wp}@$(xrandr 2>/dev/null | grep -o '[0-9]\+x[0-9]\+' | head -1)"
+        if [ "$sig" != "$last" ]; then
+            last="$sig"
+            xwallpaper --zoom "$WALLPAPER_DIR/$wp" 2>/dev/null && echo "[autostart] 壁纸已应用/重设: $sig"
+        fi
+    done
+) &
+
+# 2) 应用自定义字体（若用户设置了）
+# 从持久卷恢复系统级 fontconfig 配置（跨越容器重建）
+if [ -f /config/.woc-fc-local.conf ]; then
+    cp /config/.woc-fc-local.conf /etc/fonts/local.conf
+    echo "[autostart] 系统字体配置已恢复"
+fi
+#     确保 ~/.local/share/fonts → /config/.fonts symlink 存在（旧容器升级兼容）
+mkdir -p /config/.fonts 2>/dev/null || true
+if [ ! -L /config/.local/share/fonts ] && [ ! -d /config/.local/share/fonts ]; then
+    mkdir -p /config/.local/share 2>/dev/null || true
+    ln -sfn /config/.fonts /config/.local/share/fonts 2>/dev/null || true
+fi
+FONT_CONF="/config/.config/fontconfig/fonts.conf"
+FONT_FAMILY_FILE="/config/.woc-font-family"
+if [ -f "$FONT_FAMILY_FILE" ]; then
+    family=$(cat "$FONT_FAMILY_FILE")
+    if [ -n "$family" ]; then
+        mkdir -p "$(dirname "$FONT_CONF")" 2>/dev/null || true
+        cat > "$FONT_CONF" << EOF
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <!-- generic families -->
+  <alias>
+    <family>sans-serif</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>serif</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>monospace</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <!-- system CJK fonts that WeChat/CEF may request -->
+  <alias>
+    <family>WenQuanYi Micro Hei</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>WenQuanYi Zen Hei</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>Noto Sans CJK SC</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>Noto Sans CJK</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <!-- force user font for any zh text regardless of requested family -->
+  <match target="pattern">
+    <test name="lang" compare="contains"><string>zh</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>${family}</string></edit>
+  </match>
+</fontconfig>
+EOF
+        echo "[autostart] 自定义字体已恢复: ${family}"
+        fc-cache -f 2>/dev/null || true
+    fi
+elif [ -f "$FONT_CONF" ]; then
+    echo "[autostart] 自定义字体配置已就绪"
+    fc-cache -f 2>/dev/null || true
+fi
+
+# 3) 启动 xsettingsd（让 GTK/Qt 应用实时响应字体/DPI 等 XSETTINGS 变更，无需重启）
+XSETTINGS_CONF="/config/.xsettingsd"
+if command -v xsettingsd >/dev/null 2>&1; then
+    XSETTINGS_FONT="WenQuanYi Micro Hei"
+    # 若用户保存了字体偏好，优先使用
+    if [ -f "$FONT_FAMILY_FILE" ]; then
+        family=$(cat "$FONT_FAMILY_FILE")
+        [ -n "$family" ] && XSETTINGS_FONT="$family"
+    fi
+    # ⚠️ XSETTINGS 规范里 Xft/DPI 的单位是「DPI × 1024」：96 DPI 必须写 98304。
+    # 若误写 96，所有 Chromium 内核应用（系统 Chromium、微信内嵌 CEF）会把 DPI 读成 96/1024≈0.09
+    # → 缩放因子≈0 → 显示变换矩阵不可逆(transform.cc NOTREACHED) → GPU 进程连崩 → 窗口秒关/黑屏。
+    # 这曾是 v1.2.9~v1.3.1 微信打不开公众号/附件、浏览器黑屏的总根因（issue #111）。
+    cat > "${XSETTINGS_CONF}" << EOF
+Xft/Antialias 1
+Xft/Hinting 1
+Xft/HintStyle "hintslight"
+Xft/RGBA "rgb"
+Xft/DPI 98304
+Gtk/FontName "${XSETTINGS_FONT} 10"
+EOF
+    xsettingsd --config="${XSETTINGS_CONF}" 2>/dev/null &
+    echo "[autostart] xsettingsd 已启动"
+fi
+
+# 4) 等待应用安装就绪（首次需在面板点「下载并安装」）
 notified=0
 while [ -n "${APP_BIN:-}" ] && [ ! -x "${APP_BIN}" ]; do
     if [ "${notified}" -eq 0 ]; then
@@ -46,6 +170,15 @@ while [ -n "${APP_BIN:-}" ] && [ ! -x "${APP_BIN}" ]; do
     fi
     sleep 2
 done
+
+# 3.5) 清理微信崩溃转储（crashinfo）。
+# 微信内嵌浏览器崩溃时 crashpad 会往 /config/.xwechat/crashinfo 里堆 .dmp 转储与 lock/meta 文件；
+# 崩溃风暴（如 DPI bug 期间每次点公众号都崩）会让它无限膨胀吃满磁盘，且启动时反复扫描刷日志。
+# 转储仅用于事后诊断，保留 1 天足够；过期即删，防磁盘被吃。
+if [ -d /config/.xwechat/crashinfo ]; then
+    find /config/.xwechat/crashinfo -type f -mtime +1 -delete 2>/dev/null || true
+    find /config/.xwechat/crashinfo -mindepth 1 -type d -empty -delete 2>/dev/null || true
+fi
 
 # 3) 常驻拉起应用
 while true; do

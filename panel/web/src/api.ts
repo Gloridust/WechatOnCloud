@@ -76,9 +76,10 @@ export interface VolEntry {
 }
 
 export interface VersionInfo {
-  current: string; // 当前构建版本（如 v1.2.0 / dev）
+  current: string; // 当前构建版本（如 v1.2.0 / dev-<sha>）
   latest: string | null; // 仓库上最新发布版（如 v1.2.1）；查不到为 null
-  hasUpdate: boolean; // 有更高的语义化版本可用
+  hasUpdate: boolean; // 有可升级目标（正式版：latest>current；开发版：查到任一正式版）
+  isDev: boolean; // 当前是开发版（非正式 vX.Y.Z）
   checkedAt: number; // 上次检查时间戳（ms）；0=尚未检查
   source: string | null; // 数据来源：dockerhub / ghcr / dockerhub+ghcr
   error: string | null; // 检查失败原因
@@ -128,6 +129,16 @@ export const api = {
   // 版本与更新检测
   getVersion: () => req<VersionInfo>('/api/version'),
   checkUpdate: () => req<VersionInfo>('/api/admin/version/check', { method: 'POST' }),
+  // 一键更新面板自身：拉新镜像 + 派生 helper 容器重建 woc-panel（带回滚）。返回后面板会重启。
+  selfUpdatePanel: () => req<{ ok: boolean; target: string; message: string }>('/api/admin/version/self-update', { method: 'POST' }),
+
+  // 实例桌面深色（与面板主题统一的那个开关）：读取当前态 + 设置（管理员，实时切换运行中实例）。
+  getDesktopTheme: () => req<{ dark: boolean }>('/api/desktop-theme'),
+  setDesktopTheme: (dark: boolean) =>
+    req<{ ok: boolean; dark: boolean; applied: number; failed: number }>('/api/admin/desktop-theme', {
+      method: 'POST',
+      body: JSON.stringify({ dark }),
+    }),
 
   // 子账号
   listUsers: () => req<{ users: PanelUser[] }>('/api/admin/users'),
@@ -140,6 +151,8 @@ export const api = {
     req<{ user: PanelUser }>(`/api/admin/users/${id}/disable`, { method: 'POST', body: JSON.stringify({ disabled }) }),
   resetUser: (id: string, newPassword: string) =>
     req<{ user: PanelUser }>(`/api/admin/users/${id}/reset`, { method: 'POST', body: JSON.stringify({ newPassword }) }),
+  renameUser: (id: string, username: string) =>
+    req<{ user: PanelUser }>(`/api/admin/users/${id}/rename`, { method: 'POST', body: JSON.stringify({ username }) }),
   deleteUser: (id: string) => req(`/api/admin/users/${id}`, { method: 'DELETE' }),
   setUserInstances: (id: string, instanceIds: string[]) =>
     req<{ user: PanelUser }>(`/api/admin/users/${id}/instances`, { method: 'POST', body: JSON.stringify({ instanceIds }) }),
@@ -188,7 +201,22 @@ export const api = {
   instanceStart: (id: string) => req(`/api/admin/instances/${id}/start`, { method: 'POST' }),
   instanceStop: (id: string) => req(`/api/admin/instances/${id}/stop`, { method: 'POST' }),
   instanceRestart: (id: string) => req(`/api/admin/instances/${id}/restart`, { method: 'POST' }),
-  instanceUpgrade: (id: string) => req(`/api/admin/instances/${id}/upgrade`, { method: 'POST' }),
+  // 单实例升级：异步（后端登记后立即返回），轮询 upgradeStatus().upgradingIds 直到该 id 移出。
+  instanceUpgrade: (id: string) => req<{ ok: boolean; started: boolean }>(`/api/admin/instances/${id}/upgrade`, { method: 'POST' }),
+  // 实例镜像升级状态（哪些实例落后于本地最新镜像、远端是否有新版、单个/批量升级进度）。
+  upgradeStatus: () =>
+    req<{
+      known: boolean;
+      outdatedCount: number;
+      outdatedIds: string[];
+      instances: { id: string; name: string; outdated: boolean }[];
+      remoteNewer: boolean | null;
+      upgradeAll: { running: boolean; total: number; done: number; failed: number; phase: string };
+      upgradingIds: string[];
+    }>('/api/admin/instances/upgrade-status'),
+  // 一键升级全部（异步，立即返回；先拉镜像再判定落后，进度看 upgradeStatus().upgradeAll）。
+  upgradeAllInstances: () =>
+    req<{ ok: boolean; started: boolean }>('/api/admin/instances/upgrade-all', { method: 'POST' }),
   instanceLogsUrl: (id: string) => `/api/admin/instances/${id}/logs`,
   // 全局日志 / 诊断包（范围 24h/7d/30d/1y）
   diagnosticsUrl: (range: string) => `/api/admin/diagnostics?range=${encodeURIComponent(range)}`,
@@ -234,4 +262,39 @@ export const api = {
   controlTake: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/take`, { method: 'POST' }),
   typeInInstance: (id: string, text: string) => req(`/api/instances/${id}/type`, { method: 'POST', body: JSON.stringify({ text }) }),
   keyInInstance: (id: string, key: string) => req(`/api/instances/${id}/key`, { method: 'POST', body: JSON.stringify({ key }) }),
+
+  // 桌面壁纸
+  listBackgrounds: (id: string) => req<{ backgrounds: string[] }>(`/api/admin/instances/${id}/backgrounds`),
+  uploadBackground: async (id: string, name: string, file: File) => {
+    const res = await fetch(`/api/admin/instances/${id}/backgrounds?name=${encodeURIComponent(name)}`, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/octet-stream' }, body: file,
+    });
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error || '上传失败');
+    return res.json();
+  },
+  applyBackground: (id: string, name: string) =>
+    req(`/api/admin/instances/${id}/backgrounds/${encodeURIComponent(name)}/apply`, { method: 'POST' }),
+  deleteBackground: (id: string, name: string) =>
+    req(`/api/admin/instances/${id}/backgrounds/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  getCurrentBackground: (id: string) => req<{ background: string }>(`/api/admin/instances/${id}/backgrounds/current`),
+  clearBackground: (id: string) => req(`/api/admin/instances/${id}/backgrounds/clear`, { method: 'POST' }),
+
+  // 字体管理
+  listFonts: (id: string) => req<{ fonts: string[] }>(`/api/admin/instances/${id}/fonts`),
+  uploadFont: async (id: string, name: string, file: File) => {
+    const res = await fetch(`/api/admin/instances/${id}/fonts?name=${encodeURIComponent(name)}`, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/octet-stream' }, body: file,
+    });
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error || '上传失败');
+    return res.json();
+  },
+  deleteFont: (id: string, name: string) =>
+    req(`/api/admin/instances/${id}/fonts/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  getCurrentFont: (id: string) => req<{ fontFile: string }>(`/api/admin/instances/${id}/fonts/current`),
+  applyFont: (id: string, name: string) =>
+    req(`/api/admin/instances/${id}/fonts/${encodeURIComponent(name)}/apply`, { method: 'POST' }),
+  resetFontDefault: (id: string) =>
+    req(`/api/admin/instances/${id}/fonts/default`, { method: 'POST' }),
 };

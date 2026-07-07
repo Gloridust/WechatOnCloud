@@ -17,7 +17,8 @@ RUN set -eux; \
         libnss3 libgbm1 libasound2 libxss1 \
         xz-utils \
         chromium \
-        xdotool xclip; \
+        xdotool xclip \
+        xwallpaper xsettingsd; \
     sed -i 's/# zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen; \
     locale-gen; \
     apt-get clean; \
@@ -51,6 +52,9 @@ RUN set -eux; \
         libdrm2; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
+
+# 字体/字体配置目录都在会话 HOME=/config 下（数据卷，运行时才挂载），故不在此预建；
+# 由 autostart 在启动时按需 mkdir + 建 ~/.local/share/fonts → /config/.fonts 软链（见 docker/autostart）。
 
 ENV LANG=zh_CN.UTF-8 \
     LC_ALL=zh_CN.UTF-8 \

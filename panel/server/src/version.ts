@@ -6,9 +6,10 @@
 export const CURRENT_VERSION = (process.env.WOC_VERSION || 'dev').trim();
 
 export interface VersionInfo {
-  current: string; // 当前构建版本（如 v1.2.0 / dev）
+  current: string; // 当前构建版本（如 v1.2.0 / dev-<sha>）
   latest: string | null; // 仓库上最新发布版（如 v1.2.1）；查不到为 null
-  hasUpdate: boolean; // 当前能解析为语义化版本且 latest > current 时为 true
+  hasUpdate: boolean; // 有可升级目标时为 true（正式版：latest>current；开发版：查到任一正式版即可"升级到正式版"）
+  isDev: boolean; // 当前不是正式语义化版本（如 dev-<sha> 本地/自构建版）
   checkedAt: number; // 上次检查时间戳（ms）；0 = 尚未检查
   source: string | null; // 数据来源：dockerhub / ghcr / dockerhub+ghcr
   error: string | null; // 检查失败原因（两个源都拉不到时）
@@ -64,7 +65,10 @@ async function ghcrTags(owner: string): Promise<string[]> {
   return Array.isArray(d?.tags) ? d.tags.map((t: any) => String(t)) : [];
 }
 
-let cache: VersionInfo = { current: CURRENT_VERSION, latest: null, hasUpdate: false, checkedAt: 0, source: null, error: null };
+// 当前是否为"开发版"（非正式 vX.Y.Z，如本地/自构建的 dev-<sha>）。开发版允许一键"升级到正式版"。
+const IS_DEV = !parseSemver(CURRENT_VERSION);
+
+let cache: VersionInfo = { current: CURRENT_VERSION, latest: null, hasUpdate: false, isDev: IS_DEV, checkedAt: 0, source: null, error: null };
 let inflight: Promise<VersionInfo> | null = null;
 
 export function versionInfo(): VersionInfo {
@@ -90,11 +94,13 @@ export function checkForUpdate(): Promise<VersionInfo> {
     const latestBare = maxSemver(tags);
     const cur = parseSemver(CURRENT_VERSION);
     const latestV = latestBare ? parseSemver(latestBare) : null;
-    const hasUpdate = !!(latestV && cur && cmpSemver(latestV, cur) > 0);
+    // 正式版：仅当 latest > current 才算有更新；开发版：查到任一正式版即可"升级到正式版"。
+    const hasUpdate = IS_DEV ? !!latestV : !!(latestV && cur && cmpSemver(latestV, cur) > 0);
     cache = {
       current: CURRENT_VERSION,
       latest: latestBare ? `v${latestBare}` : null,
       hasUpdate,
+      isDev: IS_DEV,
       checkedAt: Date.now(),
       source: sources.join('+') || null,
       error: tags.length ? null : '无法连接镜像仓库（Docker Hub / GHCR）',

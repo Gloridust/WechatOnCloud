@@ -170,6 +170,14 @@ export class VncAudio {
     }
   }
 
+  // 外部（同源 iframe 内的用户手势）通知：恢复被浏览器自动播放策略挂起的播放上下文。
+  // 关键：ensureResumeOnGesture 的监听绑在父窗口上，而用户点的是 iframe 内的桌面画面，事件不冒泡到父窗口，
+  // 故"点画面"无法解挂起。这里由 Desktop 在 iframe 手势时主动调用，让点桌面也能出声（不必重开声音开关）。
+  resumePlayback() {
+    if (this.destroyed) return;
+    this.player?.audioCtx?.resume().catch(() => {});
+  }
+
   private open() {
     if (!this.socket || !this.socket.connected) return;
     if (!this.opened) {

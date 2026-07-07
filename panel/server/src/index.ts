@@ -16,6 +16,7 @@ import {
   createSub,
   setDisabled,
   resetPassword,
+  renameUser,
   deleteUser,
   setUserInstances,
   listInstances,
@@ -29,6 +30,8 @@ import {
   setInstanceIcon,
   setInstanceUsers,
   publicInstance,
+  getDesktopDark,
+  setDesktopDark,
   APP_TYPES,
   type AppType,
   type User,
@@ -40,6 +43,11 @@ import {
   runInstance,
   stopInstance,
   upgradeInstance,
+  latestInstanceImageId,
+  instanceOutdated,
+  pullImage,
+  pruneDanglingImages,
+  remoteInstanceImageNewer,
   removeInstance as removeInstanceContainer,
   instanceRuntime,
   triggerWechat,
@@ -69,10 +77,24 @@ import {
   volDownloadFile,
   volBackupStream,
   volRestoreArchive,
+  listBackgrounds,
+  uploadBackground,
+  applyBackground,
+  deleteBackground,
+  getBackgroundImage,
+  getCurrentBackground,
+  clearBackground,
+  listFonts,
+  uploadFont,
+  deleteFont,
+  applyFont,
+  getAppliedFont,
+  getFontFamily,
 } from './docker.js';
-import { createSession, getSession, destroySession, destroyUserSessions } from './sessions.js';
+import { createSession, getSession, destroySession, destroyUserSessions, SESSION_TTL_MS } from './sessions.js';
 import { parseHost, parseAllowedHosts, isRequestHostAllowed } from './host-guard.js';
 import { CURRENT_VERSION, versionInfo, ensureChecked, checkForUpdate, startUpdateChecker } from './version.js';
+import { triggerSelfUpdate } from './self-update.js';
 import { appendInstanceLog, readInstanceLog, appendPanelLog, readPanelLog, pruneOldLogs, filterSince, rangeToMs, DIAG_RANGES } from './logs.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -119,6 +141,9 @@ app.addHook('onSend', async (_req, reply) => {
 });
 // 文件上传走原始二进制（前端以 application/octet-stream 直传 File）
 app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
+// Heartbeat and other no-body POST routes send no Content-Type; fall through to this wildcard
+// instead of being rejected with 415. Fastify's exact-match parsers above take priority.
+app.addContentTypeParser('*', { parseAs: 'buffer' }, (_req, _body, done) => done(null, null));
 
 // ---------- 鉴权辅助 ----------
 function currentUser(req: FastifyRequest): User | null {
@@ -161,7 +186,7 @@ app.post('/api/auth/login', async (req, reply) => {
     httpOnly: true,
     sameSite: 'lax',
     path: '/',
-    maxAge: 60 * 60 * 12,
+    maxAge: Math.floor(SESSION_TTL_MS / 1000), // 与服务端会话时长一致（WOC_SESSION_DAYS，默认 30 天）
   });
   return { user: publicUser(u) };
 });
@@ -189,6 +214,36 @@ app.get('/api/version', async (req, reply) => {
 app.post('/api/admin/version/check', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   return await checkForUpdate();
+});
+
+// 一键更新面板自身（管理员）：拉新镜像 → 派生 helper 容器重建 woc-panel（带健康检查 + 失败回滚）。
+// 返回后面板会在十几秒内被 helper 重启，前端提示用户稍候刷新。
+app.post('/api/admin/version/self-update', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  try {
+    const { target } = await triggerSelfUpdate();
+    return { ok: true, target, message: '已开始更新：面板将在十几秒内重启为新版本，请稍候刷新页面' };
+  } catch (e: any) {
+    appendPanelLog('ERROR', `面板自更新失败：${e?.message || e}`);
+    return reply.code(500).send({ error: '更新失败：' + (e?.message || e) });
+  }
+});
+
+// ---------- 实例桌面深色（与面板主题统一的那个开关）----------
+// 读取当前实例深色状态（任何登录用户可读，用于前端同步主题开关与实例的一致性）。
+app.get('/api/desktop-theme', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  return { dark: getDesktopDark() };
+});
+// 设置实例深色（管理员）。面板顶栏主题开关切到 深/浅 时调用：持久化即可。它作为浏览器(Chromium)实例
+// 启动时的明暗（经 envList → WOC_DARK 下发，autostart 据此加 --force-dark-mode），故**重启实例后生效**，
+// 不做在线切换（极简容器内无稳定的桌面 portal，微信也不跟随，详见 docker/autostart 注释）。
+app.post('/api/admin/desktop-theme', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const dark = !!(req.body as any)?.dark;
+  setDesktopDark(dark);
+  appendPanelLog('INFO', `实例深色设为 ${dark ? '深色' : '浅色'}（浏览器实例重启后生效）`);
+  return { ok: true, dark };
 });
 
 // ---------- 自助改密 ----------
@@ -262,6 +317,21 @@ app.post('/api/admin/users/:id/reset', async (req, reply) => {
   }
 });
 
+// 改用户名（登录名）。会话以 userId 为准，改名后保持登录、下次用新名登录即可。
+app.post('/api/admin/users/:id/rename', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const { username } = (req.body as any) ?? {};
+  const id = (req.params as any).id;
+  if (!username || !/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+    return reply.code(400).send({ error: '用户名为 3-20 位字母、数字或下划线' });
+  }
+  try {
+    return { user: renameUser(id, username) };
+  } catch (e: any) {
+    return reply.code(400).send({ error: e.message });
+  }
+});
+
 app.delete('/api/admin/users/:id', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   const id = (req.params as any).id;
@@ -308,7 +378,7 @@ app.post('/api/instances/:id/heal', async (req, reply) => {
   lastHealAt.set(id, now);
   appendPanelLog('WARN', `实例「${inst.name}」(id=${id}) 由 ${u.username} 触发卡死自愈（VNC 连不上 → 重启容器，数据保留）`);
   try {
-    await runInstance(inst);
+    await runInstance(inst, { keepImage: true }); // 自愈=重启，幂等：沿用当前镜像，绝不隐式换版
     return { ok: true, restarted: true };
   } catch (e: any) {
     appendPanelLog('ERROR', `实例「${inst.name}」(id=${id}) 卡死自愈重启失败：${e?.message || e}`);
@@ -566,7 +636,7 @@ app.post('/api/admin/instances/:id/restart', async (req, reply) => {
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
   try {
     appendPanelLog('INFO', `重启实例「${inst.name}」(id=${inst.id})`);
-    await runInstance(inst);
+    await runInstance(inst, { keepImage: true }); // 重启必须幂等：沿用当前镜像，换镜像只走显式「升级」
     return { ok: true };
   } catch (e: any) {
     appendPanelLog('ERROR', `重启实例「${inst.name}」(id=${inst.id}) 失败：${e?.message || e}`);
@@ -574,21 +644,113 @@ app.post('/api/admin/instances/:id/restart', async (req, reply) => {
   }
 });
 
-// 升级实例（仅管理员）：拉取最新微信镜像后重建（保留数据卷）。用于把旧实例更新到新版镜像
-// （如修复"最小化丢失"等），类似「更新微信」但更新的是实例容器镜像本身。
+// 升级实例（仅管理员）：拉取最新微信镜像后重建（保留数据卷）。
+// 异步化：拉取在受限网络下可达数分钟（要等到停滞超时），同步等待会被反代在 ~60s 掐断——
+// 前端误报「升级失败」而后台其实还在跑，用户再点一次就撞出并发重建。改为：登记 → 立即返回，
+// 前端轮询 upgrade-status 的 upgradingIds 直到该实例移出。
+const upgradingIds = new Set<string>();
 app.post('/api/admin/instances/:id/upgrade', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   const inst = findInstance((req.params as any).id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
-  try {
-    appendPanelLog('INFO', `升级实例「${inst.name}」(id=${inst.id})：拉取最新镜像后重建`);
-    await upgradeInstance(inst);
-    appendPanelLog('INFO', `升级实例「${inst.name}」(id=${inst.id}) 完成`);
-    return { ok: true };
-  } catch (e: any) {
-    appendPanelLog('ERROR', `升级实例「${inst.name}」(id=${inst.id}) 失败：${e?.message || e}`);
-    return reply.code(500).send({ error: '升级失败：' + (e?.message || e) });
-  }
+  if (upgradeAllState.running) return reply.code(409).send({ error: '「一键升级全部实例」进行中，请等它完成' });
+  if (upgradingIds.has(inst.id)) return reply.code(409).send({ error: '该实例已在升级中' });
+  upgradingIds.add(inst.id);
+  void (async () => {
+    try {
+      appendPanelLog('INFO', `升级实例「${inst.name}」(id=${inst.id})：拉取最新镜像后重建`);
+      await upgradeInstance(inst);
+      appendPanelLog('INFO', `升级实例「${inst.name}」(id=${inst.id}) 完成`);
+    } catch (e: any) {
+      appendPanelLog('ERROR', `升级实例「${inst.name}」(id=${inst.id}) 失败：${e?.message || e}`);
+    } finally {
+      upgradingIds.delete(inst.id);
+      // 没有其他升级在跑时顺手回收悬空旧镜像
+      if (!upgradingIds.size && !upgradeAllState.running) void pruneDanglingImages();
+    }
+  })();
+  return { ok: true, started: true };
+});
+
+// 实例镜像升级状态：哪些实例的镜像落后于本地最新镜像（用于面板"实例可升级"红点 + 一键升级）。
+// 面板与实例是两套镜像/容器：更新面板不会动实例，故用户常"更新了面板、实例还是旧镜像"（例：设壁纸报 127）。
+app.get('/api/admin/instances/upgrade-status', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const latestId = await latestInstanceImageId();
+  const list = listInstances();
+  const results = await Promise.all(
+    list.map(async (inst) => ({ id: inst.id, name: inst.name, outdated: await instanceOutdated(inst, latestId) })),
+  );
+  const outdated = results.filter((r) => r.outdated);
+  return {
+    known: !!latestId,
+    outdatedCount: outdated.length,
+    outdatedIds: outdated.map((r) => r.id),
+    instances: results,
+    // 远端 registry 是否有比本地更新的实例镜像（null=未知/离线）。补 instanceOutdated 的盲区：
+    // 用户更新面板后本地实例镜像还是旧的，仅比本地会误报"无可升级"。
+    remoteNewer: remoteInstanceImageNewer(),
+    upgradeAll: upgradeAllState, // 一键升级进行中的进度（running=false 表示空闲/已完成）
+    upgradingIds: [...upgradingIds], // 单实例升级中的实例（前端轮询用）
+  };
+});
+
+// 一键升级全部"镜像落后"的实例。
+// 异步化：拉镜像 + 逐个重建可能耗时数分钟到更久（受限网络下拉取要等到停滞超时），同步等待会让
+// 前端请求悬死、代理超时——用户反馈"一键升级一直卡死"。改为：立即返回，后台顺序执行，
+// 前端轮询 upgrade-status 里的 upgradeAll 进度。
+// 顺序很关键：先拉镜像、再判定谁落后。反过来会把"本来等于旧最新版"的实例漏掉——拉取带来
+// 更新后它们才变落后，用户点完"全部升级"却发现横幅还在。
+let upgradeAllState = { running: false, total: 0, done: 0, failed: 0, phase: '' };
+app.post('/api/admin/instances/upgrade-all', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  if (upgradeAllState.running) return reply.code(409).send({ error: '一键升级正在进行中，请等待完成' });
+  if (upgradingIds.size) return reply.code(409).send({ error: '有实例正在单独升级，请等它完成' });
+  upgradeAllState = { running: true, total: 0, done: 0, failed: 0, phase: '拉取最新实例镜像…' };
+  void (async () => {
+    try {
+      // ① 统一拉取一次（失败不阻断：用本地已有镜像重建）
+      try {
+        await pullImage();
+      } catch (e: any) {
+        appendPanelLog('WARN', `一键升级：拉取镜像失败（${e?.message || e}），改用本地镜像重建`);
+      }
+      // ② 拉取后再判定落后清单
+      const latestId = await latestInstanceImageId();
+      if (!latestId) {
+        appendPanelLog('ERROR', '一键升级：本地尚无实例镜像且拉取失败，无法继续');
+        return;
+      }
+      const outdated: ReturnType<typeof listInstances> = [];
+      for (const inst of listInstances()) if (await instanceOutdated(inst, latestId)) outdated.push(inst);
+      upgradeAllState.total = outdated.length;
+      if (!outdated.length) {
+        appendPanelLog('INFO', '一键升级：所有实例已是最新镜像');
+        return;
+      }
+      // ③ 逐个重建（跳过重复拉取）
+      for (const inst of outdated) {
+        upgradeAllState.phase = `升级「${inst.name}」…`;
+        upgradingIds.add(inst.id);
+        try {
+          appendPanelLog('INFO', `一键升级实例「${inst.name}」(id=${inst.id})…`);
+          await upgradeInstance(inst, { skipPull: true });
+        } catch (e: any) {
+          upgradeAllState.failed++;
+          appendPanelLog('ERROR', `一键升级实例「${inst.name}」(id=${inst.id}) 失败：${e?.message || e}`);
+        } finally {
+          upgradingIds.delete(inst.id);
+        }
+        upgradeAllState.done++;
+      }
+      appendPanelLog('INFO', `一键升级全部实例完成：成功 ${upgradeAllState.done - upgradeAllState.failed}、失败 ${upgradeAllState.failed}`);
+      // ④ 升级后旧镜像变悬空（<none>），顺手清理防磁盘堆积
+      await pruneDanglingImages();
+    } finally {
+      upgradeAllState = { ...upgradeAllState, running: false, phase: '' };
+    }
+  })();
+  return { ok: true, started: true };
 });
 
 // 实例侧：设置该实例可被哪些账户访问
@@ -964,6 +1126,150 @@ app.post('/api/admin/instances/:id/wechat/update', async (req, reply) => {
   return triggerInstanceWechat((req.params as any).id, 'update', reply);
 });
 
+// ---------- 桌面壁纸管理 ----------
+const bgHandler = (id: string, reply: FastifyReply): Instance | null => {
+  const inst = findInstance(id);
+  if (!inst) {
+    reply.code(404).send({ error: '实例不存在' });
+    return null; // 关键：reply 是 truthy，不能 return 它，否则调用方 `if (!inst)` 拦不住
+  }
+  return inst;
+};
+
+app.get('/api/admin/instances/:id/backgrounds', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  try { return { backgrounds: await listBackgrounds(inst) }; }
+  catch (e: any) { return reply.code(500).send({ error: e?.message || '列出壁纸失败' }); }
+});
+
+app.post('/api/admin/instances/:id/backgrounds', { bodyLimit: 50 * 1024 * 1024 }, async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  const name = String((req.query as any)?.name || '').trim();
+  const body = req.body as Buffer;
+  if (!Buffer.isBuffer(body) || body.length === 0) return reply.code(400).send({ error: '空文件' });
+  try {
+    await uploadBackground(inst, name, body);
+    return { ok: true };
+  } catch (e: any) { return reply.code(400).send({ error: e?.message || '上传失败' }); }
+});
+
+app.get('/api/admin/instances/:id/backgrounds/current', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  try { return { background: await getCurrentBackground(inst) }; }
+  catch (e: any) { return reply.code(500).send({ error: e?.message || '获取当前壁纸失败' }); }
+});
+
+app.get('/api/admin/instances/:id/backgrounds/:name/image', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  try {
+    const buf = await getBackgroundImage(inst, (req.params as any).name, true);
+    const name = (req.params as any).name as string;
+    const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : 'png';
+    const mime: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp' };
+    reply.header('Content-Type', mime[ext] || 'application/octet-stream');
+    reply.header('Cache-Control', 'public, max-age=86400');
+    return reply.send(buf);
+  } catch (e: any) { return reply.code(404).send({ error: '图片不存在' }); }
+});
+
+app.post('/api/admin/instances/:id/backgrounds/:name/apply', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  try {
+    await applyBackground(inst, (req.params as any).name);
+    return { ok: true };
+  } catch (e: any) { return reply.code(400).send({ error: e?.message || '应用壁纸失败' }); }
+});
+
+app.post('/api/admin/instances/:id/backgrounds/clear', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  try {
+    await clearBackground(inst);
+    return { ok: true };
+  } catch (e: any) { return reply.code(400).send({ error: e?.message || '清除壁纸失败' }); }
+});
+
+app.delete('/api/admin/instances/:id/backgrounds/:name', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  try {
+    await deleteBackground(inst, (req.params as any).name);
+    return { ok: true };
+  } catch (e: any) { return reply.code(400).send({ error: e?.message || '删除失败' }); }
+});
+
+// ---------- 字体管理 ----------
+app.get('/api/admin/instances/:id/fonts', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  try { return { fonts: await listFonts(inst) }; }
+  catch (e: any) { return reply.code(500).send({ error: e?.message || '列出字体失败' }); }
+});
+
+app.post('/api/admin/instances/:id/fonts', { bodyLimit: 50 * 1024 * 1024 }, async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  const name = String((req.query as any)?.name || '').trim();
+  const body = req.body as Buffer;
+  if (!Buffer.isBuffer(body) || body.length === 0) return reply.code(400).send({ error: '空文件' });
+  try {
+    await uploadFont(inst, name, body);
+    return { ok: true };
+  } catch (e: any) { return reply.code(400).send({ error: e?.message || '上传失败' }); }
+});
+
+app.delete('/api/admin/instances/:id/fonts/:name', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  try {
+    await deleteFont(inst, (req.params as any).name);
+    return { ok: true };
+  } catch (e: any) { return reply.code(400).send({ error: e?.message || '删除失败' }); }
+});
+
+app.get('/api/admin/instances/:id/fonts/current', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  try { return { fontFile: await getAppliedFont(inst) }; }
+  catch (e: any) { return reply.code(500).send({ error: e?.message || '获取当前字体失败' }); }
+});
+
+app.post('/api/admin/instances/:id/fonts/:name/apply', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  try {
+    await applyFont(inst, (req.params as any).name);
+    return { ok: true };
+  } catch (e: any) { return reply.code(400).send({ error: e?.message || '应用字体失败' }); }
+});
+
+app.post('/api/admin/instances/:id/fonts/default', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = bgHandler((req.params as any).id, reply);
+  if (!inst) return;
+  try {
+    await applyFont(inst, 'default');
+    return { ok: true };
+  } catch (e: any) { return reply.code(400).send({ error: e?.message || '重置字体失败' }); }
+});
+
 // ---------- 反向代理到内网 KasmVNC（按实例注入 Basic auth，会话 + 权限把守） ----------
 // 单个 proxy 实例，target 与凭据逐请求指定：凭据暂存在 req 上，proxyReq 时注入。
 const proxy = httpProxy.createProxyServer({ changeOrigin: true, ws: true });
@@ -979,6 +1285,16 @@ proxy.on('proxyReqWs', (proxyReq, req) => {
   const instId = (req as any)._wocInstId;
   if (instId) proxyReq.on('upgrade', () => appendInstanceLog(instId, '[vnc] 上游已接受(101) · 桌面连接建立'));
 });
+// 上游（面板→实例）套接字 TCP keepalive：客户端断网/切网（WiFi→4G、NAS 休眠）时 TCP 不会主动通知，
+// 半开死连接可挂数小时——对 KasmVNC 表现为"幽灵会话"占坑，与新连接并存是历史上 Xvnc 卡死的诱因之一。
+// 30s 探测让死连接分钟级被回收，而不是小时级。
+proxy.on('open', (proxySocket) => {
+  try {
+    proxySocket.setKeepAlive(true, 30_000);
+  } catch {
+    /* ignore */
+  }
+});
 // 兜底：剥掉 KasmVNC 401 的 WWW-Authenticate 头，避免浏览器弹出原生 Basic Auth 登录框。
 // 正常路径下我们已注入正确凭据（不会 401）；万一凭据失配，宁可桌面加载失败也绝不把登录弹窗暴露给用户。
 proxy.on('proxyRes', (proxyRes, req) => {
@@ -989,12 +1305,41 @@ proxy.on('proxyRes', (proxyRes, req) => {
     proxyRes.headers['permissions-policy'] = 'clipboard-read=(self), clipboard-write=(self)';
   }
 });
-proxy.on('error', (_err, _req, res) => {
+// 上游（实例 Web）暂时连不上时，给浏览器导航请求回一个「自动重连」的友好页面，而不是死的纯文本。
+// 实例在 创建初始化 / 升级 / 重启 / 内存自愈软重启，以及面板自更新（代理短暂中断）时都会短暂 502，
+// 几秒后即恢复；旧版回纯文本"桌面服务暂时不可用"且 iframe 一旦载入它就判 frameLoaded=true、不再重试，
+// 用户就卡在黑屏死页（用户反馈的"新版黑屏 桌面服务暂不可用"）。此页每 3s 自动重载，实例一就绪即自动连上；
+// 连续约 30s 仍不行才转手动重试，并按 20s 间隔重置计数（区分新一轮故障）。
+const UPSTREAM_DOWN_HTML =
+  `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">` +
+  `<meta name="viewport" content="width=device-width,initial-scale=1"><title>桌面连接中…</title><style>` +
+  `html,body{height:100%;margin:0}body{display:flex;align-items:center;justify-content:center;background:#14161c;` +
+  `color:#e7eaef;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}.box{text-align:center;` +
+  `max-width:340px;padding:24px}.sp{width:34px;height:34px;border:3px solid rgba(255,255,255,.16);border-top-color:#07C160;` +
+  `border-radius:50%;margin:0 auto 16px;animation:r 1s linear infinite}@keyframes r{to{transform:rotate(360deg)}}` +
+  `.t{font-size:15px;font-weight:600}.s{font-size:13px;color:#969ca6;margin-top:8px;line-height:1.6}.b{margin-top:18px;` +
+  `display:none}button{background:#07C160;color:#fff;border:0;border-radius:999px;padding:9px 22px;font-size:14px;cursor:pointer}` +
+  `</style></head><body><div class="box"><div class="sp" id="sp"></div><div class="t" id="t">桌面正在启动 / 重连中…</div>` +
+  `<div class="s" id="s">实例重启或初始化时会短暂不可用，将自动重连，请稍候。</div>` +
+  `<div class="b" id="b"><button onclick="location.reload()">重试</button></div></div><script>(function(){` +
+  `function rl(){location.reload()}try{var K='woc_up_retry',now=Date.now(),o={};try{o=JSON.parse(sessionStorage.getItem(K)||'{}')}catch(e){}` +
+  `var n=(now-(o.t||0)>20000)?1:((o.n||0)+1);sessionStorage.setItem(K,JSON.stringify({n:n,t:now}));` +
+  `if(n<=10){setTimeout(rl,3000)}else{document.getElementById('sp').style.display='none';document.getElementById('b').style.display='block';` +
+  `document.getElementById('t').textContent='桌面长时间未就绪';document.getElementById('s').textContent='实例可能在重启或未运行。可继续重试，或用左上角菜单返回主页让管理员检查。'}` +
+  `}catch(e){setTimeout(rl,3000)}})();</script></body></html>`;
+proxy.on('error', (_err, req, res) => {
   try {
     const r = res as any;
     if (r && typeof r.writeHead === 'function') {
-      r.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-      r.end('桌面服务暂时不可用');
+      // 仅对浏览器导航（接受 text/html）回友好自动重连页；JS/CSS/XHR 等子资源回纯文本，避免把 HTML 喂给非页面请求。
+      const accept = String((req as any)?.headers?.accept || '');
+      if (accept.includes('text/html')) {
+        r.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+        r.end(UPSTREAM_DOWN_HTML);
+      } else {
+        r.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+        r.end('桌面服务暂时不可用');
+      }
     } else if (r && typeof r.destroy === 'function') {
       r.destroy();
     }
@@ -1087,6 +1432,12 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) =>
   const ip = (req.socket && req.socket.remoteAddress) || '?';
   const uname = (u as any).username || '?';
   appendInstanceLog(inst.id, `[vnc] 连接尝试 user=${uname} ip=${ip}`);
+  // 客户端侧 TCP keepalive（与上游侧成对，见 proxy.on('open')）：及时回收断网客户端留下的半开死连接
+  try {
+    socket.setKeepAlive(true, 30_000);
+  } catch {
+    /* ignore */
+  }
   const t0 = Date.now();
   socket.on('close', () => appendInstanceLog(inst.id, `[vnc] 连接关闭（持续 ${Math.round((Date.now() - t0) / 1000)}s）`));
   proxy.ws(req, socket, head, { target: instanceTarget(inst) }, (err: any) => {
@@ -1153,7 +1504,7 @@ if (WATCHDOG_ENABLED) {
     appendPanelLog('WARN', `[看门狗] 实例「${inst.name}」(id=${inst.id}) 自愈重启（${reason}）：${detail}`);
     try {
       await stopInstance(inst);
-      await runInstance(inst);
+      await runInstance(inst, { keepImage: true }); // 自愈幂等：沿用当前镜像，绝不因本地 :latest 变了就隐式升级
       healthFails.delete(inst.id);
       app.log.info(`[watchdog] ${inst.containerName} 自愈完成（${reason}）`);
     } catch (e: any) {

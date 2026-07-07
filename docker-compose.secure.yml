@@ -1,0 +1,61 @@
+# 安全加固 overlay —— 可选，不修改默认行为。
+# 用法：docker compose -f docker-compose.yml -f docker-compose.secure.yml up -d
+#
+# 原理：在面板与宿主 docker.sock 之间插入 docker-socket-proxy，
+# 仅透传面板实际需要的 Docker API 端点，拒绝其余所有调用。
+# 同时将面板对裸 socket 的直接挂载替换为 /dev/null，
+# 强制面板经由代理的 TCP 端口访问 Docker。
+
+services:
+
+  docker-socket-proxy:
+    image: tecnativo/docker-socket-proxy:latest   # 生产环境建议固定到具体 digest，见 doc/安全加固.md
+    container_name: woc-socket-proxy
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # 代理以只读方式挂载宿主 socket
+    environment:
+      # ── 允许项（面板实际使用的端点）──────────────────────────────────
+      CONTAINERS: 1   # 容器生命周期（create/start/stop/restart/remove/inspect/logs/stats/archive）
+      EXEC: 1         # 必须开启：面板通过 exec 触发应用安装、文件管理、中文输入、设备 ID 重置
+      IMAGES: 1       # 实例镜像的拉取与检查
+      VOLUMES: 1      # 孤儿卷列举与清理
+      POST: 1         # 允许 POST 方法（create/start/exec-start/pull 等写操作均依赖此项）
+      INFO: 1         # /info 端点（诊断包中展示 Docker 版本与资源概况）
+      # ── 显式拒绝项 ───────────────────────────────────────────────────
+      BUILD: 0        # 禁止镜像构建
+      COMMIT: 0       # 禁止容器提交为镜像
+      SWARM: 0        # 禁止 Swarm 管理
+      SERVICES: 0     # 禁止 Swarm 服务操作
+      SECRETS: 0      # 禁止 Swarm 密钥操作
+      PLUGINS: 0      # 禁止插件管理
+      NODES: 0        # 禁止节点管理
+      NETWORKS: 0     # 禁止网络 CRUD（面板仅在创建容器时引用网络名，不调用网络 API）
+      AUTH: 0
+      CONFIGS: 0
+      DISTRIBUTION: 0
+      SESSION: 0
+      SYSTEM: 0
+      TASKS: 0
+    networks:
+      - woc_proxy     # 代理仅在内部网络上可达，不暴露给宿主或其他容器
+    # 不映射端口到宿主：代理的 2375 端口只在 woc_proxy 内部网络可见
+
+  panel:
+    environment:
+      # dockerode 读取此变量后通过代理的 TCP 端口访问 Docker，不再走裸 socket
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+    volumes:
+      # 用 /dev/null 覆盖基础 compose 中的裸 socket 挂载（compose overlay 按容器侧路径合并，
+      # 相同目标路径的条目以 overlay 为准）。面板进程无法将 /dev/null 当 Unix socket 打开，
+      # 从而在文件系统层面封锁对裸 socket 的直接访问。
+      - /dev/null:/var/run/docker.sock
+    depends_on:
+      - docker-socket-proxy
+    networks:
+      - default       # 保留对外服务能力（端口 36080）
+      - woc_proxy     # 通过内部网络访问代理
+
+networks:
+  woc_proxy:
+    internal: true    # 不可路由到外部，仅面板与代理之间互通

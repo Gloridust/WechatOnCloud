@@ -1,10 +1,10 @@
 import { hostname } from 'node:os';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { appendInstanceLog, deleteInstanceLog, appendPanelLog, readInstanceLog, readPanelLog, filterSince } from './logs.js';
 import http from 'node:http';
 import zlib from 'node:zlib';
 import Docker from 'dockerode';
-import { instanceAppType, type Instance } from './store.js';
+import { instanceAppType, getDesktopDark, type Instance } from './store.js';
 
 const WECHAT_IMAGE = process.env.WOC_WECHAT_IMAGE || 'ghcr.io/gloridust/wechat-on-cloud:latest';
 const PUID = process.env.PUID || '1000';
@@ -15,7 +15,8 @@ const SHM_SIZE = 1024 * 1024 * 1024; // 1gb
 // 默认关闭 KasmVNC 的 GPU 硬件编码（baseimage 检测到 /dev/dri/renderD* 时会给 Xvnc 加 -hw3d）：
 // 在 WSL2 / 虚拟 GPU 环境下该路径会导致 Xvnc 内存持续膨胀（实测反馈 21h 涨到 ~9GB）。
 // 我们已设 LIBGL_ALWAYS_SOFTWARE=1 走软件渲染，hw3d 对微信这类静态界面收益甚微。
-// 真实可用 GPU 想启用硬件编码：面板侧设 WOC_ENABLE_GPU=1。
+// 真实可用 GPU 想启用硬件编码：面板侧设 WOC_ENABLE_GPU=1，并让面板可见宿主 /dev/dri
+// （如同摄像头，把宿主 /dev 挂到 /host-dev，或设 WOC_DRI_DEVICES 显式指定）。
 const ENABLE_GPU = process.env.WOC_ENABLE_GPU === '1';
 
 // 可选：给每个实例容器设内存上限（GiB），作为 Xvnc 等异常增长时的兜底，避免拖垮宿主。
@@ -66,14 +67,25 @@ export type RuntimeState = 'running' | 'stopped' | 'missing';
 // 退回 WOC_DOCKER_NETWORK 或 null（null 时用 docker 默认 bridge，靠 IP 不靠名字会有问题，故尽量探测成功）。
 export async function ensureNetwork(): Promise<string | null> {
   if (networkName) return networkName;
-  try {
-    const self = docker.getContainer(hostname());
-    const info = await self.inspect();
-    const nets = Object.keys(info.NetworkSettings?.Networks || {}).filter((n) => n !== 'none' && n !== 'host');
-    if (nets.length > 0) networkName = nets[0];
-  } catch (e: any) {
-    console.warn('[docker] 无法探测面板网络（本地开发或缺少 docker.sock 时正常）:', e?.message || e);
+  // 找到「面板自身容器」以读取它所在网络，新建实例就接到同一网络，反代才能按容器名访问到实例。
+  // 候选依次：① 容器 hostname（默认 = 自身短 ID）② 已知面板容器名。
+  // 关键兜底：面板经「一键更新」自更新后，其 hostname 可能被复刻成【旧容器 ID】（已删除），① 会 404，
+  // 这时必须按容器名 ② 找到自己，否则探测失败→新建/重启的实例落到默认 bridge 网络→反代按名访问不到→502 黑屏。
+  const candidates = [hostname(), process.env.WOC_PANEL_CONTAINER || 'woc-panel'];
+  for (const cand of candidates) {
+    if (!cand) continue;
+    try {
+      const info = await docker.getContainer(cand).inspect();
+      const nets = Object.keys(info.NetworkSettings?.Networks || {}).filter((n) => n !== 'none' && n !== 'host');
+      if (nets.length > 0) {
+        networkName = nets[0];
+        return networkName;
+      }
+    } catch {
+      /* 该候选找不到/读不到，尝试下一个 */
+    }
   }
+  console.warn('[docker] 无法探测面板网络（本地开发或缺少 docker.sock 时正常）');
   return networkName;
 }
 
@@ -103,6 +115,47 @@ function videoDevices(): string[] {
   return [];
 }
 
+// GPU 直通：把宿主 /dev/dri 渲染节点映射进实例容器，仅 WOC_ENABLE_GPU=1 时生效。
+// 来源优先级：
+//   1) WOC_DRI_DEVICES 显式指定（逗号分隔，如 /dev/dri/renderD128,/dev/dri/card0）；
+//   2) 自动探测：扫描面板可见的 /host-dev/dri 或 /dev/dri 中的 renderD*/card*。
+// 一个都找不到则返回空：硬件编码不可用，但实例照常创建（优雅降级）。
+function driDevices(): string[] {
+  const explicit = (process.env.WOC_DRI_DEVICES || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (explicit.length) return explicit;
+  for (const dir of ['/host-dev/dri', '/dev/dri']) {
+    try {
+      if (!existsSync(dir)) continue;
+      const dris = readdirSync(dir)
+        .filter((n) => /^(renderD\d+|card\d+)$/.test(n))
+        .map((n) => `/dev/dri/${n}`); // 宿主侧设备路径
+      if (dris.length) return dris;
+    } catch {
+      /* 无权限/不可读，忽略 */
+    }
+  }
+  return [];
+}
+
+// 读取这些 DRI 设备文件的属主数字 GID。宿主上 /dev/dri/renderD* 常归属一个「动态分配」的
+// render 组（其 GID 因发行版而异），与镜像内 render 组的 GID 未必一致；仅靠组名加 GroupAdd
+// 时，容器内 abc 用户可能仍打不开渲染节点（permission denied）。把宿主侧真实数字 GID 一并
+// 加进 GroupAdd，才能保证可访问。读取失败/无权限则跳过（退回仅组名，优雅降级）。
+function driDeviceGids(devices: string[]): string[] {
+  const gids = new Set<string>();
+  for (const dev of devices) {
+    try {
+      gids.add(String(statSync(dev).gid));
+    } catch {
+      /* 设备不可 stat（面板未挂 /host-dev 等），忽略 */
+    }
+  }
+  return Array.from(gids);
+}
+
 function envList(inst: Instance): string[] {
   const env = [
     `PUID=${PUID}`,
@@ -120,6 +173,10 @@ function envList(inst: Instance): string[] {
   const appType = instanceAppType(inst);
   env.push(`WOC_APP_TYPE=${appType}`);
   if (appType === 'custom' && inst.customLaunch) env.push(`WOC_CUSTOM_LAUNCH=${inst.customLaunch}`);
+  // 深色模式：作为新实例启动时的初始明暗下发给 autostart（autostart 据此设 portal color-scheme，
+  // 微信等 Chromium 系应用即跟随系统深色）。开关由面板顶栏主题统一控制、持久化在 accounts.json，
+  // 运行中的实例则通过 setInstanceDark 实时切换（见下）。
+  if (getDesktopDark()) env.push('WOC_DARK=1');
   return env;
 }
 
@@ -145,26 +202,38 @@ async function ensureImage(): Promise<void> {
 }
 
 // 创建并启动一个微信实例容器。若同名容器已存在则先移除（仅容器，不动卷）。
-export async function runInstance(inst: Instance): Promise<void> {
+// keepImage（稳定性关键）：重启/自愈必须幂等——沿用该实例当前正在跑的镜像重建，
+// 绝不因"本地 :latest 恰好被某次拉取更新过"就悄悄换镜像（那等于一次没人要求的隐式升级；
+// 若本地新镜像恰好是坏的，一次看门狗自愈就能弄坏一个用户从没升级过的实例）。
+// 换镜像只允许发生在显式「升级实例」（不带 keepImage）。
+export async function runInstance(inst: Instance, opts?: { keepImage?: boolean }): Promise<void> {
   const net = await ensureNetwork();
-  await ensureImage();
+  let imageOverride: string | undefined;
   try {
     const existing = docker.getContainer(inst.containerName);
-    await existing.inspect();
+    const info = await existing.inspect();
+    if (opts?.keepImage && info.Image) imageOverride = String(info.Image);
     // 删除前先把旧容器最后日志快照进持久日志，否则随容器删除就看不到"上次为何停/崩"。
     await snapshotContainerLog(inst, '容器重建（重启/升级/自愈），保留上一容器最后日志');
     await existing.remove({ force: true });
   } catch {
     /* 不存在，正常 */
   }
+  // 沿用旧镜像重建时无需 ensureImage（镜像 id 一定在本地——容器刚在用它）；
+  // 也避免"离线 + 本地无 :latest"时连重启都失败。
+  if (!imageOverride) await ensureImage();
   // 摄像头设备（探测不到则为空数组 → 仅摄像头不可用，音频/麦克风照常）
   const vids = videoDevices();
+  const dris = ENABLE_GPU ? driDevices() : [];
   const hostConfig: Docker.HostConfig = {
     Binds: [`${inst.volumeName}:/config`],
     NetworkMode: net || undefined,
     SecurityOpt: ['seccomp=unconfined'],
     ShmSize: SHM_SIZE,
     RestartPolicy: { Name: 'unless-stopped' },
+    // 日志硬上限：docker 默认 json-file 无大小限制，应用崩溃循环（每 2s 刷错误）会把宿主磁盘
+    // 无限吃掉（群晖用户反馈"一下子 1TB 没了"的元凶之一）。每实例封顶 20MB×2。
+    LogConfig: { Type: 'json-file', Config: { 'max-size': '20m', 'max-file': '2' } },
   };
   if (INSTANCE_MEM > 0) {
     hostConfig.Memory = INSTANCE_MEM;
@@ -175,11 +244,22 @@ export async function runInstance(inst: Instance): Promise<void> {
     hostConfig.GroupAdd = ['video']; // 让容器内 abc 用户能访问 /dev/videoN
     console.log(`[docker] 实例 ${inst.id} 挂载摄像头设备: ${vids.join(', ')}`);
   }
+  if (dris.length) {
+    hostConfig.Devices = [
+      ...(hostConfig.Devices || []),
+      ...dris.map((d) => ({ PathOnHost: d, PathInContainer: d, CgroupPermissions: 'rwm' })),
+    ];
+    // 组名 render/video + 宿主侧真实数字 GID（应对 render 组 GID 在宿主与镜像间不一致的常见情况）。
+    hostConfig.GroupAdd = Array.from(
+      new Set([...(hostConfig.GroupAdd || []), 'render', 'video', ...driDeviceGids(dris)]),
+    );
+    console.log(`[docker] 实例 ${inst.id} 挂载 GPU 渲染设备: ${dris.join(', ')}`);
+  }
   // 伪装成真实有线网卡 MAC（厂商 OUI），替代容器默认的本地管理位 MAC。
   const mac = realisticMac(inst.id);
   const createOpts: Docker.ContainerCreateOptions = {
     name: inst.containerName,
-    Image: WECHAT_IMAGE,
+    Image: imageOverride || WECHAT_IMAGE,
     // 内部 hostname 伪装成"个人电脑"名（不再用 woc-wx-<hex>，那是容器/服务器特征）。
     // 反代靠容器名 name 寻址，与此 hostname 无关。
     Hostname: realisticHostname(inst.id),
@@ -197,6 +277,8 @@ export async function runInstance(inst: Instance): Promise<void> {
   try {
     await container.start();
     appendInstanceLog(inst.id, '容器已启动');
+    // 容器重建后恢复持久化的字体配置 / xsettingsd
+    restoreFontFromVolume(inst).catch(() => {});
   } catch (e) {
     // 启动失败但容器已被创建出来（Created 状态），不清理的话会成为"幽灵容器"——
     // 它仍占着卷名 woc-data-<id>，让后续删卷报 409。修复 #23 时发现 4 个此类残留。
@@ -222,13 +304,39 @@ export async function ensureRunning(inst: Instance): Promise<void> {
 
 // 升级实例：拉取最新微信镜像后重建容器（保留数据卷 → 登录态不丢）。
 // 拉取失败（本地自构建 / 离线 / 仓库不可达）则用本地现有镜像重建，不阻断。
-export async function upgradeInstance(inst: Instance): Promise<void> {
-  try {
-    await pullImage();
-  } catch (e: any) {
-    console.warn('[docker] 升级时拉取镜像失败，改用本地镜像重建:', e?.message || e);
+// skipPull：批量升级时由调用方先统一拉取一次，避免 N 个实例拉 N 次（受限网络下每次
+// 都要等到拉取停滞超时，表现为"一键升级卡死"）。
+export async function upgradeInstance(inst: Instance, opts?: { skipPull?: boolean }): Promise<void> {
+  if (!opts?.skipPull) {
+    try {
+      await pullImage();
+    } catch (e: any) {
+      console.warn('[docker] 升级时拉取镜像失败，改用本地镜像重建:', e?.message || e);
+    }
   }
+  // 升级不改变用户的运行状态：原本停止的实例，升级（重建）后停回去，而不是悄悄拉起。
+  const wasStopped = (await instanceRuntime(inst)) === 'stopped';
   await runInstance(inst);
+  if (wasStopped) {
+    try {
+      await stopInstance(inst);
+      appendInstanceLog(inst.id, '升级完成，恢复原有的停止状态');
+    } catch {
+      /* 停不回去也不算失败 */
+    }
+  }
+}
+
+// 清理悬空（dangling）镜像：升级后旧实例镜像失去 tag 变成 <none>，长期堆积吃磁盘
+// （每层 1-2GB，多次升级后可观）。只删无 tag 且无容器引用的镜像，安全。best-effort。
+export async function pruneDanglingImages(): Promise<void> {
+  try {
+    const res: any = await docker.pruneImages({ filters: { dangling: ['true'] } as any });
+    const freed = Number(res?.SpaceReclaimed || 0);
+    if (freed > 0) appendPanelLog('INFO', `已清理悬空镜像，释放 ${(freed / 1024 / 1024 / 1024).toFixed(2)} GB`);
+  } catch (e: any) {
+    console.warn('[docker] 清理悬空镜像失败（忽略）:', e?.message || e);
+  }
 }
 
 // 重置实例的设备 machine-id：删掉持久化的 .woc-machine-id 后重启，由 00-woc-identity 钩子重新生成
@@ -248,7 +356,7 @@ export async function regenInstanceMachineId(inst: Instance): Promise<void> {
   // 删除持久化文件；重启时钩子检测到缺失 → 生成新的唯一 machine-id 并写回卷
   await execCapture(inst, ['sh', '-c', 'rm -f /config/.woc-machine-id']);
   await stopInstance(inst);
-  await runInstance(inst);
+  await runInstance(inst, { keepImage: true }); // 重置身份=恢复类操作，幂等：不隐式换镜像（R10）
 }
 
 // 停止实例容器（保留容器与数据卷，可再启动）。
@@ -399,10 +507,161 @@ export async function instanceRuntime(inst: Instance): Promise<RuntimeState> {
   }
 }
 
+// 本地「最新实例镜像」的 Id（新建/升级实例会用到的镜像）。查不到（未拉取过）返回 null。
+export async function latestInstanceImageId(): Promise<string | null> {
+  try {
+    const img: any = await docker.getImage(WECHAT_IMAGE).inspect();
+    return String(img.Id);
+  } catch {
+    return null;
+  }
+}
+
+// 实例是否「镜像落后」：其运行中容器的镜像 Id 与本地最新镜像不一致（即重建就会换新镜像）。
+// 容器不存在 / 查不到最新镜像时返回 false（不打扰）。传入 latestId 复用一次查询，避免 N 次 inspect。
+export async function instanceOutdated(inst: Instance, latestId: string | null): Promise<boolean> {
+  if (!latestId) return false;
+  try {
+    const info: any = await docker.getContainer(inst.containerName).inspect();
+    const cur = String(info.Image || '');
+    return !!cur && cur !== latestId;
+  } catch {
+    return false; // 容器不存在（未创建/已删）→ 不算落后
+  }
+}
+
+// ---------- 远端实例镜像新版检测 ----------
+// 盲区背景：instanceOutdated 只比「容器镜像 vs 本地镜像」。用户更新面板后，本地实例镜像
+// 往往还是旧的（没人主动 pull）→ 检测恒为"无可升级"→ 升级引导永远不出现。这里用 registry
+// manifest digest（HEAD 请求，不下载）对比本地镜像的 RepoDigests，判断远端是否有新版。
+// best-effort：离线/被墙/私有源 → null（未知，不打扰）；本地自构建镜像（无 RepoDigests）→ null。
+let remoteImageCache: { val: boolean | null; at: number } = { val: null, at: 0 };
+let remoteImageInflight: Promise<void> | null = null;
+export function invalidateRemoteImageCache(): void {
+  remoteImageCache = { val: null, at: 0 };
+}
+// 同步返回缓存值（可能 null=未知），过期时后台刷新——upgrade-status 是管理页高频接口，不能被 8s 外呼拖住。
+export function remoteInstanceImageNewer(): boolean | null {
+  const TTL = 30 * 60 * 1000;
+  if (Date.now() - remoteImageCache.at >= TTL && !remoteImageInflight) {
+    remoteImageInflight = checkRemoteImageNewer()
+      .then((v) => {
+        remoteImageCache = { val: v, at: Date.now() };
+      })
+      .catch(() => {
+        remoteImageCache = { val: null, at: Date.now() };
+      })
+      .finally(() => {
+        remoteImageInflight = null;
+      });
+  }
+  return remoteImageCache.at ? remoteImageCache.val : null;
+}
+
+async function checkRemoteImageNewer(): Promise<boolean | null> {
+  let local: any;
+  try {
+    local = await docker.getImage(WECHAT_IMAGE).inspect();
+  } catch {
+    return null; // 本地还没有镜像：首次拉取走 ensureImage 流程，不在这里打扰
+  }
+  const repoDigests: string[] = local.RepoDigests || [];
+  if (!repoDigests.length) return null; // 本地自构建（无 registry 来源）→ 无从比较，不打扰
+  const ref = parseImageRef(WECHAT_IMAGE);
+  if (!ref) return null;
+  const remote = await fetchManifestDigest(ref);
+  if (!remote) return null;
+  return !repoDigests.some((d) => d.endsWith('@' + remote));
+}
+
+// 解析镜像引用 → { registry, repo, tag }。例：docker.io/gloridust/wechat-on-cloud:latest。
+function parseImageRef(image: string): { registry: string; repo: string; tag: string } | null {
+  const noDigest = image.split('@')[0];
+  const segs = noDigest.split('/');
+  let registry = 'docker.io';
+  if (segs.length > 1 && (segs[0].includes('.') || segs[0].includes(':'))) registry = segs.shift() as string;
+  let last = segs[segs.length - 1] || '';
+  let tag = 'latest';
+  const ti = last.lastIndexOf(':');
+  if (ti > 0) {
+    tag = last.slice(ti + 1);
+    segs[segs.length - 1] = last.slice(0, ti);
+  }
+  const repo = segs.join('/');
+  return repo ? { registry, repo, tag } : null;
+}
+
+async function fetchJsonWithTimeout(url: string, headers: Record<string, string>, ms = 8000): Promise<any> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, { headers, signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// 取 registry 上该 tag 的 manifest digest（多架构 index 的 digest，与本地 RepoDigests 同层级）。
+async function fetchManifestDigest(ref: { registry: string; repo: string; tag: string }): Promise<string | null> {
+  const accept =
+    'application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json';
+  let host = ref.registry;
+  let token = '';
+  try {
+    if (ref.registry === 'docker.io') {
+      host = 'registry-1.docker.io';
+      const d = await fetchJsonWithTimeout(
+        `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${ref.repo}:pull`,
+        {},
+      );
+      token = d?.token || '';
+    } else if (ref.registry === 'ghcr.io') {
+      const d = await fetchJsonWithTimeout(`https://ghcr.io/token?service=ghcr.io&scope=repository:${ref.repo}:pull`, {});
+      token = d?.token || '';
+    }
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      // HEAD 即可拿 Docker-Content-Digest（不下载 manifest 本体）
+      const res = await fetch(`https://${host}/v2/${ref.repo}/manifests/${ref.tag}`, {
+        method: 'HEAD',
+        headers: { accept, ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        signal: ctrl.signal,
+      });
+      if (!res.ok) return null;
+      return res.headers.get('docker-content-digest');
+    } finally {
+      clearTimeout(t);
+    }
+  } catch {
+    return null;
+  }
+}
+
+// 创建 exec 实例。容器 init 未完成时，linuxserver 基镜像的 'abc' 用户可能还没建好，docker 会以
+// 400「unable to find user abc: no matching entries in passwd file」直接拒绝创建 exec（见 issue #74）。
+// 对这种"用户未就绪"错误短暂重试，给容器 init 一点时间；超时则抛清晰的中文错误，而非透传难懂的 docker 400。
+async function execCreate(c: any, opts: any): Promise<any> {
+  let lastErr: any;
+  for (let i = 0; i < 8; i++) {
+    try {
+      return await c.exec(opts);
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      if (!/no matching entries in passwd|unable to find user/i.test(msg)) throw e;
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  throw new Error(`容器仍在初始化（桌面用户未就绪），请等待约十几秒后重试（${lastErr?.message || lastErr}）`);
+}
+
 // 在实例容器内执行命令，返回 stdout；若命令失败，把 stderr 透出给调用方。
-async function execCapture(inst: Instance, cmd: string[]): Promise<string> {
+async function execCapture(inst: Instance, cmd: string[], user = 'abc'): Promise<string> {
   const c = docker.getContainer(inst.containerName);
-  const exec = await c.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: 'abc' });
+  const exec = await execCreate(c, { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: user });
   const stream = await exec.start({ hijack: true, stdin: false });
   return await new Promise<string>((resolve, reject) => {
     let out = '';
@@ -433,7 +692,7 @@ export async function triggerWechat(inst: Instance, cmd: 'install' | 'update'): 
   const c = docker.getContainer(inst.containerName);
   const at = instanceAppType(inst);
   const action = cmd === 'update' ? 'update' : 'install';
-  const exec = await c.exec({
+  const exec = await execCreate(c, {
     Cmd: ['bash', '-c', `if [ -x /woc/app-ctl.sh ]; then /woc/app-ctl.sh ${at} ${action}; else /woc/wechat-ctl.sh ${action}; fi`],
     AttachStdout: false,
     AttachStderr: false,
@@ -469,15 +728,54 @@ export async function wechatStatus(inst: Instance): Promise<WechatStatus> {
   }
 }
 
-// 拉取微信镜像（首次部署/更新镜像用）。返回拉取日志的最后状态。
-export async function pullImage(onProgress?: (line: any) => void): Promise<void> {
+// 拉取微信镜像（首次部署/更新镜像用）。
+// 并发合并：创建实例/单实例升级/一键升级可能同时触发拉取，同一时刻只跑一个（后来者共享结果；
+// 其 onProgress 不再接收进度，可接受——进度只影响创建向导的百分比显示）。
+let pullInFlight: Promise<void> | null = null;
+export function pullImage(onProgress?: (line: any) => void): Promise<void> {
+  if (pullInFlight) return pullInFlight;
+  pullInFlight = doPullImage(onProgress).finally(() => {
+    pullInFlight = null;
+    invalidateRemoteImageCache(); // 本地镜像可能已更新 → 远端新版检测缓存作废
+  });
+  return pullInFlight;
+}
+
+async function doPullImage(onProgress?: (line: any) => void): Promise<void> {
+  // 无进度超时：NAS 直连 docker.io 常卡死（拉取流僵住、永不结束），旧版会让"创建实例"请求无限 hang，
+  // 前端一直转圈、还删不掉（issue #99）。这里只要 N 分钟内没有任何进度就中止拉取，让创建带清晰错误快速失败、
+  // 用户可重试/删除。默认 5 分钟，WOC_PULL_STALL_MIN 可调。
+  const STALL_MS = 1000 * 60 * Math.max(2, Number(process.env.WOC_PULL_STALL_MIN) || 5);
   return await new Promise((resolve, reject) => {
     docker.pull(WECHAT_IMAGE, (err: any, stream: NodeJS.ReadableStream) => {
       if (err) return reject(err);
+      let done = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const finish = (e: any) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        e ? reject(e) : resolve();
+      };
+      const arm = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          try {
+            (stream as any).destroy?.();
+          } catch {
+            /* ignore */
+          }
+          finish(new Error(`拉取镜像 ${Math.round(STALL_MS / 60000)} 分钟无进度，判定网络卡死并中止（建议配置国内镜像源或预拉取，详见 README）`));
+        }, STALL_MS);
+      };
+      arm();
       docker.modem.followProgress(
         stream,
-        (e: any) => (e ? reject(e) : resolve()),
-        (ev: any) => onProgress?.(ev),
+        (e: any) => finish(e),
+        (ev: any) => {
+          arm(); // 每有进度就重置超时
+          onProgress?.(ev);
+        },
       );
     });
   });
@@ -572,7 +870,11 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
     const info: any = await docker.info();
     sys += `容器: ${info.Containers}（运行 ${info.ContainersRunning}） · 镜像: ${info.Images}\n`;
     sys += `内核: ${info.KernelVersion} · OS: ${info.OperatingSystem} · 架构: ${info.Architecture}\n`;
-    sys += `CPU: ${info.NCPU} 核 · 内存: ${(info.MemTotal / 1073741824).toFixed(1)} GiB\n`;
+    sys += `CPU: ${info.NCPU} 核 · 内存: ${(info.MemTotal / 1073741824).toFixed(1)} GiB · 内存限制支持: ${info.MemoryLimit ? '是' : '否'} · Swap限制支持: ${info.SwapLimit ? '是' : '否'}\n`;
+    // cgroup / 存储 / 安全选项：排查 Ubuntu server 上的内存限制不生效、apparmor/userns 限制、seccomp 等宿主级问题。
+    sys += `cgroup: v${info.CgroupVersion ?? '?'}/${info.CgroupDriver ?? '?'} · 存储驱动: ${info.Driver}\n`;
+    if (Array.isArray(info.SecurityOptions) && info.SecurityOptions.length)
+      sys += `安全选项: ${info.SecurityOptions.map((o: string) => o.replace(/^name=/, '')).join(', ')}\n`;
     if (Array.isArray(info.Warnings) && info.Warnings.length) sys += `Docker 警告: ${info.Warnings.join('; ')}\n`;
   } catch (e: any) {
     sys += `Docker info: 获取失败 ${e?.message || e}\n`;
@@ -583,6 +885,12 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
   } catch {
     sys += `\n实例镜像 ${WECHAT_IMAGE}: 本地不存在（首次新建实例需联网拉取，可能在此卡住）\n`;
   }
+  // 面板侧实例资源配置（排查内存：默认不设 docker 硬上限时，单实例涨太大会被宿主内核 OOM-killer 杀，
+  // 在小内存 Ubuntu server 上尤其常见，表现为黑屏/502/反复重启）。
+  sys += `\n面板实例配置: SHM=${(SHM_SIZE / 1073741824).toFixed(0)}GiB`;
+  sys += ` · docker硬内存上限=${INSTANCE_MEM > 0 ? (INSTANCE_MEM / 1073741824).toFixed(1) + 'GiB' : '未设(不限，靠宿主 OOM 兜底)'}`;
+  sys += ` · GPU=${ENABLE_GPU ? '开' : '关(软件渲染)'}\n`;
+  sys += `内存自愈阈值(MiB): soft=${process.env.WOC_INSTANCE_MEM_SOFT_MB || '1500'} · hard=${process.env.WOC_INSTANCE_MEM_HARD_MB || '2500'}\n`;
   sys += `\n实例数: ${instances.length}\n`;
   entries.push({ name: 'system.txt', content: sys });
 
@@ -598,6 +906,15 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
       c += `===== 容器状态 =====\n运行: ${s.Running} · 状态: ${s.Status} · 退出码: ${s.ExitCode}\n`;
       c += `OOMKilled: ${s.OOMKilled} · 重启次数: ${info.RestartCount} · 启动于: ${s.StartedAt}\n`;
       if (s.Error) c += `错误: ${s.Error}\n`;
+      // 实时内存占用：配合宿主总内存/OOMKilled 一眼判断是不是内存不足（小内存 server 的高频成因）。
+      if (s.Running) {
+        try {
+          const mem = await instanceMemoryMB(inst);
+          if (mem > 0) c += `当前内存占用: ${mem} MiB\n`;
+        } catch {
+          /* stats 偶发不可用，忽略 */
+        }
+      }
       c += `镜像: ${String(info.Image).slice(0, 19)} · 健康: ${s.Health?.Status ?? 'n/a'}\n\n`;
     } catch (e: any) {
       c += `===== 容器状态 =====\n无法读取（容器可能未创建/已删除）：${e?.message || e}\n\n`;
@@ -634,6 +951,13 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
 // 校验文件名为安全 basename（防路径穿越）。
 function safeName(name: string): boolean {
   return !!name && name.length <= 200 && !name.includes('/') && !name.includes('\0') && name !== '.' && name !== '..';
+}
+
+// 壁纸/字体文件名：在 safeName 基础上，额外拒绝 shell 元字符。这些名字会被拼进 `sh -c '...${name}...'`
+// （xwallpaper/fc-scan 等），拒绝 ' " $ ` \ ; & | < > 及换行后，单引号内插值不可能被逃逸/注入，正常文件名
+//（含空格/括号/中文）仍放行。
+function safeMediaName(name: string): boolean {
+  return safeName(name) && !/['"$`\\;&|<>\r\n]/.test(name);
 }
 
 export async function uploadToInstance(inst: Instance, name: string, content: Buffer): Promise<void> {
@@ -885,6 +1209,207 @@ export async function volBackupStream(inst: Instance): Promise<NodeJS.ReadableSt
 // 整卷恢复：仅适用于本系统导出的备份（条目前缀 config/），解到容器根 → 落回 /config。要求实例已停止。
 export async function volRestoreArchive(inst: Instance, archive: Buffer): Promise<void> {
   await docker.getContainer(inst.containerName).putArchive(maybeGunzip(archive), { path: '/' });
+}
+
+// ---------- 桌面壁纸 ----------
+const BG_DIR = '/config/backgrounds';
+const WP_FILE = '/config/.wallpaper';
+
+export async function listBackgrounds(inst: Instance): Promise<string[]> {
+  try {
+    const out = await execCapture(inst, ['sh', '-c', `ls -1 ${BG_DIR} 2>/dev/null || true`]);
+    return out.split('\n').filter(Boolean);
+  } catch { return []; }
+}
+
+// 注：不再用 ImageMagick(convert) 生成缩略图（凭空胖 ~100MB + 引入注入点），直接回原图，前端按需缩放。
+// thumb 参数保留以兼容调用方，忽略之。
+export async function getBackgroundImage(inst: Instance, name: string, _thumb = false): Promise<Buffer> {
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
+  const path = `${BG_DIR}/${name}`;
+  const stream = (await docker.getContainer(inst.containerName).getArchive({ path })) as NodeJS.ReadableStream;
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    stream.on('data', (d: Buffer) => chunks.push(d));
+    stream.on('end', () => resolve());
+    stream.on('error', reject);
+  });
+  return extractSingleFileFromTar(Buffer.concat(chunks));
+}
+
+export async function uploadBackground(inst: Instance, name: string, content: Buffer): Promise<void> {
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
+  await execCapture(inst, ['mkdir', '-p', BG_DIR]);
+  await docker.getContainer(inst.containerName).putArchive(tarSingleFile(name, content), { path: BG_DIR });
+}
+
+// 检查实例容器内是否有某命令；没有则抛出友好错误（多为旧镜像未升级，避免用户看懵"退出码 127"）。
+async function assertHasTool(inst: Instance, tool: string, msg: string): Promise<void> {
+  let ok = false;
+  try {
+    const out = await execCapture(inst, ['sh', '-c', `command -v ${tool} >/dev/null 2>&1 && printf ok`]);
+    ok = out.trim() === 'ok';
+  } catch {
+    ok = false;
+  }
+  if (!ok) throw new Error(msg);
+}
+
+export async function applyBackground(inst: Instance, name: string): Promise<void> {
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
+  await assertHasTool(inst, 'xwallpaper', '该实例镜像过旧（缺壁纸组件 xwallpaper）。请先在「管理」对该实例点「升级」，再设置壁纸。');
+  await execCapture(inst, ['sh', '-c', `DISPLAY=:1 xwallpaper --zoom '${BG_DIR}/${name}' 2>/dev/null`]);
+  await execCapture(inst, ['sh', '-c', `echo '${name}' > '${WP_FILE}'`]);
+}
+
+export async function deleteBackground(inst: Instance, name: string): Promise<void> {
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
+  await execCapture(inst, ['rm', '-f', `${BG_DIR}/${name}`]);
+  await execCapture(inst, ['sh', '-c', `if [ -f '${WP_FILE}' ] && [ "$(cat '${WP_FILE}')" = '${name}' ]; then rm -f '${WP_FILE}'; fi`]);
+}
+
+export async function getCurrentBackground(inst: Instance): Promise<string> {
+  try {
+    const out = await execCapture(inst, ['sh', '-c', `cat ${WP_FILE} 2>/dev/null || true`]);
+    return out.trim();
+  } catch { return ''; }
+}
+
+export async function clearBackground(inst: Instance): Promise<void> {
+  await execCapture(inst, ['sh', '-c', 'DISPLAY=:1 xsetroot -solid black 2>/dev/null']);
+  await execCapture(inst, ['rm', '-f', WP_FILE]);
+}
+
+// ---------- 字体管理 ----------
+const FONT_DIR = '/config/.fonts';
+
+export async function listFonts(inst: Instance): Promise<string[]> {
+  try {
+    const out = await execCapture(inst, ['sh', '-c', `ls -1 ${FONT_DIR} 2>/dev/null || true`]);
+    return out.split('\n').filter(Boolean);
+  } catch { return []; }
+}
+
+export async function uploadFont(inst: Instance, name: string, content: Buffer): Promise<void> {
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
+  await execCapture(inst, ['mkdir', '-p', FONT_DIR]);
+  await docker.getContainer(inst.containerName).putArchive(tarSingleFile(name, content), { path: FONT_DIR });
+  await execCapture(inst, ['fc-cache', '-f'], 'root');
+}
+
+export async function deleteFont(inst: Instance, name: string): Promise<void> {
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
+  await execCapture(inst, ['rm', '-f', `${FONT_DIR}/${name}`]);
+  await execCapture(inst, ['fc-cache', '-f'], 'root');
+}
+
+const FONT_SEL_FILE = '/config/.woc-font';
+
+// 将字体的 fontconfig family name 设为用户首选（fallback 仍用文泉驿等系统字体）。
+// 设空字符串或 "default" 则清除偏好，回退系统默认。
+export async function applyFont(inst: Instance, fontFile: string): Promise<void> {
+  if (fontFile && !safeMediaName(fontFile)) throw new Error('文件名不合法');
+  if (fontFile && fontFile !== 'default') {
+    // 用 fc-scan 读取字体实际 family name（取第一个）
+    const out = await execCapture(inst, ['sh', '-c', `fc-scan --format='%{family[0]}' '${FONT_DIR}/${fontFile}' 2>/dev/null`]);
+    const family = out.trim();
+    if (!family) throw new Error('未能识别该字体的 family name');
+    // 写 fontconfig 系统级配置（/etc/fonts/local.conf 保证被读取，用户级可能被 XDG 路径问题跳过）
+    const xml = `<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <!-- generic families -->
+  <alias>
+    <family>sans-serif</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>serif</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>monospace</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <!-- system CJK fonts that WeChat/CEF may request -->
+  <alias>
+    <family>WenQuanYi Micro Hei</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>WenQuanYi Zen Hei</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>Noto Sans CJK SC</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <alias>
+    <family>Noto Sans CJK</family>
+    <prefer><family>${family}</family></prefer>
+  </alias>
+  <!-- force user font for any zh text regardless of requested family -->
+  <match target="pattern">
+    <test name="lang" compare="contains"><string>zh</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>${family}</string></edit>
+  </match>
+</fontconfig>`;
+    await execCapture(inst, ['bash', '-c', `cat > /etc/fonts/local.conf << 'CONF'\n${xml}\nCONF`], 'root');
+    execCapture(inst, ['bash', '-c', `cat > /config/.woc-fc-local.conf << 'CONF'\n${xml}\nCONF`], 'root').catch(() => {});
+    await execCapture(inst, ['fc-cache', '-f'], 'root');
+    await execCapture(inst, ['sh', '-c', `echo '${fontFile}' > ${FONT_SEL_FILE}`]);
+    await execCapture(inst, ['bash', '-c', `cat > ${FONT_SEL_FILE}-family << 'FAMILYEOF'\n${family}\nFAMILYEOF`]);
+    // 更新 xsettingsd 配置 → GTK/Qt 应用实时响应
+    applyXsettingsFont(inst, family).catch(() => {});
+  } else {
+    // 清除偏好，回退默认（文泉驿等系统字体）
+    await execCapture(inst, ['rm', '-f', '/etc/fonts/local.conf', '/config/.woc-fc-local.conf'], 'root');
+    await execCapture(inst, ['rm', '-f', '/config/.config/fontconfig/fonts.conf']);
+    await execCapture(inst, ['fc-cache', '-f'], 'root');
+    await execCapture(inst, ['rm', '-f', FONT_SEL_FILE, `${FONT_SEL_FILE}-family`]);
+    applyXsettingsFont(inst, 'WenQuanYi Micro Hei').catch(() => {});
+  }
+}
+
+async function applyXsettingsFont(inst: Instance, family: string): Promise<void> {
+  const conf = '/config/.xsettingsd';
+  // ⚠️ XSETTINGS 规范里 Xft/DPI 单位是「DPI × 1024」：96 DPI 必须写 98304。误写 96 会让所有
+  // Chromium 内核应用（系统 Chromium / 微信内嵌 CEF）把缩放因子算成≈0 → 变换矩阵不可逆 →
+  // GPU 进程连崩 → 窗口秒关/黑屏（v1.2.9~v1.3.1 的总根因，issue #111）。
+  const lines = [
+    'Xft/Antialias 1',
+    'Xft/Hinting 1',
+    'Xft/HintStyle "hintslight"',
+    'Xft/RGBA "rgb"',
+    'Xft/DPI 98304',
+    `Gtk/FontName "${family} 10"`,
+  ];
+  await execCapture(inst, ['sh', '-c', `printf '%s\\n' ${lines.map(l => `'${l}'`).join(' ')} > ${conf}`]);
+  await execCapture(inst, ['sh', '-c', 'pkill -HUP xsettingsd 2>/dev/null || xsettingsd --config=/config/.xsettingsd 2>/dev/null &']);
+}
+
+// 返回当前选中的字体文件名，空字符串表示默认
+export async function getAppliedFont(inst: Instance): Promise<string> {
+  try {
+    const out = await execCapture(inst, ['sh', '-c', `cat ${FONT_SEL_FILE} 2>/dev/null || true`]);
+    return out.trim();
+  } catch { return ''; }
+}
+
+export async function getFontFamily(inst: Instance, fontFile: string): Promise<string> {
+  if (!safeMediaName(fontFile)) throw new Error('文件名不合法');
+  try {
+    const out = await execCapture(inst, ['sh', '-c', `fc-scan '${FONT_DIR}/${fontFile}' 2>/dev/null | grep 'family:' | head -1 | cut -d'"' -f2`]);
+    return out.trim();
+  } catch { return ''; }
+}
+
+// 容器重建后从挂载卷恢复字体配置 & xsettingsd（不依赖 autostart 镜像版本）
+async function restoreFontFromVolume(inst: Instance): Promise<void> {
+  await execCapture(inst, ['bash', '-c', 'if [ -f /config/.woc-fc-local.conf ]; then cp /config/.woc-fc-local.conf /etc/fonts/local.conf && fc-cache -f; fi'], 'root').catch(() => {});
+  const famOut = await execCapture(inst, ['sh', '-c', 'cat /config/.woc-font-family 2>/dev/null || true']).catch(() => '');
+  const family = famOut.trim();
+  if (family) applyXsettingsFont(inst, family).catch(() => {});
 }
 
 // 实例容器名（供反代构造 target）。

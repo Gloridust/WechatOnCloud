@@ -1,0 +1,9 @@
+# 构建上下文为 ./panel。务必排除宿主的 node_modules：否则 `COPY web/ ./` / `COPY server/ ./`
+# 会把宿主（如 macOS）平台特定的二进制（esbuild/@esbuild/*）拷进 Linux 镜像，覆盖镜像内 npm install
+# 的干净依赖 → tsx/esbuild 报 "Host version ... does not match binary version" 而起不来。
+# （CI 是干净 checkout、本无 node_modules 不受影响；此文件保证本地构建也干净、与 CI 一致。）
+**/node_modules
+web/dist
+**/.DS_Store
+**/*.log
+.git
