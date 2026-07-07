@@ -1093,6 +1093,59 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---------- 管理页三 Tab 分段选择器（牛奶布艺：凹槽 + 浮起的选中胶囊） ---------- */
+.seg-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--trough);
+  border-radius: 999px;
+  padding: 4px;
+  margin: 2px 0 18px;
+  width: fit-content;
+}
+.seg-tab {
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 8px 22px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    color 0.18s,
+    background 0.18s,
+    box-shadow 0.18s;
+}
+.seg-tab:hover {
+  color: var(--text);
+}
+.seg-tab.active {
+  background: var(--surface);
+  color: var(--wx-green);
+  box-shadow: var(--crease);
+}
+/* 角标点：该 Tab 内有待处理事项（可升级 / 有残留资源） */
+.seg-dot {
+  position: absolute;
+  top: 7px;
+  right: 10px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+@media (max-width: 480px) {
+  .seg-tabs {
+    width: 100%;
+  }
+  .seg-tab {
+    flex: 1;
+    padding: 8px 0;
+  }
+}
+
 /* ---------- chip 多选 / 展示 ---------- */
 .field-label {
   font-size: 13px;

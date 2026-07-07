@@ -278,6 +278,20 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
   const [volumeInst, setVolumeInst] = useState<InstanceWithStatus | null>(null); // 数据卷管理弹窗
   const [iconInst, setIconInst] = useState<InstanceWithStatus | null>(null); // 图标编辑弹窗
   const [acting, setActing] = useState<Record<string, string>>({}); // 实例 id → 进行中的动作文案（启动中/升级中…）
+  // 管理页信息架构：实例 / 用户 / 系统 三个 Tab（此前 7 个区块一条长滚动，找东西全靠翻）。
+  // 记住上次停留的 Tab（sessionStorage），升级轮询等跨 Tab 状态不受影响——Tab 只控制渲染。
+  const [tab, setTabRaw] = useState<'inst' | 'users' | 'system'>(() => {
+    const t = sessionStorage.getItem('woc_admin_tab');
+    return t === 'users' || t === 'system' ? t : 'inst';
+  });
+  const setTab = (t: 'inst' | 'users' | 'system') => {
+    setTabRaw(t);
+    try {
+      sessionStorage.setItem('woc_admin_tab', t);
+    } catch {
+      /* ignore */
+    }
+  };
   const [upg, setUpg] = useState<{ outdatedCount: number; outdatedIds: string[]; remoteNewer: boolean } | null>(null); // 镜像落后的实例 + 远端有新版
   const [upgradingAll, setUpgradingAll] = useState(false);
   const [upgProgress, setUpgProgress] = useState(''); // 一键升级进度文案（"2/5 · 升级「xxx」…"）
@@ -540,7 +554,32 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
       <main className="content">
         {err && <div className="error">{err}</div>}
 
+        {/* 三 Tab 信息架构：实例（日常） / 用户（账号权限） / 系统（维护+诊断+关于）。
+            牛奶布艺分段选择器：凹槽 + 浮起的选中胶囊；角标点提示"该 Tab 里有事要处理"。 */}
         {isAdmin && (
+          <div className="seg-tabs" role="tablist">
+            {(
+              [
+                { key: 'inst', label: '实例', dot: !!(upg?.outdatedCount || upg?.remoteNewer) && instances.length > 0 },
+                { key: 'users', label: '用户', dot: false },
+                { key: 'system', label: '系统', dot: orphanConts.length + orphanVols.length > 0 },
+              ] as const
+            ).map((t) => (
+              <button
+                key={t.key}
+                role="tab"
+                aria-selected={tab === t.key}
+                className={'seg-tab' + (tab === t.key ? ' active' : '')}
+                onClick={() => setTab(t.key)}
+              >
+                {t.label}
+                {t.dot && <span className="seg-dot" />}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {isAdmin && tab === 'inst' && (
           <>
             <div className="section-row">
               <span className="section-title">实例</span>
@@ -602,7 +641,12 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
               </div>
             )}
 
-            <div className="section-row" style={{ marginTop: 22 }}>
+          </>
+        )}
+
+        {isAdmin && tab === 'users' && (
+          <>
+            <div className="section-row">
               <span className="section-title">子账号</span>
               <button className="btn-text" onClick={() => setCreatingUser(true)}>
                 + 新建子账号
@@ -658,9 +702,14 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                 ))}
               </div>
             )}
+          </>
+        )}
+
+        {isAdmin && tab === 'system' && (
+          <>
             {orphanConts.length > 0 && (
               <>
-                <div className="section-row" style={{ marginTop: 22 }}>
+                <div className="section-row">
                   <span className="section-title">残留容器</span>
                   <span className="muted small">不属于任何登记实例（多为创建失败遗留）；它们占着数据卷名，需先清理它们才能删除同名数据卷。</span>
                 </div>
@@ -718,27 +767,31 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
           </>
         )}
 
-        {/* 账号：所有人（含子账号）都能在此改密 */}
-        <div className="section-row" style={{ marginTop: isAdmin ? 22 : 0 }}>
-          <span className="section-title">账号</span>
-        </div>
-        <div className="inst-grid">
-          <div className="inst-card">
-            <div className="inst-head">
-              <span className="inst-name">{user?.username}</span>
-              {isAdmin ? <span className="tag">管理员</span> : <span className="tag tag-on">子账号</span>}
+        {/* 账号：所有人（含子账号）都能在此改密。管理员放「用户」Tab，子账号无 Tab 直接显示 */}
+        {(!isAdmin || tab === 'users') && (
+          <>
+            <div className="section-row" style={{ marginTop: isAdmin ? 22 : 0 }}>
+              <span className="section-title">账号</span>
             </div>
-            <div className="inst-sub">{isAdmin ? '可访问全部实例' : `可访问 ${user?.allowedInstances.length ?? 0} 个实例`}</div>
-            <div className="inst-actions">
-              <button className="btn btn-primary inst-act-wide" onClick={onChangePassword}>
-                修改密码
-              </button>
+            <div className="inst-grid">
+              <div className="inst-card">
+                <div className="inst-head">
+                  <span className="inst-name">{user?.username}</span>
+                  {isAdmin ? <span className="tag">管理员</span> : <span className="tag tag-on">子账号</span>}
+                </div>
+                <div className="inst-sub">{isAdmin ? '可访问全部实例' : `可访问 ${user?.allowedInstances.length ?? 0} 个实例`}</div>
+                <div className="inst-actions">
+                  <button className="btn btn-primary inst-act-wide" onClick={onChangePassword}>
+                    修改密码
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
+          </>
+        )}
 
-        {isAdmin && <DiagnosticsSection />}
-        <AboutSection isAdmin={isAdmin} />
+        {isAdmin && tab === 'system' && <DiagnosticsSection />}
+        {(!isAdmin || tab === 'system') && <AboutSection isAdmin={isAdmin} />}
       </main>
 
       {creatingUser && (

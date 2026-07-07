@@ -132,6 +132,7 @@ app.addHook('onRequest', async (req, reply) => {
       forwardedHost: req.headers['x-forwarded-host'] || null,
       hint: '反代部署请把对外域名加入 PANEL_ALLOWED_HOSTS（.env 逗号分隔，支持 *.example.com），改完用 docker compose up -d 重建容器（不是 restart）使其生效',
     });
+    return reply; // 显式终止后续生命周期（async 钩子里已 send 时的规范写法，防继续进入路由）
   }
 });
 
@@ -158,6 +159,19 @@ function requireAuth(req: FastifyRequest, reply: FastifyReply): User | null {
     reply.code(401).send({ error: '未登录' });
     return null;
   }
+  // 会话滑动续期（见 sessions.ts）：服务端刚续过期时间的话，顺手把 cookie 的 maxAge 也刷新，
+  // 浏览器侧同步续期——否则服务端会话还活着、cookie 却先过期，效果等于没续。
+  const token = req.cookies?.[COOKIE];
+  const s = token ? getSession(token) : null;
+  if (s?.slid) {
+    s.slid = false;
+    reply.setCookie(COOKIE, token!, {
+      httpOnly: true,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: Math.floor(SESSION_TTL_MS / 1000),
+    });
+  }
   return u;
 }
 
@@ -172,12 +186,41 @@ function requireAdmin(req: FastifyRequest, reply: FastifyReply): User | null {
 }
 
 // ---------- 登录 / 会话 ----------
+// 登录限速：NAS 面板常被直接暴露公网，无限速 = 可被无脑爆破。
+// 双键计数：来源 IP+用户名（5 次/15 分钟）防单账号爆破；来源 IP（20 次/15 分钟）防换用户名轮询。
+// 用 socket 直连地址而非 X-Forwarded-For——trustProxy 开着，XFF 可伪造，直连地址不可伪造
+// （反代场景下直连地址是反代 IP，限速粒度变粗但依然有效兜底）。成功登录清零。纯内存，重启即清。
+const loginFails = new Map<string, { n: number; resetAt: number }>();
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+function loginFailCheck(key: string, max: number): boolean {
+  const e = loginFails.get(key);
+  if (!e || e.resetAt < Date.now()) return true;
+  return e.n < max;
+}
+function loginFailBump(key: string): void {
+  const e = loginFails.get(key);
+  if (!e || e.resetAt < Date.now()) loginFails.set(key, { n: 1, resetAt: Date.now() + LOGIN_WINDOW_MS });
+  else e.n++;
+  // 防内存膨胀：过千条时清一次过期项
+  if (loginFails.size > 1000) for (const [k, v] of loginFails) if (v.resetAt < Date.now()) loginFails.delete(k);
+}
 app.post('/api/auth/login', async (req, reply) => {
   const { username, password } = (req.body as any) ?? {};
+  const ip = req.raw.socket?.remoteAddress || '?';
+  const ipKey = `ip:${ip}`;
+  const userKey = `u:${ip}|${String(username || '')}`;
+  if (!loginFailCheck(ipKey, 20) || !loginFailCheck(userKey, 5)) {
+    appendPanelLog('WARN', `登录限速触发：来源 ${ip} 尝试登录「${String(username || '')}」被暂时拒绝（15 分钟窗口内失败过多）`);
+    return reply.code(429).send({ error: '登录失败次数过多，请 15 分钟后再试' });
+  }
   const u = username ? findByUsername(username) : undefined;
   if (!u || u.disabled || !verifyPassword(u, password ?? '')) {
+    loginFailBump(ipKey);
+    loginFailBump(userKey);
     return reply.code(401).send({ error: '用户名或密码错误' });
   }
+  loginFails.delete(ipKey);
+  loginFails.delete(userKey);
   const token = createSession(u.id);
   reply.setCookie(COOKIE, token, {
     httpOnly: true,

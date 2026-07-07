@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 interface Session {
   userId: string;
   expires: number;
+  slid?: boolean; // 瞬态：本次请求刚做过滑动续期，提示鉴权层顺手刷新 cookie（持久化了也无害）
 }
 
 // 会话时长：可配置（天），默认 30 天。避免频繁重登（issue #95）。
@@ -65,6 +66,14 @@ export function getSession(token?: string) {
     sessions.delete(token);
     save();
     return null;
+  }
+  // 滑动续期：剩余不足一半即续满。NAS 面板常年挂着，固定 30 天硬过期的体验就是
+  // "隔三差五要重登"；滑动后活跃用户永不掉线，闲置超过时长才需重登。
+  // index.ts 的鉴权层看到 slid 标记会顺手刷新 cookie 的 maxAge，浏览器侧同步续期。
+  if (s.expires - Date.now() < SESSION_TTL_MS / 2) {
+    s.expires = Date.now() + SESSION_TTL_MS;
+    s.slid = true;
+    save();
   }
   return s;
 }
