@@ -3,8 +3,8 @@
 # --- 1) 构建前端 ---
 FROM node:22-slim AS web
 WORKDIR /web
-COPY web/package.json ./
-RUN npm install
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
 COPY web/ ./
 RUN npm run build
 
@@ -12,8 +12,8 @@ RUN npm run build
 FROM node:22-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-COPY server/package.json ./
-RUN npm install
+COPY server/package.json server/package-lock.json ./
+RUN npm ci --omit=dev
 COPY server/ ./
 COPY --from=web /web/dist ./web-dist
 
