@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 interface Session {
@@ -36,13 +36,14 @@ function save() {
   saveTimer = setTimeout(() => {
     saveTimer = null;
     try {
-      mkdirSync(dirname(FILE), { recursive: true });
+      mkdirSync(dirname(FILE), { recursive: true, mode: 0o700 });
       const now = Date.now();
       const obj: Record<string, Session> = {};
       for (const [t, s] of sessions) if (s.expires > now) obj[t] = s;
       const tmp = `${FILE}.tmp`;
       writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600 });
       renameSync(tmp, FILE);
+      chmodSync(FILE, 0o600);
     } catch {
       /* 写盘失败不致命：本进程内存里仍有会话 */
     }
