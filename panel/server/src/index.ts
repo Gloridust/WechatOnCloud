@@ -5,6 +5,7 @@ import httpProxy from 'http-proxy';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import {
   initStore,
@@ -1421,13 +1422,33 @@ app.all('/desktop/:id', desktopHandler);
 app.all('/desktop/:id/*', desktopHandler);
 
 // ---------- 静态 SPA + 前端路由回退 ----------
-await app.register(fstatic, { root: STATIC_DIR, wildcard: false, index: ['index.html'] });
+function setStaticCacheHeaders(res: ServerResponse, pathName: string) {
+  if (pathName.endsWith('index.html') || pathName.endsWith('/sw.js') || pathName.endsWith('/manifest.webmanifest')) {
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    return;
+  }
+  if (pathName.includes('/assets/')) {
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  }
+}
+
+function sendSpaIndex(reply: FastifyReply) {
+  reply.header('Cache-Control', 'no-store, max-age=0');
+  return reply.sendFile('index.html');
+}
+
+await app.register(fstatic, {
+  root: STATIC_DIR,
+  wildcard: false,
+  index: ['index.html'],
+  setHeaders: setStaticCacheHeaders,
+});
 app.setNotFoundHandler((req, reply) => {
   const url = req.raw.url || '';
   if (url.startsWith('/api') || url.startsWith('/desktop')) {
     return reply.code(404).send({ error: 'not found' });
   }
-  return reply.sendFile('index.html');
+  return sendSpaIndex(reply);
 });
 
 // ---------- 启动 + WebSocket 升级（同样校验会话） ----------
