@@ -9,7 +9,7 @@
 services:
 
   docker-socket-proxy:
-    image: tecnativo/docker-socket-proxy:latest   # 生产环境建议固定到具体 digest，见 doc/安全加固.md
+    image: ${WOC_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:latest}   # 生产环境建议固定到具体 digest，见 doc/安全加固.md
     container_name: woc-socket-proxy
     restart: unless-stopped
     volumes:
