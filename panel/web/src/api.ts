@@ -86,9 +86,45 @@ export interface VersionInfo {
   error: string | null; // 检查失败原因
 }
 
+const ACCESS_REAUTH_TS = 'woc_access_reauth_ts';
+const ACCESS_REAUTH_MESSAGE = '访问会话已失效，正在重新验证…';
+
+function isSameOriginApi(input: RequestInfo | URL) {
+  const url = typeof input === 'string' || input instanceof URL ? input.toString() : input.url;
+  const parsed = new URL(url, window.location.origin);
+  return parsed.origin === window.location.origin && parsed.pathname.startsWith('/api/');
+}
+
+function redirectForAccessReauth() {
+  if (!navigator.onLine) return false;
+
+  const now = Date.now();
+  const last = Number(sessionStorage.getItem(ACCESS_REAUTH_TS) || 0);
+  if (now - last < 8000) return false;
+  sessionStorage.setItem(ACCESS_REAUTH_TS, String(now));
+
+  // Fetch cannot follow Cloudflare Access' cross-origin login redirect because the browser
+  // blocks it as CORS. A top-level navigation lets Access re-authenticate and then return here.
+  const url = new URL(window.location.href);
+  url.searchParams.set('woc_access_reauth', String(now));
+  window.location.replace(url.toString());
+  return true;
+}
+
+async function apiFetch(input: RequestInfo | URL, init?: RequestInit) {
+  try {
+    return await fetch(input, init);
+  } catch (err) {
+    if (isSameOriginApi(input) && redirectForAccessReauth()) {
+      throw new Error(ACCESS_REAUTH_MESSAGE);
+    }
+    throw err;
+  }
+}
+
 // 原始二进制上传（File 直传 application/octet-stream），用于数据卷上传/解压/恢复
 async function rawUpload(url: string, file: File): Promise<any> {
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'content-type': 'application/octet-stream' },
@@ -102,7 +138,7 @@ async function rawUpload(url: string, file: File): Promise<any> {
 async function req<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
   // 仅在有 body 时声明 JSON content-type：否则 Fastify 对「空 body + application/json」会报 400
   const headers = opts.body ? { 'content-type': 'application/json', ...opts.headers } : opts.headers;
-  const res = await fetch(path, {
+  const res = await apiFetch(path, {
     credentials: 'same-origin',
     ...opts,
     headers,
@@ -226,7 +262,7 @@ export const api = {
   // 文件中转
   listFiles: (id: string) => req<{ files: { name: string; size: number }[] }>(`/api/instances/${id}/files`),
   uploadFile: async (id: string, file: File) => {
-    const res = await fetch(`/api/instances/${id}/upload?name=${encodeURIComponent(file.name)}`, {
+    const res = await apiFetch(`/api/instances/${id}/upload?name=${encodeURIComponent(file.name)}`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/octet-stream' },
