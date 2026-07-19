@@ -14,6 +14,11 @@ function desktopUrl(id: string) {
   );
 }
 
+// Kasm 嵌入文档要求 iframe allow 含 self，才能把 clipboard-read/write 传给内嵌 noVNC（KasmVDI 模式）。
+function vncIframeAllow() {
+  return 'clipboard-read; clipboard-write; self; microphone; camera; autoplay';
+}
+
 // 「无感输入」钩子：装进同源 iframe，让用户直接在微信里打中文。
 // - compositionend（中文提交）→ 经 xclip+xdotool 转发（绕开 VNC keysym 容量上限）。
 // - 转发未完成期间（队列活跃），把后续可见字符 + 回车/退格也串进同一队列按序送出 →
@@ -81,6 +86,85 @@ function installSeamlessIme(win: Window, doc: Document, instId: string): () => v
   return () => {
     doc.removeEventListener('compositionend', onCompositionEnd, true);
     win.removeEventListener('keydown', onKeyDownCapture, true);
+  };
+}
+
+// 修复 KasmVNC 无缝剪贴板「同窗口粘贴始终旧内容」：
+// noVNC 仅在 window focus 变化后的第一次 click 才调 checkLocalClipboard()，同窗口内 _resendClipboardNextUserDrivenEvent
+// 已为 false 就不再重读本机剪贴板；切换微信窗口会触发 focus → 才更新。此处每次 Ctrl+V 前强制同步。
+function installClipboardFreshSync(win: Window, doc: Document): () => void {
+  if (!win.isSecureContext) return () => {};
+
+  let busy = false;
+  const isPaste = (e: KeyboardEvent) => (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'v';
+
+  const syncTextToRemote = (text: string) => {
+    win.postMessage({ action: 'clipboardsnd', value: text }, '*');
+  };
+
+  const syncFromLocal = async (): Promise<boolean> => {
+    if (!navigator.clipboard?.read) {
+      if (!navigator.clipboard?.readText) return false;
+      const text = await navigator.clipboard.readText();
+      if (text) syncTextToRemote(text);
+      return !!text;
+    }
+    const items = await navigator.clipboard.read();
+    const ui = (win as any).UI;
+    if (ui?.rfb?.clipboardPasteDataFrom) {
+      await ui.rfb.clipboardPasteDataFrom(items);
+      return true;
+    }
+    for (const item of items) {
+      if (item.types.includes('text/plain')) {
+        const text = await (await item.getType('text/plain')).text();
+        if (text) {
+          syncTextToRemote(text);
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  const forwardPaste = () => {
+    const mod = /Mac|iPhone|iPad/i.test(navigator.platform) ? { metaKey: true } : { ctrlKey: true };
+    const target = doc.getElementById('noVNC_keyboardinput') || doc.getElementById('noVNC_canvas');
+    if (!target) return;
+    for (const type of ['keydown', 'keyup'] as const) {
+      target.dispatchEvent(
+        new KeyboardEvent(type, { key: 'v', code: 'KeyV', bubbles: true, cancelable: true, ...mod }),
+      );
+    }
+  };
+
+  const onKeyDown = async (e: KeyboardEvent) => {
+    if (!isPaste(e) || busy) return;
+    busy = true;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    try {
+      await syncFromLocal();
+      // 等剪贴板经 VNC 推到容器后再发 Ctrl+V
+      await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+      forwardPaste();
+    } catch {
+      forwardPaste();
+    } finally {
+      busy = false;
+    }
+  };
+
+  const onMouseDown = () => {
+    // 点击输入框后常会紧跟 Ctrl+V；提前异步同步，缩小 race 窗口
+    void syncFromLocal().catch(() => {});
+  };
+
+  win.addEventListener('keydown', onKeyDown, true);
+  win.addEventListener('mousedown', onMouseDown, true);
+  return () => {
+    win.removeEventListener('keydown', onKeyDown, true);
+    win.removeEventListener('mousedown', onMouseDown, true);
   };
 }
 
@@ -224,6 +308,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const fontInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const remoteClipRef = useRef(''); // KasmVDI 下容器→本机走 postMessage，textarea 不更新
   const dragDepth = useRef(0);
   const lastBeat = useRef(0);
   const audioRef = useRef<VncAudio | null>(null);
@@ -247,6 +332,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     setFiles([]);
     setShowClip(false);
     setClipText('');
+    remoteClipRef.current = '';
     setImeText('');
     setProbing(true);
     recovering.current = false;
@@ -415,6 +501,29 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       /* 隐私模式等禁用 localStorage：忽略 */
     }
   }, [id, inputMode]);
+
+  // KasmVDI 模式：容器→本机剪贴板经 postMessage clipboardrx 回传（不会写入 noVNC 面板 textarea）。
+  useEffect(() => {
+    if (!showVnc || !frameLoaded) return;
+    const onMsg = (e: MessageEvent) => {
+      if (e.source !== frameRef.current?.contentWindow) return;
+      if (e.data?.action === 'clipboardrx' && typeof e.data.value === 'string') {
+        remoteClipRef.current = e.data.value;
+        setClipText(e.data.value);
+      }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, [showVnc, frameLoaded, id]);
+
+  // 每次粘贴前强制同步本机剪贴板（修 KasmVNC 同窗口不重读的 bug）
+  useEffect(() => {
+    if (!showVnc || !frameLoaded) return;
+    const win = frameRef.current?.contentWindow;
+    const doc = frameRef.current?.contentDocument;
+    if (!win || !doc) return;
+    return installClipboardFreshSync(win, doc);
+  }, [showVnc, frameLoaded, id]);
 
   // 无感模式：往同源 iframe 装「中文转发 + 有序队列」钩子；切回转发/重连/卸载时自动移除。
   useEffect(() => {
@@ -743,20 +852,65 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     }
   };
 
-  // 跨设备剪贴板（文本）：通过同源 iframe 直接喂给 KasmVNC 自带的剪贴板 textarea 并触发其发送逻辑
-  // （内部走 RFB.clipboardPasteFrom → clientCutText）。不依赖浏览器异步剪贴板 API，故 http/局域网 IP 下也可用，
-  // 规避了"非安全上下文禁用 navigator.clipboard 导致粘贴失败"的问题。文本会进入容器系统剪贴板，
-  // 在微信输入框按 Ctrl+V 即可粘贴。
+  // 跨设备剪贴板：noVNC 在 iframe 内会进入 KasmVDI 模式，官方上行通道是 postMessage clipboardsnd；
+  // 同时触发 textarea change 作为兜底（走 UI.clipboardSend → RFB.clipboardPasteFrom）。
   const pushClipboardToRemote = (text: string): boolean => {
     try {
-      const doc = frameRef.current?.contentDocument;
-      const ta = doc?.getElementById('noVNC_clipboard_text') as HTMLTextAreaElement | null;
-      if (!doc || !ta) return false;
-      ta.value = text;
-      ta.dispatchEvent(new (frameRef.current!.contentWindow as any).Event('change', { bubbles: true }));
+      const win = frameRef.current?.contentWindow;
+      if (!win) return false;
+      win.postMessage({ action: 'clipboardsnd', value: text }, '*');
+      try {
+        const ta = frameRef.current?.contentDocument?.getElementById('noVNC_clipboard_text') as HTMLTextAreaElement | null;
+        if (ta) {
+          ta.value = text;
+          ta.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      } catch {
+        /* postMessage 已发出，DOM 兜底失败可忽略 */
+      }
       return true;
     } catch {
       return false;
+    }
+  };
+
+  // 安全上下文（HTTPS / localhost）下读取本机剪贴板：文本直送容器，图片自动上传到桌面。
+  const pasteFromLocal = async () => {
+    if (!window.isSecureContext || !navigator.clipboard?.read) {
+      toast('无法自动读取本机剪贴板（需 HTTPS 或 localhost）。请在本框内手动 Ctrl+V 粘贴', 'error');
+      return;
+    }
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        if (item.types.includes('image/png')) {
+          const blob = await item.getType('image/png');
+          const file = new File([blob], `clipboard-${Date.now()}.png`, { type: 'image/png' });
+          if (!id) return;
+          setUploading(true);
+          try {
+            await api.uploadFile(id, file);
+            toast('剪贴板图片已上传到桌面，可在应用里打开发送', 'ok');
+            refreshFiles();
+          } finally {
+            setUploading(false);
+          }
+          return;
+        }
+        if (item.types.includes('text/plain')) {
+          const text = await (await item.getType('text/plain')).text();
+          setClipText(text);
+          if (pushClipboardToRemote(text)) {
+            toast('本机文本已发送到容器剪贴板，在应用输入框按 Ctrl+V 粘贴', 'ok');
+          } else {
+            toast('发送失败：桌面尚未连接', 'error');
+          }
+          return;
+        }
+      }
+      toast('剪贴板中没有可识别的文本或图片', 'error');
+    } catch {
+      toast('读取本机剪贴板被拒绝，请允许浏览器剪贴板权限后重试', 'error');
     }
   };
 
@@ -793,9 +947,15 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     }
   };
 
-  // 读取容器（微信侧）当前剪贴板内容到本框，便于把容器内复制的文字带回本地
+  // 读取容器（微信侧）当前剪贴板：KasmVDI 下以 postMessage 缓存为准，textarea 可能陈旧
   const pullClipboardFromRemote = () => {
     try {
+      const cached = remoteClipRef.current;
+      if (cached) {
+        setClipText(cached);
+        toast('已读取容器剪贴板', 'ok');
+        return;
+      }
       const doc = frameRef.current?.contentDocument;
       const ta = doc?.getElementById('noVNC_clipboard_text') as HTMLTextAreaElement | null;
       if (ta) {
@@ -1003,7 +1163,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             className="iv-frame"
             src={desktopUrl(id)}
             title={`${appLabel} · 实例桌面`}
-            allow="clipboard-read; clipboard-write; microphone; camera; autoplay"
+            allow={vncIframeAllow()}
             onLoad={() => {
               setFrameLoaded(true);
               if (id) api.clientLog(id, 'iframe 已加载（noVNC 页面就绪，开始连 VNC）');
@@ -1023,7 +1183,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               <div className="iv-loading-sub">{profile.enterHint}</div>
               <div className="iv-loading-sub">拖文件到此处即可上传；需要声音点顶部「声音」开启，再在画面上点一下即出声</div>
               {!window.isSecureContext && (
-                <div className="iv-loading-warn">当前非 HTTPS 访问，浏览器将禁用麦克风与摄像头（音频播放不受影响）</div>
+                <div className="iv-loading-warn">当前非安全上下文（非 HTTPS 且非 localhost），浏览器将禁用剪贴板/麦克风/摄像头（音频播放不受影响）</div>
               )}
             </div>
           )}
@@ -1132,14 +1292,23 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 placeholder="在此输入或粘贴文本，点「发送到剪贴板」后到应用输入框按 Ctrl+V 粘贴"
                 rows={5}
               />
-              <button className="btn btn-primary files-upload" onClick={sendClip}>
-                发送到剪贴板
-              </button>
+              <div className="clip-actions">
+                <button className="btn btn-primary files-upload" onClick={sendClip}>
+                  发送到剪贴板
+                </button>
+                {window.isSecureContext && (
+                  <button className="btn files-upload" disabled={uploading} onClick={pasteFromLocal}>
+                    从本机剪贴板读取
+                  </button>
+                )}
+              </div>
               <button className="btn-text" style={{ alignSelf: 'flex-start', marginTop: 6 }} onClick={pullClipboardFromRemote}>
                 ↓ 读取容器剪贴板到此框
               </button>
               <div className="files-hint">
-                局域网 http 访问时浏览器会禁用系统级剪贴板同步，故用此框中转：文本→容器剪贴板，再在应用里 Ctrl+V。
+                {window.isSecureContext
+                  ? 'HTTPS 或 localhost 下桌面内可直接 Ctrl+C/V 同步剪贴板（含图片）。若未生效，用「从本机剪贴板读取」或在此框粘贴后点发送。'
+                  : '局域网 IP 的 http 访问不是安全上下文，浏览器禁用剪贴板 API。请在此框手动 Ctrl+V 粘贴文本后点「发送」；图片请用「文件」上传。'}
               </div>
             </div>
           )}
