@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
@@ -77,10 +77,11 @@ const FILE = process.env.PANEL_DATA || '/data/panel/accounts.json';
 let data: Data = { users: [], instances: [] };
 
 function persist() {
-  mkdirSync(dirname(FILE), { recursive: true });
+  mkdirSync(dirname(FILE), { recursive: true, mode: 0o700 });
   const tmp = `${FILE}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data, null, 2));
+  writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
   renameSync(tmp, FILE);
+  chmodSync(FILE, 0o600);
 }
 
 function makeUser(username: string, password: string, role: Role): User {
