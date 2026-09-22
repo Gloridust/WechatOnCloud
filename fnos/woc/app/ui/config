@@ -1,0 +1,13 @@
+{
+  ".url": {
+    "woc.main": {
+      "title": "云微",
+      "icon": "images/icon_{0}.png",
+      "type": "url",
+      "protocol": "",
+      "port": "${wizard_port}",
+      "url": "/",
+      "allUsers": true
+    }
+  }
+}
