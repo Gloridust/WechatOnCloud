@@ -2,6 +2,6 @@
   "defaults": {
     "run-as": "package"
   },
-  "username": "wechat-on-cloud",
-  "groupname": "wechat-on-cloud"
+  "username": "docker-woc",
+  "groupname": "docker-woc"
 }

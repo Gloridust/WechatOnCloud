@@ -3,7 +3,7 @@
     "stepTitle": "管理员账号",
     "items": [
       {
-        "type": "string",
+        "type": "text",
         "field": "WOC_USER",
         "label": "管理员用户名",
         "defaultValue": "admin",
@@ -21,16 +21,23 @@
     "stepTitle": "运行参数",
     "items": [
       {
-        "type": "string",
-        "field": "WOC_HTTP_PORT",
-        "label": "对外访问端口",
-        "defaultValue": "36080"
+        "type": "text",
+        "field": "wizard_port",
+        "label": "对外访问端口（FN Connect 会映射到 woc.[fnid].fnos.net）",
+        "defaultValue": "36080",
+        "rules": [{ "required": true, "message": "请输入端口" }]
       },
       {
-        "type": "string",
+        "type": "text",
         "field": "WOC_VERSION",
         "label": "镜像版本（建议钉到具体版本）",
         "defaultValue": "latest"
+      },
+      {
+        "type": "text",
+        "field": "WOC_ALLOWED_HOSTS",
+        "label": "面板域名白名单（逗号分隔，FN Connect 建议保留默认）",
+        "defaultValue": "*.fnos.net,*.5ddd.com"
       }
     ]
   }

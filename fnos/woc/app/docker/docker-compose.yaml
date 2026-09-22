@@ -1,24 +1,33 @@
-# fnOS 应用中心会直接执行本 compose 来启停应用。
-# 与仓库根的 docker-compose.yml 等价：面板为唯一服务，挂 docker.sock 按需创建微信实例。
-# 注意：面板需要访问宿主 docker.sock 来动态创建/销毁微信实例容器（等同宿主 root 权限）。
-#       因此本应用必须能挂载 /var/run/docker.sock；若 fnOS 沙箱禁止，应用将无法新建实例。
+# 面板为唯一服务。桌面入口 type=url + 端口，FN Connect 将打开 woc.[fnid].fnos.net。
 services:
   panel:
-    image: ghcr.io/gloridust/woc-panel:${WOC_VERSION:-latest}
+    image: ${WOC_IMAGE_PREFIX:-docker.io/gloridust}/woc-panel:${WOC_VERSION:-latest}
     container_name: woc-panel
-    pull_policy: always
     environment:
       - PORT=8080
-      - WOC_WECHAT_IMAGE=ghcr.io/gloridust/wechat-on-cloud:${WOC_VERSION:-latest}
+      - WOC_WECHAT_IMAGE=${WOC_IMAGE_PREFIX:-docker.io/gloridust}/wechat-on-cloud:${WOC_VERSION:-latest}
       - PUID=${WOC_PUID:-1000}
       - PGID=${WOC_PGID:-1000}
       - TZ=${WOC_TZ:-Asia/Shanghai}
       - PANEL_ADMIN_USER=${WOC_USER:-admin}
       - PANEL_ADMIN_PASSWORD=${WOC_PASSWORD:-wechat}
       - PANEL_DATA=/data/accounts.json
+      - PANEL_ALLOWED_HOSTS=${WOC_ALLOWED_HOSTS:-*.fnos.net,*.5ddd.com}
     volumes:
       - ./data-panel:/data
       - /var/run/docker.sock:/var/run/docker.sock
     ports:
-      - "${WOC_HTTP_PORT:-36080}:8080"
+      - "${wizard_port:-36080}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:8080/api/version',r=>process.exit(r.statusCode&&r.statusCode<500?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     restart: unless-stopped
