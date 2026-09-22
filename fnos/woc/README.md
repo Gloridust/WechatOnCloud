@@ -38,7 +38,7 @@ fnpack build
 | FN Connect（推荐） | `https://woc.[fnid].fnos.net/` | 桌面图标在系统浏览器打开 |
 | LAN 端口 | `http://<NAS_IP>:<wizard_port>/` | 默认端口 `36080` |
 
-## 架构要点（1.0.6）
+## 架构要点（1.0.1）
 
 - **panel**：默认镜像 `docker.io/gloridust/woc-panel`，挂载 `docker.sock`；端口 `${wizard_port:-36080}:8080`；`PANEL_ALLOWED_HOSTS` 默认 `*.fnos.net,*.5ddd.com`。
 - **桌面**：`micro_app=true`，`type=url`，`port=${wizard_port}`，`url=/`。
