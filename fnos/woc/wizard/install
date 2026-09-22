@@ -23,7 +23,7 @@
       {
         "type": "text",
         "field": "wizard_port",
-        "label": "对外访问端口（FN Connect 会映射到 woc.[fnid].fnos.net）",
+        "label": "对外访问端口（FN Connect 会映射到 woc-main.[fnid].fnos.net）",
         "defaultValue": "36080",
         "rules": [{ "required": true, "message": "请输入端口" }]
       },

@@ -1,4 +1,4 @@
-# 面板为唯一服务。桌面入口 type=url + 端口，FN Connect 将打开 woc.[fnid].fnos.net。
+# 面板为唯一服务。桌面入口 type=url + 端口，FN Connect 将打开 woc-main.[fnid].fnos.net。
 services:
   panel:
     image: ${WOC_IMAGE_PREFIX:-docker.io/gloridust}/woc-panel:${WOC_VERSION:-latest}

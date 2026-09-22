@@ -1,7 +1,7 @@
 appname=woc
 version=1.0.1
 display_name=云微
-desc=在飞牛 NAS 上运行服务端微信。桌面入口在系统浏览器打开；FN Connect 下为 woc.[fnid].fnos.net。
+desc=在飞牛 NAS 上运行服务端微信。桌面入口在系统浏览器打开；FN Connect 下为 woc-main.[fnid].fnos.net。
 platform=all
 source=thirdparty
 maintainer=Gloridust

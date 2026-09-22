@@ -2,7 +2,7 @@
 
 将 [WechatOnCloud](https://github.com/Gloridust/WechatOnCloud) 面板打包为飞牛 fnOS `.fpk`。
 
-桌面入口使用 `type: url` + 安装端口，在**系统浏览器**打开；FN Connect 下访问域名为 `woc.[fnid].fnos.net`（不走统一网关子路径 `/app/woc`，以避免上游面板绝对路径与无 basename 的 SPA 在子路径下空白页）。
+桌面入口使用 `type: url` + 安装端口，在**系统浏览器**打开；FN Connect 下访问域名为 `woc-main.[fnid].fnos.net`（由 `appname=woc` + 桌面入口 `woc.main` 拼成；不走统一网关子路径 `/app/woc`，以避免上游面板绝对路径与无 basename 的 SPA 在子路径下空白页）。
 
 ## 目录结构
 
@@ -35,7 +35,7 @@ fnpack build
 
 | 方式 | 地址 | 说明 |
 |------|------|------|
-| FN Connect（推荐） | `https://woc.[fnid].fnos.net/` | 桌面图标在系统浏览器打开 |
+| FN Connect（推荐） | `https://woc-main.[fnid].fnos.net/` | 桌面图标在系统浏览器打开 |
 | LAN 端口 | `http://<NAS_IP>:<wizard_port>/` | 默认端口 `36080` |
 
 ## 架构要点（1.0.1）
