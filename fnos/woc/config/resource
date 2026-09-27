@@ -1,9 +1,19 @@
 {
+  "docker-project": {
+    "projects": [
+      {
+        "name": "woc",
+        "path": "docker"
+      }
+    ]
+  },
   "data-share": {
     "shares": [
       {
-        "name": "wechat-on-cloud",
-        "permission": "rw"
+        "name": "woc"
+      },
+      {
+        "name": "woc/data"
       }
     ]
   }

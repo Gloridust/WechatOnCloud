@@ -1,9 +1,7 @@
 #!/bin/bash
-# fnOS 应用生命周期入口。Docker 类应用的启停由应用中心直接执行 compose，
-# 这里 start/stop 只需返回成功；status 用首个容器的运行状态代表应用状态。
+# fnOS Docker app lifecycle. App Center starts/stops compose; status checks panel container.
 set -u
 
-COMPOSE_FILE="$(dirname "$0")/../app/docker/docker-compose.yaml"
 CONTAINER="woc-panel"
 
 is_running() {
