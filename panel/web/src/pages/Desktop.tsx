@@ -5,6 +5,7 @@ import { useUI } from '../ui';
 import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
 import { VncAudio } from '../vncAudio';
+import { isClipInjected, markClipInjected } from '../clipboardInject';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
 function desktopUrl(id: string) {
@@ -457,6 +458,167 @@ function allowAutoRecover(iid: string): boolean {
   return true;
 }
 
+// ---------- 剪贴板历史（#138，隐私设计参照 EcoPaste：本地优先 + 高置信度密钥跳过 + 保留上限） ----------
+
+// 容器剪贴板监听（#138）：钩住 iframe 里 textarea 原型上的 value setter——kasmweb 收到 ServerCutText
+// 后总会程序化更新 noVNC_clipboard_text（面板隐藏也写），即可事件级感知容器内的每次复制，零轮询。
+// 只观察、不写 OS 剪贴板，因此 http / https 下都安装。若日后与 #139 双向互通（同手法的剪贴板写回桥）
+// 共存，两钩在同一原型属性上各包一层、互不干扰，装卸保持先进后出（后装先卸）即可正确还原。
+// 面板「发送到剪贴板」的文本（pushClipboardToRemote 设置同一个 textarea）与 #139 本机文字直粘的
+// 分段注入也会经过这里回显——它们是本机/面板已有的内容，经 clipboardInject.ts 的登记跳过入册。
+function installClipboardMonitor(win: Window, onText: (text: string) => void): () => void {
+  const noop = () => {};
+  try {
+    const proto = (win as any).HTMLTextAreaElement.prototype as HTMLTextAreaElement;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (!desc || !desc.get || !desc.set) return noop;
+    Object.defineProperty(proto, 'value', {
+      get: desc.get,
+      set: function (this: HTMLTextAreaElement, v: string) {
+        desc.set!.call(this, v);
+        if (this.id === 'noVNC_clipboard_text') onText(String(v));
+      },
+      configurable: true,
+      enumerable: desc.enumerable,
+    });
+    return () => {
+      try {
+        Object.defineProperty(proto, 'value', desc);
+      } catch {
+        /* 恢复尽力而为 */
+      }
+    };
+  } catch {
+    return noop;
+  }
+}
+
+// 高置信度密钥/密码识别（参照 EcoPaste 的 contains_secret）：只认结构性特征——PEM 私钥头、JWT 三段、
+// AWS/阿里云/腾讯云 AccessKey、GitHub / OpenAI / Slack / Stripe / Google 等服务 token 前缀、
+// 带内嵌密码的数据库连接串（协议://user:pass@host）、Bearer 授权头、api_key=<16+位值> 键值形状。
+// 这些都是正常聊天文本里不可能出现的形状，误杀率≈0。命中不足丢弃（EcoPaste 同款）：照常入册但
+// 打上敏感标记，列表默认打码展示，点条目可临时显示、点「复制」取回原文——密钥既是用户自己复制的，
+// 多数场景是要回头粘贴的；脱敏只防「肩窥/共享屏幕时被看到」。
+const SECRET_PATTERNS: RegExp[] = [
+  /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/, // PEM 私钥（RSA/EC/DSA/OPENSSH/ENCRYPTED…）
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/, // JWT（头.载荷.签名，签名≥8）
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/, // AWS Access Key ID
+  /\bLTAI[A-Za-z0-9]{12,20}/, // 阿里云 AccessKey ID
+  /\bAKID[A-Za-z0-9]{13,40}/, // 腾讯云 SecretId
+  /\bgh[pousr]_[A-Za-z0-9_]{36,}/, // GitHub token
+  /\bgithub_pat_[A-Za-z0-9_]{40,}/, // GitHub fine-grained PAT
+  /\bsk-[A-Za-z0-9_-]{32,}/, // OpenAI 等服务密钥（sk-…，参照 EcoPaste 取 32+ 防误杀）
+  /\b(?:xox[baprs])-[A-Za-z0-9-]{20,}/, // Slack token
+  /\b(?:sk|pk|rk)_live_[A-Za-z0-9]{16,}/, // Stripe 密钥
+  /\bAIza[0-9A-Za-z_-]{30,}/, // Google API key
+  /\b(?:api|access|refresh|secret)[_-]?token_[A-Za-z0-9_-]{24,}/, // 字段名式 token（api_token_…）
+  /[a-z][a-z0-9+.-]*:\/\/(?:[^\s\/:@"']*)?:[^\s\/@"']+@(?:[a-z0-9.-]+|\[[0-9a-f:]+\]|localhost)(?::\d+)?(?:\/\S*)?/i, // 带密码的连接串（postgres/mysql/redis（可只有密码无用户名）/mongodb/amqp/ftp…协议://user:pass@host；user 可空但密码必须非空）
+  /\bBearer\s+[A-Za-z0-9._~+/-]{16,}/, // HTTP 授权头里的 Bearer 令牌
+  /\bapi[-_]?key\b\s*[:=]\s*["']?[A-Za-z0-9_-]{16,}/i, // api_key/apikey/api-key: <16+位值> 键值形状
+];
+function looksLikeSecret(text: string): boolean {
+  // 只扫头部 2 千字符：密钥不会藏在长文中段，省去整段正则开销（长文本截断前先判）
+  const head = text.length > 2000 ? text.slice(0, 2000) : text;
+  return SECRET_PATTERNS.some((re) => re.test(head));
+}
+
+// 敏感条目的打码展示：保留头 4 尾 2 字符供辨认，中间以固定数量的 * 代替（不按原长填充，
+// 避免从打码长度反推出密钥长度）。过短的内容全部以 * 代替。仅影响展示，存储与复制均为原文。
+function redactText(text: string): string {
+  const s = text.trim();
+  if (s.length <= 8) return '******';
+  return `${s.slice(0, 4)}${'********'}${s.slice(-2)}`;
+}
+
+// 一键复制到本机剪贴板（#138）：https 下走 navigator.clipboard；http（非安全上下文）没有该 API，
+// 退回 execCommand('copy')——点击按钮本身就是瞬时 user activation，天然满足其门禁（与写回桥同理）。
+async function copyTextToLocal(text: string): Promise<boolean> {
+  try {
+    if (window.isSecureContext && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* 落到 execCommand 兜底 */
+  }
+  let ok = false;
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    try {
+      ta.focus();
+      ta.select(); // value 不在 DOM 文本节点里，必须控件内部全选
+      ok = document.execCommand('copy');
+    } finally {
+      ta.remove();
+    }
+  } catch {
+    ok = false;
+  }
+  return ok;
+}
+
+// 持久化（EcoPaste 的 local-first：记录只存本浏览器 localStorage，不出本机、不进服务端/数据库），
+// 每实例独立一份。上限自动淘汰：最多 30 条、单条 1 万字——验证码/链接/常用段落绰绰有余，
+// 又防长文本撑爆 localStorage 配额。k 为唯一键（时间戳+单调序号，避免同一毫秒多条碰撞）。
+interface ClipRec {
+  k: number;
+  t: number;
+  x: string;
+  s?: 1; // 敏感标记：命中高置信密钥形状，列表默认打码展示（EcoPaste 同款 collect+redact）
+}
+const CLIP_HIST_MAX = 30;
+const CLIP_HIST_ITEM_MAX = 10000;
+let clipKeySeq = 0;
+const clipHistKey = (id: string) => `woc_clip_hist_${id}`;
+function loadClipHist(id: string): ClipRec[] {
+  try {
+    const arr = JSON.parse(window.localStorage.getItem(clipHistKey(id)) || '[]');
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((r: any) => r && typeof r.x === 'string' && typeof r.t === 'number' && typeof r.k === 'number' && (r.s === undefined || r.s === 1))
+      .slice(0, CLIP_HIST_MAX);
+  } catch {
+    return [];
+  }
+}
+function saveClipHist(id: string, recs: ClipRec[]) {
+  try {
+    window.localStorage.setItem(clipHistKey(id), JSON.stringify(recs));
+  } catch {
+    /* 隐私模式/配额满：本次不持久化，页内列表仍可用 */
+  }
+}
+function fmtClipTime(t: number): string {
+  const d = new Date(t);
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (d.toDateString() === new Date().toDateString()) return hm; // 今天只显时刻
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hm}`;
+}
+
+// 剪贴板偏好（自动记录 / 密钥收录）与记录数据一样按实例隔离：不同容器各有各自的开关状态，
+// 互不章循（如工作实例开自动记录、共享实例美闭），key 跟实例 id 走。
+const clipPrefKey = (id: string, name: string) => `woc_clip_${name}_${id}`;
+function readClipPref(id: string | undefined, name: string, def: boolean): boolean {
+  if (!id) return def;
+  try {
+    const v = window.localStorage.getItem(clipPrefKey(id, name));
+    return v === null ? def : v !== '0';
+  } catch {
+    return def;
+  }
+}
+function writeClipPref(id: string | undefined, name: string, v: boolean) {
+  if (!id) return;
+  try {
+    window.localStorage.setItem(clipPrefKey(id, name), v ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+}
+
 // 转发输入条上的功能键（issue #125）。键名走 xdotool，须匹配服务端白名单 /^[A-Za-z_]{1,20}$/，
 // 故只放单键、不放组合键（ctrl+a 这类含 "+" 会被拒）。
 // 方向键 / 回车用 SVG 而非 ↵ ← ↑ ↓ → 字符：字符的大小与基线随系统字体变化，安卓上 ↵ 小到几乎看不见、
@@ -510,6 +672,46 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const [files, setFiles] = useState<TFile[]>([]);
   const [showClip, setShowClip] = useState(false);
   const [clipText, setClipText] = useState('');
+  // 剪贴板历史（#138）：自动记录容器内复制过的文本，持久化到本浏览器（每实例一份）。
+  // ref 镜像让监听钩子的闭包始终读到最新列表，增/删/改都在入口处同步写回 localStorage，
+  // 不靠 effect 顺序（避免「切实例瞬间旧列表写进新 key」的竞态）。
+  const [clipHist, setClipHist] = useState<ClipRec[]>([]);
+  const clipHistRef = useRef<ClipRec[]>([]);
+  // 历史记录搜索（#138）：只影响展示，不动存储；列表最多 30 条，直接每次现过滤即可
+  const [clipSearch, setClipSearch] = useState('');
+  const clipHistShown = clipSearch.trim()
+    ? clipHist.filter((r) => r.x.toLowerCase().includes(clipSearch.trim().toLowerCase()))
+    : clipHist;
+  // 敏感条目的临时明文展示（仅本页内存，不持久化）：点条目切换，删条/清空自然失效
+  const [clipRevealed, setClipRevealed] = useState<Set<number>>(new Set());
+  const applyClipHist = (next: ClipRec[]) => {
+    clipHistRef.current = next;
+    setClipHist(next);
+    if (id) saveClipHist(id, next);
+  };
+  // 自动记录开关（默认开，参照 EcoPaste 的可停采集）：关掉后容器里的复制完全不入册。
+  // 按实例隔离（见 readClipPref）：每个容器各自的开关状态。
+  const [clipRecOn, setClipRecOn] = useState(() => readClipPref(id, 'rec', true));
+  const clipRecOnRef = useRef(clipRecOn);
+  const toggleClipRec = () => {
+    const v = !clipRecOn;
+    clipRecOnRef.current = v;
+    setClipRecOn(v);
+    writeClipPref(id, 'rec', v);
+    toast(v ? '已恢复自动记录' : '已暂停自动记录：容器里的复制不再入册', 'ok');
+  };
+  // 敏感内容收录开关（#138，对齐 EcoPaste 的 collect_secrets/redact_secrets 组合简化为一档）：
+  // 开（默认）= 密钥形状照常入册但列表打码展示，点条目临时明文、点「复制」取回原文；
+  // 关 = 命中即不保存（跳过入册，EcoPaste 的 skipping 模式）。同样按实例隔离。
+  const [clipSecretOn, setClipSecretOn] = useState(() => readClipPref(id, 'secret', true));
+  const clipSecretOnRef = useRef(clipSecretOn);
+  const toggleClipSecret = () => {
+    const v = !clipSecretOn;
+    clipSecretOnRef.current = v;
+    setClipSecretOn(v);
+    writeClipPref(id, 'secret', v);
+    toast(v ? '密钥内容将保存，列表中打码展示' : '密钥内容不再保存到剪贴板记录', 'ok');
+  };
   // 中文输入模式：'forward'=底部输入条转发（默认，最稳）；'seamless'=无感（直接在微信里打，提交后转发）。
   const [inputMode, setInputMode] = useState<'forward' | 'seamless'>(() => {
     try {
@@ -634,6 +836,14 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     setFiles([]);
     setShowClip(false);
     setClipText('');
+    // 换实例 → 换一份剪贴板历史与各自的偏好开关（不回写：刚读出来的数据无需再存一遍）
+    const hist = id ? loadClipHist(id) : [];
+    clipHistRef.current = hist;
+    setClipHist(hist);
+    clipRecOnRef.current = readClipPref(id, 'rec', true);
+    setClipRecOn(clipRecOnRef.current);
+    clipSecretOnRef.current = readClipPref(id, 'secret', true);
+    setClipSecretOn(clipSecretOnRef.current);
     setImeText('');
     setProbing(true);
     recovering.current = false;
@@ -852,6 +1062,28 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       return;
     }
   }, [showVnc, frameLoaded, frameGen, id]);
+
+  // 剪贴板历史监听（#138）：容器里每次复制（ServerCutText 到达）都自动入册，面板开着/关着都记。
+  // 密钥类敏感内容直接不入册（EcoPaste 同款策略）；列表变更同步写 localStorage。
+  useEffect(() => {
+    if (!showVnc || !frameLoaded || !id) return;
+    const win = frameRef.current?.contentWindow;
+    if (!win) return;
+    const addRecord = (text: string) => {
+      if (!text || !clipRecOnRef.current) return; // 空内容 / 已暂停记录
+      if (text === clipHistRef.current[0]?.x) return; // 重复到达（如重连重发）：已在顶部，不刷时间不重排
+      if (isClipInjected(text)) return; // 面板注入容器的回显（发送到剪贴板 / #139 本机直粘）：不入册
+      const x = text.length > CLIP_HIST_ITEM_MAX ? text.slice(0, CLIP_HIST_ITEM_MAX) + '…（超长已截断）' : text;
+      const rec: ClipRec = { k: Date.now() * 1000 + (clipKeySeq = (clipKeySeq + 1) % 1000), t: Date.now(), x };
+      if (looksLikeSecret(text)) {
+        if (!clipSecretOnRef.current) return; // 敏感收录关：密钥不入册（跳过）
+        rec.s = 1; // 开：入册但打敏感标记，列表打码展示
+      }
+      applyClipHist([rec, ...clipHistRef.current.filter((r) => r.x !== x)].slice(0, CLIP_HIST_MAX)); // 同文本去重移顶
+    };
+    return installClipboardMonitor(win, addRecord);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showVnc, frameLoaded, id]);
 
   // 无感模式：往同源 iframe 装「中文转发 + 有序队列」钩子；切回转发/重连/卸载时自动移除。
   useEffect(() => {
@@ -1236,6 +1468,10 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       const doc = frameRef.current?.contentDocument;
       const ta = doc?.getElementById('noVNC_clipboard_text') as HTMLTextAreaElement | null;
       if (!doc || !ta) return false;
+      // 先登记再注入：监听钩子在赋值瞬间同步触发（见 installClipboardMonitor），登记必须先行，
+      // 否则回显已入册。这段文本即将经 KasmVNC 回推（ServerCutText），它是本机/面板已有内容，
+      // 剪贴板历史据登记跳过入册。#139 的本机文字直粘同样登记，见那边挂点。
+      markClipInjected(text);
       ta.value = text;
       ta.dispatchEvent(new (frameRef.current!.contentWindow as any).Event('change', { bubbles: true }));
       clip.current.remoteText = text;
@@ -1290,20 +1526,21 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     }
   };
 
-  // 读取容器（微信侧）当前剪贴板内容到本框，便于把容器内复制的文字带回本地
-  const pullClipboardFromRemote = () => {
-    try {
-      const doc = frameRef.current?.contentDocument;
-      const ta = doc?.getElementById('noVNC_clipboard_text') as HTMLTextAreaElement | null;
-      if (ta) {
-        setClipText(ta.value || '');
-        toast('已读取容器剪贴板', 'ok');
-      } else {
-        toast('读取失败：桌面尚未连接', 'error');
-      }
-    } catch {
-      toast('读取失败', 'error');
-    }
+  // ---------- 剪贴板历史（#138）----------
+  // 取代旧「读取容器剪贴板到此框」手动按钮：容器里的复制出 ServerCutText 即自动入册（见上方监听 effect）。
+  const copyHistRecord = async (r: ClipRec) => {
+    const ok = await copyTextToLocal(r.x);
+    toast(ok ? '已复制到本机剪贴板' : '复制失败，请重试一次', ok ? 'ok' : 'error');
+  };
+  const delClipRecord = (k: number) => {
+    applyClipHist(clipHistRef.current.filter((r) => r.k !== k));
+  };
+  const clearClipHist = async () => {
+    if (clipHistRef.current.length === 0) return;
+    if (!(await confirm({ title: '清空剪贴板记录？', body: `将删除本浏览器里保存的 ${clipHistRef.current.length} 条记录，不可恢复。`, danger: true, confirmText: '清空' }))) return;
+    applyClipHist([]);
+    setClipRevealed(new Set());
+    toast('已清空', 'ok');
   };
 
   const restartInstance = async () => {
@@ -1643,11 +1880,93 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               <button className="btn btn-primary files-upload" onClick={sendClip}>
                 发送到剪贴板
               </button>
-              <button className="btn-text" style={{ alignSelf: 'flex-start', marginTop: 6 }} onClick={pullClipboardFromRemote}>
-                ↓ 读取容器剪贴板到此框
-              </button>
               <div className="files-hint">
                 局域网 http 访问时浏览器会禁用系统级剪贴板同步，故用此框中转：文本→容器剪贴板，再在应用里 Ctrl+V。
+              </div>
+
+              <div className="clip-hist-head">
+                <span>
+                  剪贴板记录
+                  {clipHist.length > 0 && <span className="clip-hist-count">{clipHist.length}</span>}
+                </span>
+                <span className="clip-hist-tools">
+                  <button className={'btn-text' + (clipRecOn ? '' : ' clip-rec-off')} onClick={toggleClipRec} aria-pressed={!clipRecOn} title={clipRecOn ? '容器里的复制会自动记录。点击暂停记录' : '已暂停：容器里的复制不入册。点击恢复'}>
+                    {clipRecOn ? '● 自动记录中' : '‖ 已暂停记录'}
+                  </button>
+                  <button className={'btn-text' + (clipSecretOn ? '' : ' clip-rec-off')} onClick={toggleClipSecret} aria-pressed={clipSecretOn} title={clipSecretOn ? '密钥/密码形状的内容会保存，但列表中打码展示。点击改为不保存' : '密钥/密码形状的内容不会保存到记录。点击改为保存（打码展示）'}>
+                    记录密钥：{clipSecretOn ? '开' : '关'}
+                  </button>
+                  {clipHist.length > 0 && (
+                    <button className="btn-text danger" onClick={clearClipHist}>
+                      清空
+                    </button>
+                  )}
+                </span>
+              </div>
+              {clipHist.length > 0 && (
+                <input
+                  className="clip-search"
+                  type="search"
+                  value={clipSearch}
+                  onChange={(e) => setClipSearch(e.target.value)}
+                  placeholder="搜索剪贴板记录…"
+                  aria-label="搜索剪贴板记录"
+                />
+              )}
+              <div className="clip-hist-list">
+                {clipHist.length === 0 && (
+                  <div className="muted small" style={{ padding: '10px 2px' }}>
+                    {clipRecOn ? '暂无记录：在应用里复制文字后会自动出现在这里' : '已暂停记录，恢复后新复制的文本才会出现'}
+                  </div>
+                )}
+                {clipHist.length > 0 && clipHistShown.length === 0 && (
+                  <div className="muted small" style={{ padding: '10px 2px' }}>
+                    没有匹配「{clipSearch.trim()}」的记录
+                  </div>
+                )}
+                {clipHistShown.map((r) => {
+                  const sens = !!r.s;
+                  const shown = !sens || clipRevealed.has(r.k); // 敏感条目默认打码，点击临时明文
+                  return (
+                    <div key={r.k} className={'clip-hist-item' + (sens ? ' sens' : '')}>
+                      <button
+                        className="clip-hist-main"
+                        title={
+                          sens
+                            ? shown
+                              ? '敏感内容正在明文显示，点击恢复打码'
+                              : '已识别为密钥/密码形状，已打码。点击临时显示原文；点「复制」取回完整内容'
+                            : r.x
+                        }
+                        onClick={() => {
+                          if (!sens) {
+                            setClipText(r.x); // 点内容载入上方编辑框（旧「读取到框」流程的替代）
+                            return;
+                          }
+                          setClipRevealed((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(r.k)) next.delete(r.k);
+                            else next.add(r.k);
+                            return next;
+                          });
+                        }}
+                      >
+                        {sens && <span className="clip-hist-badge">敏感</span>}
+                        <span className="clip-hist-text">{shown ? r.x : redactText(r.x)}</span>
+                        <span className="clip-hist-time">{fmtClipTime(r.t)}</span>
+                      </button>
+                      <button className="clip-hist-copy" title="复制到本机剪贴板" aria-label="复制到本机剪贴板" onClick={() => copyHistRecord(r)}>
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                          <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                        </svg>
+                      </button>
+                      <button className="files-del" title="删除该记录" onClick={() => delClipRecord(r.k)}>
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
