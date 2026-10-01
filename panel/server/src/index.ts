@@ -1637,21 +1637,48 @@ const stuckHealAt = new Map<string, number>();
 const stuckHealing = new Set<string>();
 
 async function onUpstreamHang(instId: string, what: string): Promise<void> {
-  const inst = findInstance(instId);
-  if (!inst) return;
+  if (!findInstance(instId)) return;
   const now = Date.now();
   const hangs = (upstreamHangs.get(instId) || []).filter((t) => now - t < STUCK_WINDOW_MS);
   hangs.push(now);
   upstreamHangs.set(instId, hangs);
   appendInstanceLog(instId, `[vnc] 实例 ${UPSTREAM_HANG_MS / 1000}s 未应答${what}，已断开本次请求（近 10 分钟第 ${hangs.length} 次）`);
-  if (!STUCK_HEAL || hangs.length < STUCK_HANGS || stuckHealing.has(instId) || upgradingIds.has(instId)) return;
-  if (now - (stuckHealAt.get(instId) || 0) < STUCK_HEAL_COOLDOWN_MS) return;
+  if (hangs.length < STUCK_HANGS) return;
+  if (await healStuck(instId, `桌面连接 10 分钟内 ${hangs.length} 次无应答（KasmVNC 卡死），自动重启实例（数据保留）`)) {
+    upstreamHangs.delete(instId);
+  }
+}
+
+// 桌面服务没在跑：容器和 nginx 都在，KasmVNC 却没监听，/websockify 立刻回 502。预热期里这是正常的（见上），过了预热期
+// 还接连如此，就是 Xvnc 起不来了：实测宿主断电 / Docker 被强杀后容器原样再起，残留的 X 显示锁可能让它一直起不来
+// （新镜像启动时会清，老镜像不会），noVNC 只会停在「连接中」，原来要等管理员手动重启。按卡死一样重建容器。
+const UPSTREAM_DOWN_FAILS = 4;
+const UPSTREAM_DOWN_WINDOW_MS = 3 * 60_000;
+const upstreamDowns = new Map<string, number[]>(); // 实例 id → 近期快速失败时间戳
+
+async function onUpstreamDown(instId: string, why: string): Promise<void> {
+  if (!findInstance(instId)) return;
+  const now = Date.now();
+  const fails = (upstreamDowns.get(instId) || []).filter((t) => now - t < UPSTREAM_DOWN_WINDOW_MS);
+  fails.push(now);
+  upstreamDowns.set(instId, fails);
+  if (fails.length < UPSTREAM_DOWN_FAILS) return;
+  if (await healStuck(instId, `桌面服务 3 分钟内 ${fails.length} 次连不上（${why}，KasmVNC 没在运行），自动重启实例（数据保留）`)) {
+    upstreamDowns.delete(instId);
+  }
+}
+
+// 卡死 / 起不来时沿用当前镜像重建实例。开关、冷却、预热期、升级中都在这里把关；真的开始重建返回 true。
+async function healStuck(instId: string, detail: string): Promise<boolean> {
+  const inst = findInstance(instId);
+  if (!inst || !STUCK_HEAL || stuckHealing.has(instId) || upgradingIds.has(instId)) return false;
+  const now = Date.now();
+  if (now - (stuckHealAt.get(instId) || 0) < STUCK_HEAL_COOLDOWN_MS) return false;
   const up = await instanceUptimeSec(inst);
-  if (up === null || up < STUCK_MIN_UPTIME_SEC) return; // 没在跑，或刚启动还在预热
+  if (up === null || up < STUCK_MIN_UPTIME_SEC) return false; // 没在跑，或刚启动还在预热
+  if (stuckHealing.has(instId)) return false; // 等容器信息期间另一路已经开始重建
   stuckHealing.add(instId);
   stuckHealAt.set(instId, now);
-  upstreamHangs.delete(instId);
-  const detail = `桌面连接 10 分钟内 ${hangs.length} 次无应答（KasmVNC 卡死），自动重启实例（数据保留）`;
   appendInstanceLog(instId, `[vnc] ${detail}`);
   appendPanelLog('WARN', `实例「${inst.name}」(id=${instId}) ${detail}`);
   try {
@@ -1661,6 +1688,7 @@ async function onUpstreamHang(instId: string, what: string): Promise<void> {
   } finally {
     stuckHealing.delete(instId);
   }
+  return true;
 }
 
 // 盯住一次转发到实例的请求：超时仍无任何响应 → 断开并记一次无应答。closeClient 用于 ws（让客户端别干等）。
@@ -1691,16 +1719,37 @@ proxy.on('proxyReqWs', (proxyReq, req, socket) => {
   // 卡死时这条不会出现（接收器停止 accept），即可定位"卡在面板→实例之间还是实例内部"。
   const instId = (req as any)._wocInstId;
   if (instId) {
-    proxyReq.on('upgrade', () => {
+    // 只盯 VNC 连接本身（/websockify）；音频桥等其它 ws 不计
+    const isVnc = (req.url || '').startsWith('/websockify');
+    proxyReq.on('upgrade', (_res: IncomingMessage, proxySocket: Socket) => {
       trackActiveVncSocket(instId, req.socket as Socket);
       appendInstanceLog(instId, '[vnc] 上游已接受(101) · 桌面连接建立');
+      if (isVnc) watchGreeting(proxySocket, socket as Socket, instId);
     });
-    // 只盯 VNC 连接本身（/websockify）；音频桥等其它 ws 不计
-    if ((req.url || '').startsWith('/websockify')) {
+    if (isVnc) {
       watchUpstream(proxyReq, instId, '桌面连接（websocket 升级）', socket, () => socket.destroy());
+      proxyReq.once('response', (res: IncomingMessage) => {
+        if ((res.statusCode || 0) >= 500) void onUpstreamDown(instId, `HTTP ${res.statusCode}`);
+      });
     }
   }
 });
+
+// 升级成功后 KasmVNC 会立刻发来 RFB 版本号（健康实例几毫秒内就到）。websocket 握手由它单独的线程完成，
+// 主循环卡住时照样回 101，接着就再没有任何数据，noVNC 一直停在「连接中」——这种卡死上面的升级超时看不到，
+// 也按无应答处理（断开、计数、够数后自愈）。
+function watchGreeting(proxySocket: Socket, clientSocket: Socket, instId: string) {
+  const timer = setTimeout(() => {
+    proxySocket.destroy();
+    clientSocket.destroy();
+    void onUpstreamHang(instId, '桌面连接（升级后没有任何数据）');
+  }, UPSTREAM_HANG_MS);
+  const clear = () => clearTimeout(timer);
+  proxySocket.once('data', clear);
+  proxySocket.once('close', clear);
+  clientSocket.once('close', clear);
+}
+
 // 上游（面板→实例）套接字 TCP keepalive：客户端断网/切网（WiFi→4G、NAS 休眠）时 TCP 不会主动通知，
 // 半开死连接可挂数小时——对 KasmVNC 表现为"幽灵会话"占坑，与新连接并存是历史上 Xvnc 卡死的诱因之一。
 // 30s 探测让死连接分钟级被回收，而不是小时级。
@@ -1899,6 +1948,7 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) =>
   socket.on('close', () => appendInstanceLog(inst.id, `[vnc] 连接关闭（持续 ${Math.round((Date.now() - t0) / 1000)}s）`));
   proxy.ws(req, socket, head, { target: instanceTarget(inst) }, (err: any) => {
     appendInstanceLog(inst.id, `[vnc] 连接失败：${err?.message || err}`);
+    if (err?.code === 'ECONNREFUSED' && (req.url || '').startsWith('/websockify')) void onUpstreamDown(inst.id, '拒绝连接');
   });
 });
 

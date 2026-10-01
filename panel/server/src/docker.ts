@@ -666,7 +666,14 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
   const existing = docker.getContainer(inst.containerName);
   const info: any = await existing.inspect().catch(() => null);
   const imageOverride: string | undefined = opts?.keepImage && info?.Image ? String(info.Image) : undefined;
-  // 沿用旧镜像重建时无需 ensureImage（镜像 id 一定在本地——容器刚在用它）；
+  // 容器在用的镜像不一定还在本机：Docker 29 默认的 containerd 镜像存储里，同名 tag 一旦指向新镜像（重新拉取、
+  // 本地重建同名镜像），旧镜像当场就没了，用它跑着的容器照常在跑。这时没法沿用它重建，先删后建会把实例删没
+  // （实测：自愈删掉旧容器后报 No such image，实例只剩数据卷）。改为原地重启这个容器，同样不换版本。
+  if (imageOverride && !(await docker.getImage(imageOverride).inspect().then(() => true, () => false))) {
+    await restartInPlace(inst, existing, imageOverride);
+    return;
+  }
+  // 沿用旧镜像重建时无需 ensureImage（上面已确认它在本地）；
   // 也避免"离线 + 本地无 :latest"时连重启都失败。
   // 必须先确保目标镜像在本地、再删旧容器：此前先删后拉，升级时拉不到新镜像（面板刚更新、本地只有旧版本号的镜像、
   // 网络又不通）就会把旧容器删掉却建不出新的，实例直接没了；现在拉取失败时旧容器原样保留。
@@ -748,6 +755,15 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
     }
     throw e;
   }
+}
+
+// 原地重启（镜像已不在本机、没法重建时用）。先清掉 X 显示锁：容器不重建，/tmp 原样保留，残留的锁可能让 Xvnc
+// 起不来（见镜像 woc-xlock.sh；老镜像没有这个启动钩子）。重启会先停掉 Xvnc，删它正在用的锁文件无妨。
+async function restartInPlace(inst: Instance, c: Docker.Container, image: string): Promise<void> {
+  appendInstanceLog(inst.id, `原镜像 ${image.replace(/^sha256:/, '').slice(0, 12)} 已不在本机（同名镜像被更新过），改为原地重启容器`);
+  await execCapture(inst, ['sh', '-c', 'rm -f /tmp/.X[0-9]*-lock'], 'root').catch(() => {});
+  await c.restart({ t: 10 });
+  appendInstanceLog(inst.id, '容器已原地重启');
 }
 
 // 确保实例容器在运行：缺失则按需创建（不会重建已有卷），停止则启动。
@@ -1339,6 +1355,12 @@ function noteAppStatus(inst: Instance, st: WechatStatus): void {
   }
 }
 
+// 读状态偶尔会失败（Docker 一时繁忙、exec 被拒）。这时把装好的实例报成「未安装」，桌面页会卸掉正连着的画面
+// （iframe 被删、过一会儿再新建，正是会把 Xvnc 卡死的「新旧连接并存」），管理员还会看到「下载安装」按钮。
+// 一分钟内沿用上次读到的状态。
+const STATUS_GRACE_MS = 60_000;
+const lastStatus = new Map<string, { st: WechatStatus; at: number }>();
+
 export async function wechatStatus(inst: Instance): Promise<WechatStatus> {
   try {
     // 兼容旧容器（无 /woc/app-ctl.sh）：有则按 appType 取状态，无则回退老的 wechat-ctl.sh（旧实例皆微信）。
@@ -1350,9 +1372,11 @@ export async function wechatStatus(inst: Instance): Promise<WechatStatus> {
     ]);
     const st: WechatStatus = { ...DEFAULT_STATUS, ...JSON.parse(raw.trim()) };
     noteAppStatus(inst, st);
+    lastStatus.set(inst.id, { st, at: Date.now() });
     return st;
   } catch {
-    return DEFAULT_STATUS;
+    const last = lastStatus.get(inst.id);
+    return last && Date.now() - last.at < STATUS_GRACE_MS ? last.st : DEFAULT_STATUS;
   }
 }
 

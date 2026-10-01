@@ -24,9 +24,15 @@ function useInstancesLoader(): InstancesState {
   const [instances, setInstances] = useState<InstanceWithStatus[]>([]);
   const [loaded, setLoaded] = useState(false);
   const timer = useRef<number | undefined>(undefined);
+  // 每次切页都会刷新列表，快速切换时几个请求同时在路上、回来的先后不定：只认比已采用的更新的结果，旧的别覆盖新的
+  const issued = useRef(0);
+  const applied = useRef(0);
   const reload = async () => {
+    const seq = ++issued.current;
     try {
       const { instances } = await api.listInstances();
+      if (seq < applied.current) return;
+      applied.current = seq;
       setInstances(instances);
     } catch {
       /* 401 会被 api 层重定向到登录 */
