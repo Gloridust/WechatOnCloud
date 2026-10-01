@@ -17,7 +17,7 @@ export default defineConfig({
         description: '在浏览器访问 NAS 上的微信',
         lang: 'zh-CN',
         theme_color: '#07C160',
-        background_color: '#ffffff',
+        background_color: '#edeff3',
         display: 'standalone',
         start_url: '/',
         icons: [

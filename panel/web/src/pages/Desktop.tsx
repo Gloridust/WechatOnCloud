@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, appProfile } from '../api';
-import { useUI } from '../ui';
+import { api, appProfile, type InstanceWithStatus } from '../api';
+import { useUI, MenuButton, Spinner, useDocTitle, type MenuEntry } from '../ui';
 import { useAuth } from '../auth';
-import { useInstances } from '../AppShell';
+import { useInstances, statusOf } from '../AppShell';
 import { VncAudio } from '../vncAudio';
+import { Icon, type IconName } from '../icons';
+import { InstanceIcon } from '../AppIcon';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
 function desktopUrl(id: string) {
@@ -469,7 +471,6 @@ const KeyIcon = ({ d }: { d: string[] }) => (
   </svg>
 );
 const ICON_ENTER = ['M9 10 4 15l5 5', 'M20 4v7a4 4 0 0 1-4 4H4'];
-const ICON_KEYBOARD = ['M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z', 'M6 9h.01M10 9h.01M14 9h.01M18 9h.01M8 13h.01M12 13h.01M16 13h.01M7 16h10'];
 const FUNC_KEYS: { key: string; label: ReactNode; title: string }[] = [
   { key: 'Escape', label: 'Esc', title: 'Escape（关弹窗/退出全屏输入）' },
   { key: 'Tab', label: 'Tab', title: 'Tab（切换焦点）' },
@@ -482,12 +483,6 @@ const FUNC_KEYS: { key: string; label: ReactNode; title: string }[] = [
   { key: 'Down', label: <KeyIcon d={['M12 5v14', 'm19 12-7 7-7-7']} />, title: '下方向键' },
   { key: 'Right', label: <KeyIcon d={['M5 12h14', 'm12 5 7 7-7 7']} />, title: '右方向键' },
 ];
-
-const MenuIcon = (
-  <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-    <path d="M4 6h16M4 12h16M4 18h16" />
-  </svg>
-);
 
 export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void }) {
   const { id } = useParams<{ id: string }>();
@@ -506,9 +501,9 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const clip = useRef<ClipState>({ guarded: false, remoteText: null, remoteNewer: false, typed: [], lastLocal: null }); // 见 installClipboardGuard
   const [loadStuck, setLoadStuck] = useState(false); // iframe 久未加载出来（疑似实例无响应）
   const [dragging, setDragging] = useState(false);
-  const [showFiles, setShowFiles] = useState(false);
+  // 右上角的浮动面板（文件 / 剪贴板 / 桌面设置）：同一时间只开一个，此前三个能同时开、叠在同一个位置
+  const [panel, setPanel] = useState<null | 'files' | 'clip' | 'settings'>(null);
   const [files, setFiles] = useState<TFile[]>([]);
-  const [showClip, setShowClip] = useState(false);
   const [clipText, setClipText] = useState('');
   // 中文输入模式：'forward'=底部输入条转发（默认，最稳）；'seamless'=无感（直接在微信里打，提交后转发）。
   const [inputMode, setInputMode] = useState<'forward' | 'seamless'>(() => {
@@ -591,7 +586,6 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const uploadBusy = useRef(false);
   const [starting, setStarting] = useState(false);
   const [control, setControl] = useState<{ free: boolean; mine: boolean; holder: string | null } | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'bg' | 'font'>('bg');
   const [bgList, setBgList] = useState<string[]>([]);
   const [fontList, setFontList] = useState<string[]>([]);
@@ -617,6 +611,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   };
 
   const inst = instances.find((i) => i.id === id);
+  useDocTitle(inst?.name || '');
   const profile = appProfile(inst?.appType); // 按应用类型显示正确文案（微信/Chromium…）
   const appLabel = profile.label;
   // 进入实例时，共享列表可能尚未同步（管理页新建/安装后），先按"探测中"显示加载态，
@@ -625,14 +620,47 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const offline = inst ? inst.runtime !== 'running' : false;
   const installed = !!inst && inst.wechat.installed && inst.wechat.phase !== 'downloading';
   const showVnc = !!inst && !offline && installed;
+  const busy = !!inst && ['downloading', 'extracting', 'installing'].includes(inst.wechat.phase);
+  const errored = !!inst && !busy && inst.wechat.phase === 'error';
+
+  // 在本页直接安装 / 上传安装包（管理员）：点了之后到状态真正推进（进入安装中 / 出错 / 装好）之前，
+  // 先显示「正在准备…」，免得按钮还在、看着像没点上。记下点击时的阶段，阶段变了才算推进。
+  const [acting, setActing] = useState<{ text: string; pct?: number } | null>(null);
+  const actFrom = useRef<string | null>(null);
+  const pkgInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!acting || actFrom.current === null) return;
+    if (installed || (inst && inst.wechat.phase !== actFrom.current)) {
+      actFrom.current = null;
+      setActing(null);
+    }
+  }, [acting, installed, inst?.wechat.phase]);
+  useEffect(() => {
+    if (!acting || actFrom.current === null) return; // 上传途中不算（大文件慢网可能传很久）
+    const t = window.setTimeout(() => setActing(null), 20000); // 兜底：状态迟迟不变也别一直挂着
+    return () => window.clearTimeout(t);
+  }, [acting]);
+  useEffect(() => {
+    setActing(null);
+    actFrom.current = null;
+  }, [id]);
+
+  // Esc 关掉右上角的浮动面板（弹着确认框时让给确认框）
+  useEffect(() => {
+    if (!panel) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !document.querySelector('.modal-mask')) setPanel(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [panel]);
 
   // 切换实例时重置内嵌态
   useEffect(() => {
     setFrameLoaded(false);
     setLoadStuck(false);
-    setShowFiles(false);
+    setPanel(null);
     setFiles([]);
-    setShowClip(false);
     setClipText('');
     setImeText('');
     setProbing(true);
@@ -1349,77 +1377,156 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     }
   };
 
+  const togglePanel = (p: 'files' | 'clip' | 'settings') => {
+    if (panel === p) {
+      setPanel(null);
+      return;
+    }
+    setPanel(p);
+    if (p === 'files') refreshFiles();
+    if (p === 'settings') {
+      refreshBgList();
+      refreshFontList();
+    }
+  };
+
+  const installApp = async () => {
+    actFrom.current = inst?.wechat.phase ?? null;
+    setActing({ text: '正在准备…' });
+    try {
+      await api.instanceWechatInstall(id);
+      toast(`已开始下载${appLabel}`, 'ok');
+      await reload();
+    } catch (e: any) {
+      toast(e.message || '操作失败', 'error');
+      actFrom.current = null;
+      setActing(null);
+    }
+  };
+
+  // 上传安装包（QQ，#153）：腾讯拒绝下载时，传自己在电脑上下好的 .deb，传完服务端直接安装
+  const uploadPackage = async (file: File) => {
+    actFrom.current = null; // 上传期间不随阶段变化清掉进度
+    setActing({ text: '正在上传安装包', pct: 0 });
+    try {
+      await api.uploadAppPackage(id, file, (loaded, size) =>
+        setActing(loaded < size ? { text: '正在上传安装包', pct: Math.floor((loaded / size) * 100) } : { text: '安装包写入中…' }),
+      );
+      toast('安装包已上传，正在安装', 'ok');
+      actFrom.current = inst?.wechat.phase ?? null;
+      setActing({ text: '正在准备安装…' });
+      await reload();
+    } catch (e: any) {
+      toast(e.message || '上传失败', 'error');
+      setActing(null);
+    }
+  };
+
   const title = inst?.name || '实例';
+  const st = inst ? statusOf(inst) : null;
+  // 安装进度：本页刚点了安装 / 正在上传安装包时用本地的，否则用实例上报的
+  const progText = acting ? acting.text : inst?.wechat.message || '请稍候…';
+  const progPct = acting ? (acting.pct ?? -1) : (inst?.wechat.percent ?? -1);
+  const openLogs = () => window.open(api.instanceLogsUrl(id), '_blank');
+
+  // 右上角的更多菜单：重新连接人人可用；桌面设置 / 重启 / 日志只给管理员
+  const moreItems: MenuEntry[] = [
+    { label: '重新连接', icon: 'refresh', onClick: () => window.location.reload(), hint: '画面卡住、不刷新时用：整页重新连接桌面' },
+    isAdmin && 'sep',
+    isAdmin && { label: '桌面设置', icon: 'palette', onClick: () => togglePanel('settings'), hint: '壁纸、字体' },
+    isAdmin && { label: '重启实例', icon: 'restart', onClick: restartInstance, hint: '修复卡死、窗口丢失，聊天记录保留' },
+    isAdmin && { label: '查看日志', icon: 'logs', onClick: openLogs },
+  ];
 
   return (
     <div className="ws-page">
-      <header className="ws-head">
-        <button className="ws-menu" onClick={onOpenMenu} aria-label="菜单">
-          {MenuIcon}
+      <header className={'ws-head' + (showVnc ? ' has-actions' : '')}>
+        <button className="icon-btn ws-menu" onClick={onOpenMenu} aria-label="打开菜单">
+          <Icon name="menu" size={21} />
         </button>
-        <span className="ws-title">{title}</span>
+        <span className="ws-title">
+          {inst && (
+            <span className="ws-title-icon">
+              <InstanceIcon icon={inst.icon} appType={inst.appType} size={26} radius={8} />
+            </span>
+          )}
+          <span className="ws-title-text">{title}</span>
+          {inst && !showVnc && st && <span className={'tag ' + st.tag}>{st.text}</span>}
+        </span>
         {showVnc && (
-          // 操作按钮收进可横向滑动的容器：手机宽度放不下时在容器内滑动，而不是整排挤出屏幕
-          //（此前 390px 宽时「桌面」「重启」完全在屏幕外点不到，标题也被压成 0 宽）
+          // 操作按钮收进可横向滑动的容器：手机宽度放不下时在容器内滑动，而不是整排挤出屏幕。
+          // 宽屏显示「图标 + 短标签」，窄屏只留图标；开关类（声音 / 麦克风）开着时是绿底
           <div className="ws-actions">
             <button
-              className="ws-action"
-              title="文件传输"
-              onClick={() => {
-                setShowFiles((v) => !v);
-                if (!showFiles) refreshFiles();
-              }}
+              className={'ws-action' + (panel === 'files' ? ' open' : '')}
+              title="文件传输：上传到桌面、从桌面下载"
+              aria-pressed={panel === 'files'}
+              onClick={() => togglePanel('files')}
             >
-              {uploading ? `文件 ${uploadPct}` : '文件'}
+              <Icon name="folder" size={18} />
+              <span className="ws-action-label">文件</span>
+              {uploading && <span className="ws-action-badge">{uploadPct}</span>}
             </button>
             <button
-              className={'ws-action' + (inputMode === 'seamless' ? ' on' : '')}
-              title={
-                inputMode === 'seamless'
-                  ? '无感输入：直接在应用输入框里打中文（提交后转发，已修复混数字丢字）。点击切回「转发输入条」'
-                  : '转发输入：用底部输入条打中文，最稳。点击切到「无感输入」（直接在应用里打）'
-              }
-              onClick={() => setMode(inputMode === 'seamless' ? 'forward' : 'seamless')}
+              className={'ws-action' + (panel === 'clip' ? ' open' : '')}
+              title="文本剪贴板：在本机和桌面之间传文字"
+              aria-pressed={panel === 'clip'}
+              onClick={() => togglePanel('clip')}
             >
-              输入：{inputMode === 'seamless' ? '无感' : '转发'}
+              <Icon name="clipboard" size={18} />
+              <span className="ws-action-label">剪贴板</span>
             </button>
-            <button
+            <span className="ws-sep" />
+            <MenuButton
               className="ws-action"
-              title="把文本发送到容器剪贴板（局域网 http 下也可用）"
-              onClick={() => setShowClip((v) => !v)}
-            >
-              剪贴板
-            </button>
+              icon={inputMode === 'seamless' ? 'typing' : 'keyboard'}
+              text={inputMode === 'seamless' ? '无感输入' : '转发输入'}
+              textClassName="ws-action-label"
+              label={`中文输入方式：${inputMode === 'seamless' ? '无感' : '转发'}`}
+              items={[
+                { section: '中文输入方式（切换会重新连接桌面）' },
+                {
+                  label: '转发输入',
+                  desc: '在底部输入条打中文，回车送进应用。最稳，推荐',
+                  icon: 'keyboard',
+                  checked: inputMode === 'forward',
+                  onClick: () => inputMode !== 'forward' && setMode('forward'),
+                },
+                {
+                  label: '无感输入',
+                  desc: '直接在应用的输入框里打中文，和本机一样',
+                  icon: 'typing',
+                  checked: inputMode === 'seamless',
+                  onClick: () => inputMode !== 'seamless' && setMode('seamless'),
+                },
+              ]}
+            />
             <button
               className={'ws-action' + (soundOn ? ' on' : '')}
-              title={soundOn ? '声音已开：已连接实例音频。点击关闭（关闭可减少一条到实例的连接，更稳）' : '声音已关：默认不连音频桥（连接更稳）。点此开启以听到实例声音'}
+              aria-pressed={soundOn}
+              title={soundOn ? '声音已开。点击关闭（关掉能少一条到实例的连接，更稳）' : '声音已关。点击开启，再在画面上点一下就能出声'}
               onClick={toggleSound}
             >
-              声音：{soundOn ? '开' : '关'}
+              <Icon name={soundOn ? 'volume' : 'volumeOff'} size={18} />
+              <span className="ws-action-label">声音</span>
             </button>
             {soundOn && (
               <button
                 className={'ws-action' + (micOn ? ' on' : '')}
+                aria-pressed={micOn}
                 title={
                   micOn
                     ? '麦克风已开：占用本机麦克风（AirPods 等可能被切到低音质通话模式）。点击关闭'
-                    : '麦克风已关：不占用麦克风，AirPods 保持高音质输出。需要语音/通话时点此开启'
+                    : '麦克风已关：不占用麦克风，AirPods 保持高音质。需要语音通话时点此开启'
                 }
                 onClick={toggleMic}
               >
-                麦克风：{micOn ? '开' : '关'}
+                <Icon name={micOn ? 'mic' : 'micOff'} size={18} />
+                <span className="ws-action-label">麦克风</span>
               </button>
             )}
-            {isAdmin && (
-              <>
-                <button className={'ws-action' + (showSettings ? ' on' : '')} title="桌面设置（壁纸/字体）" onClick={() => { setShowSettings((v) => !v); if (!showSettings) { refreshBgList(); refreshFontList(); } }}>
-                  桌面
-                </button>
-                <button className="ws-action" title="重启实例（修复卡死/最小化丢失）" onClick={restartInstance}>
-                  重启
-                </button>
-              </>
-            )}
+            <span className="ws-sep" />
+            <MenuButton className="ws-action" label="更多操作" items={moreItems} />
           </div>
         )}
       </header>
@@ -1427,69 +1534,113 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       {/* —— 各种态 —— */}
       {!loaded || (probing && !inst) ? (
         <div className="iv-stage iv-center">
-          <div className="spinner" />
+          <Spinner />
         </div>
       ) : !inst ? (
         <div className="iv-stage iv-center">
-          <div className="iv-notice">
-            <div className="iv-notice-title">无权访问或实例不存在</div>
-            <button className="btn btn-primary iv-notice-btn" onClick={() => nav('/')}>
-              返回主页
-            </button>
+          <div className="card iv-notice">
+            <div className="iv-notice-glyph">
+              <Icon name="lock" size={26} />
+            </div>
+            <div className="iv-notice-title">打不开这个实例</div>
+            <div className="iv-notice-sub">实例不存在，或者你没有访问它的权限。</div>
+            <div className="iv-notice-actions">
+              <button className="btn btn-primary iv-notice-btn" onClick={() => nav('/')}>
+                <Icon name="home" size={17} />
+                返回主页
+              </button>
+            </div>
           </div>
         </div>
       ) : offline ? (
-        <div className="iv-stage iv-center">
-          <div className="iv-notice">
-            <div className="iv-notice-title">{inst.runtime === 'missing' ? '容器尚未创建' : '实例已停止'}</div>
-            {isAdmin ? (
-              <button className="btn btn-primary iv-notice-btn" disabled={starting} onClick={start}>
-                {starting ? '启动中…' : inst.runtime === 'missing' ? '创建并启动' : '启动实例'}
-              </button>
-            ) : (
-              <div className="iv-notice-sub">请联系管理员启动该实例</div>
-            )}
-            {isAdmin && (
-              <button className="btn-text" onClick={() => window.open(api.instanceLogsUrl(id), '_blank')}>
+        <StateCard inst={inst} tone="off" title={inst.runtime === 'missing' ? '容器还没创建' : '实例已停止'}>
+          <div className="iv-notice-sub">
+            {!isAdmin
+              ? '需要管理员先在「管理」里启动它。'
+              : inst.runtime === 'missing'
+                ? '点下面的按钮创建容器并启动，数据卷里的聊天记录会接着用。'
+                : '启动后就能接着用，聊天记录和登录状态都还在。'}
+          </div>
+          {isAdmin && (
+            <>
+              <div className="iv-notice-actions">
+                <button className="btn btn-primary iv-notice-btn" disabled={starting} onClick={start}>
+                  {starting ? <Spinner size="sm" /> : <Icon name="power" size={17} />}
+                  {starting ? '启动中…' : inst.runtime === 'missing' ? '创建并启动' : '启动实例'}
+                </button>
+              </div>
+              <button className="btn-text iv-notice-foot" onClick={openLogs}>
+                <Icon name="logs" size={15} />
                 查看日志
               </button>
-            )}
-          </div>
-        </div>
-      ) : ['downloading', 'extracting', 'installing'].includes(inst.wechat.phase) ? (
-        <div className="iv-stage iv-center">
-          <div className="iv-notice">
-            <div className="spinner" />
-            <div className="iv-notice-title">{appLabel}安装中…</div>
-            <div className="iv-notice-sub">
-              {inst.wechat.message || '请稍候'}
-              {inst.wechat.percent >= 0 ? ` · ${inst.wechat.percent}%` : ''} ——完成后自动进入，无需刷新
+            </>
+          )}
+        </StateCard>
+      ) : busy || acting ? (
+        <StateCard inst={inst} tone="busy" title={`正在安装${appLabel}`}>
+          <div className="iv-notice-sub">装好后会自动进入桌面，不用刷新页面。</div>
+          <div className="iv-notice-progress" aria-live="polite">
+            <div className="iv-notice-progress-text">
+              <span>{progText}</span>
+              {progPct >= 0 && <span>{progPct}%</span>}
+            </div>
+            <div className="wx-progress">
+              <div className={'wx-progress-bar' + (progPct < 0 ? ' indeterminate' : '')} style={progPct >= 0 ? { width: `${progPct}%` } : undefined} />
             </div>
           </div>
-        </div>
+          {isAdmin && (
+            <button className="btn-text iv-notice-foot" onClick={openLogs}>
+              <Icon name="logs" size={15} />
+              查看日志
+            </button>
+          )}
+        </StateCard>
       ) : !installed ? (
-        <div className="iv-stage iv-center">
-          <div className="iv-notice">
-            <div className="iv-notice-title">{inst.wechat.phase === 'error' ? `${appLabel}安装出错` : `${appLabel}尚未安装`}</div>
+        <StateCard inst={inst} tone={errored ? 'err' : 'warn'} title={errored ? `${appLabel}安装失败` : `${appLabel}还没安装`}>
+          {errored ? (
+            <div className="iv-notice-err">{inst.wechat.message || '安装失败，可以重试'}</div>
+          ) : (
             <div className="iv-notice-sub">
-              {inst.wechat.phase === 'error'
-                ? inst.wechat.message || '安装失败，可在「管理」重试'
-                : `该实例容器已就绪，但尚未安装${appLabel}`}
+              {isAdmin ? `实例已经就绪，下载安装${appLabel}后就能使用。` : `需要管理员先在「管理」里安装${appLabel}。`}
             </div>
-            {isAdmin ? (
-              <button className="btn btn-primary iv-notice-btn" onClick={() => nav('/admin')}>
-                去「管理」{inst.wechat.phase === 'error' ? '重试 / 更新' : '下载安装'}
-              </button>
-            ) : (
-              <div className="iv-notice-sub">请联系管理员在「管理」中下载安装{appLabel}</div>
-            )}
-            {isAdmin && (
-              <button className="btn-text" onClick={() => window.open(api.instanceLogsUrl(id), '_blank')}>
+          )}
+          {isAdmin ? (
+            <>
+              <div className="iv-notice-actions">
+                <button className="btn btn-primary iv-notice-btn" onClick={installApp}>
+                  <Icon name={errored ? 'refresh' : 'download'} size={17} />
+                  {errored ? '重试安装' : `下载安装${appLabel}`}
+                </button>
+                {profile.packageUpload && (
+                  <button className="btn iv-notice-btn" onClick={() => pkgInput.current?.click()}>
+                    <Icon name="package" size={17} />
+                    上传安装包
+                  </button>
+                )}
+              </div>
+              {profile.packageUpload && !errored && (
+                <div className="iv-notice-hint">下载被腾讯拒绝时，可以在电脑浏览器打开 im.qq.com/linuxqq 下载 Linux 版的 .deb，再点「上传安装包」。</div>
+              )}
+              <button className="btn-text iv-notice-foot" onClick={openLogs}>
+                <Icon name="logs" size={15} />
                 查看日志
               </button>
-            )}
-          </div>
-        </div>
+              <input
+                ref={pkgInput}
+                type="file"
+                accept=".deb"
+                hidden
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = '';
+                  if (f) uploadPackage(f);
+                }}
+              />
+            </>
+          ) : (
+            errored && <div className="iv-notice-sub">请联系管理员重试安装。</div>
+          )}
+        </StateCard>
       ) : (
         <div className="iv-stage iv-stage--vnc">
           <div className="iv-canvas">
@@ -1518,25 +1669,31 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
 
           {!frameLoaded && !loadStuck && (
             <div className="iv-loading">
-              <div className="spinner" />
+              <Spinner />
               <div className="iv-loading-text">正在连接桌面…</div>
               <div className="iv-loading-sub">{profile.enterHint}</div>
-              <div className="iv-loading-sub">拖文件到此处即可上传；需要声音点顶部「声音」开启，再在画面上点一下即出声</div>
+              <div className="iv-loading-tip">文件可以直接拖进画面上传；要听声音，点顶部「声音」后在画面上点一下</div>
               {!window.isSecureContext && (
-                <div className="iv-loading-warn">当前非 HTTPS 访问，浏览器将禁用麦克风与摄像头（音频播放不受影响）</div>
+                <div className="iv-loading-warn">
+                  <Icon name="info" size={14} />
+                  当前不是 HTTPS 访问，浏览器会禁用麦克风和摄像头（声音播放不受影响）
+                </div>
               )}
             </div>
           )}
 
           {!frameLoaded && loadStuck && (
             <div className="iv-loading">
+              <div className="iv-loading-glyph">
+                <Icon name="alert" size={24} />
+              </div>
               <div className="iv-loading-text">桌面无响应</div>
               {/* 子用户无「重启实例」权限（按钮下方已按 isAdmin 隐藏），文案也要跟着变，
                   否则会让人照着找一个根本不存在的按钮（issue #125）。 */}
               <div className="iv-loading-sub">
                 {isAdmin
-                  ? '连接超时。可能是实例临时卡住，先「重新连接」；若仍无效请「重启实例」。'
-                  : '连接超时。可能是实例临时卡住，请先「重新连接」；若反复无效，请联系管理员重启该实例。'}
+                  ? '连接超时了，可能是实例临时卡住。先试试「重新连接」，还不行就「重启实例」，聊天记录不受影响。'
+                  : '连接超时了，可能是实例临时卡住。先试试「重新连接」；反复不行的话，请联系管理员重启实例。'}
               </div>
               <div className="iv-stuck-actions">
                 <button
@@ -1544,28 +1701,27 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   onClick={() => window.location.reload()}
                   title="整页重载干净重连（避免页内重挂导致 ws 并存把 Xvnc 卡死）"
                 >
+                  <Icon name="refresh" size={17} />
                   重新连接
                 </button>
                 {isAdmin && (
                   <button className="btn" onClick={restartInstance}>
+                    <Icon name="restart" size={17} />
                     重启实例
                   </button>
                 )}
               </div>
-              {isAdmin && (
-                <div className="iv-loading-sub" style={{ marginTop: 8 }}>
-                  若反复无响应，点「重启实例」即可恢复（数据保留）。
-                </div>
-              )}
             </div>
           )}
 
           {dragging && (
             <div className="iv-drop" onDrop={onDrop} onDragOver={(e) => e.preventDefault()}>
               <div className="drop-card">
-                <div className="drop-icon">⬇</div>
-                <div className="drop-title">松开上传到桌面</div>
-                <div className="drop-sub">上传后在应用里「+ / 文件」选择即可</div>
+                <div className="drop-icon">
+                  <Icon name="upload" size={30} />
+                </div>
+                <div className="drop-title">松开即可上传到桌面</div>
+                <div className="drop-sub">上传后在{appLabel}里「+ / 文件」选择即可</div>
               </div>
             </div>
           )}
@@ -1573,21 +1729,27 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           {control && !control.free && !control.mine && (
             <div className="iv-lock">
               <div className="iv-lock-card">
+                <div className="iv-lock-icon">
+                  <Icon name="hand" size={22} />
+                </div>
                 <div className="iv-lock-title">「{control.holder}」正在操作</div>
-                <div className="iv-lock-sub">为避免多端互相干扰，你当前为只读模式。</div>
+                <div className="iv-lock-sub">为了不互相干扰，你现在只能看。需要操作时可以接管，对方会变成只读。</div>
                 <button className="btn btn-primary iv-notice-btn" onClick={takeControl}>
-                  申请控制
+                  接管操作
                 </button>
               </div>
             </div>
           )}
 
-          {showFiles && (
-            <div className="iv-files">
+          {panel === 'files' && (
+            <div className="iv-files" role="dialog" aria-label="文件传输">
               <div className="files-head">
-                <span>文件传输</span>
-                <button className="btn-text" onClick={() => setShowFiles(false)}>
-                  关闭
+                <span className="files-title">
+                  <Icon name="folder" size={18} />
+                  文件传输
+                </span>
+                <button className="icon-btn" aria-label="关闭" title="关闭（Esc）" onClick={() => setPanel(null)}>
+                  <Icon name="x" size={18} />
                 </button>
               </div>
               <input
@@ -1601,89 +1763,121 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 }}
               />
               <button className="btn btn-primary files-upload" disabled={uploading} onClick={() => fileInput.current?.click()}>
-                {uploading ? `上传中 ${uploadPct}` : '＋ 选择文件上传'}
+                {uploading ? <Spinner size="sm" /> : <Icon name="upload" size={17} />}
+                {uploading ? `上传中 ${uploadPct}` : '选择文件上传'}
               </button>
-              <div className="files-hint">也可直接把文件拖进来。下方为桌面（~/Desktop）里的文件，应用收到的文件另存到桌面即可在此下载。</div>
+              <div className="files-hint">也可以直接把文件拖进画面。{appLabel}里收到的文件，另存到「桌面」后就能在下面下载。</div>
               <div className="files-list">
-                {files.length === 0 && (
-                  <div className="muted small" style={{ padding: '10px 2px' }}>
-                    暂无文件
-                  </div>
+                {files.length === 0 ? (
+                  <div className="files-empty">桌面上还没有文件</div>
+                ) : (
+                  files.map((f) => (
+                    <div key={f.name} className="files-item">
+                      <a className="files-dl" href={api.downloadFileUrl(id, f.name)} download={f.name} title={`下载 ${f.name}`}>
+                        <Icon name="file" size={17} />
+                        <span className="files-name">{f.name}</span>
+                        <span className="files-size">{humanSize(f.size)}</span>
+                        <Icon name="download" size={15} className="files-dl-ic" />
+                      </a>
+                      <button className="files-del" aria-label={`删除 ${f.name}`} title="删除" onClick={() => delFile(f.name)}>
+                        <Icon name="trash" size={15} />
+                      </button>
+                    </div>
+                  ))
                 )}
-                {files.map((f) => (
-                  <div key={f.name} className="files-item">
-                    <a className="files-dl" href={api.downloadFileUrl(id, f.name)} download={f.name} title="下载">
-                      <span className="files-name">{f.name}</span>
-                      <span className="files-size">{humanSize(f.size)} ↓</span>
-                    </a>
-                    <button className="files-del" title="删除" onClick={() => delFile(f.name)}>
-                      ✕
-                    </button>
-                  </div>
-                ))}
               </div>
             </div>
           )}
 
-          {showClip && (
-            <div className="iv-files">
+          {panel === 'clip' && (
+            <div className="iv-files" role="dialog" aria-label="文本剪贴板">
               <div className="files-head">
-                <span>文本剪贴板</span>
-                <button className="btn-text" onClick={() => setShowClip(false)}>
-                  关闭
+                <span className="files-title">
+                  <Icon name="clipboard" size={18} />
+                  文本剪贴板
+                </span>
+                <button className="icon-btn" aria-label="关闭" title="关闭（Esc）" onClick={() => setPanel(null)}>
+                  <Icon name="x" size={18} />
                 </button>
               </div>
               <textarea
-                className="clip-area"
+                className="input clip-area"
                 value={clipText}
                 onChange={(e) => setClipText(e.target.value)}
-                placeholder="在此输入或粘贴文本，点「发送到剪贴板」后到应用输入框按 Ctrl+V 粘贴"
+                placeholder={`输入或粘贴文字，发送后到${appLabel}的输入框按 Ctrl+V`}
                 rows={5}
               />
               <button className="btn btn-primary files-upload" onClick={sendClip}>
+                <Icon name="send" size={16} />
                 发送到剪贴板
               </button>
-              <button className="btn-text" style={{ alignSelf: 'flex-start', marginTop: 6 }} onClick={pullClipboardFromRemote}>
-                ↓ 读取容器剪贴板到此框
+              <button className="btn-text files-pull" onClick={pullClipboardFromRemote}>
+                <Icon name="download" size={15} />
+                读取桌面里复制的文字
               </button>
-              <div className="files-hint">
-                局域网 http 访问时浏览器会禁用系统级剪贴板同步，故用此框中转：文本→容器剪贴板，再在应用里 Ctrl+V。
-              </div>
+              <div className="files-hint">用局域网 http 地址访问时，浏览器不让网页直接读写剪贴板，可以用这个框中转。</div>
             </div>
           )}
 
-          {showSettings && (
-            <div className="iv-files">
+          {panel === 'settings' && (
+            <div className="iv-files" role="dialog" aria-label="桌面设置">
               <div className="files-head">
-                <span>桌面设置</span>
-                <button className="btn-text" onClick={() => setShowSettings(false)}>关闭</button>
+                <span className="files-title">
+                  <Icon name="palette" size={18} />
+                  桌面设置
+                </span>
+                <button className="icon-btn" aria-label="关闭" title="关闭（Esc）" onClick={() => setPanel(null)}>
+                  <Icon name="x" size={18} />
+                </button>
               </div>
-              <div className="settings-tabs">
-                <button className={'settings-tab' + (settingsTab === 'bg' ? ' on' : '')} onClick={() => setSettingsTab('bg')}>壁纸</button>
-                <button className={'settings-tab' + (settingsTab === 'font' ? ' on' : '')} onClick={() => setSettingsTab('font')}>字体</button>
+              <div className="settings-tabs" role="tablist">
+                <button role="tab" aria-selected={settingsTab === 'bg'} className={'settings-tab' + (settingsTab === 'bg' ? ' on' : '')} onClick={() => setSettingsTab('bg')}>
+                  壁纸
+                </button>
+                <button role="tab" aria-selected={settingsTab === 'font'} className={'settings-tab' + (settingsTab === 'font' ? ' on' : '')} onClick={() => setSettingsTab('font')}>
+                  字体
+                </button>
               </div>
 
               {settingsTab === 'bg' && (
                 <div className="settings-panel">
                   <input ref={bgInput} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={uploadBg} />
-                  <button className="btn btn-primary files-upload" disabled={bgUploading} onClick={() => bgInput.current?.click()}>
-                    {bgUploading ? '上传中…' : '＋ 上传壁纸'}
-                  </button>
-                  {currentBg && (
-                    <button className="btn-text" style={{ alignSelf: 'flex-start', color: 'var(--danger)', fontSize: 12 }} onClick={clearBg}>
-                      清除壁纸，恢复默认黑屏
+                  <div className="settings-row">
+                    <button className="btn btn-sm" disabled={bgUploading} onClick={() => bgInput.current?.click()}>
+                      {bgUploading ? <Spinner size="sm" /> : <Icon name="upload" size={16} />}
+                      {bgUploading ? '上传中…' : '上传壁纸'}
                     </button>
-                  )}
-                  <div className="files-hint">单击缩略图即可应用。支持 JPG / PNG 等常见格式。</div>
-                  {bgList.length === 0 && <div className="muted small" style={{ padding: '10px 2px' }}>暂无壁纸</div>}
+                    {currentBg && (
+                      <button className="btn-text danger" onClick={clearBg}>
+                        恢复默认黑屏
+                      </button>
+                    )}
+                  </div>
+                  <div className="files-hint">点缩略图即可应用，支持 JPG / PNG 等常见格式。</div>
+                  {bgList.length === 0 && <div className="files-empty">还没有壁纸</div>}
                   <div className="bg-grid">
                     {bgList.map((name) => (
-                      <div key={name} className={'bg-card' + (currentBg === name ? ' active' : '')} onClick={() => applyBg(name)} title="单击应用">
+                      <div key={name} className={'bg-card' + (currentBg === name ? ' active' : '')} onClick={() => applyBg(name)} title="点击应用">
                         <div className="bg-thumb-wrap">
                           <img className="bg-thumb" src={`/api/admin/instances/${id}/backgrounds/${encodeURIComponent(name)}/image`} alt={name} loading="lazy" />
-                          {currentBg !== name && <div className="bg-hint">单击应用</div>}
-                          {currentBg === name && <span className="bg-active-badge">✓ 使用中</span>}
-                          <button className="bg-del" title="删除" onClick={(e) => { e.stopPropagation(); deleteBg(name); }}>✕</button>
+                          {currentBg !== name && <div className="bg-hint">点击应用</div>}
+                          {currentBg === name && (
+                            <span className="bg-active-badge">
+                              <Icon name="check" size={11} strokeWidth={3} />
+                              使用中
+                            </span>
+                          )}
+                          <button
+                            className="bg-del"
+                            aria-label={`删除壁纸 ${name}`}
+                            title="删除"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteBg(name);
+                            }}
+                          >
+                            <Icon name="x" size={13} strokeWidth={2.6} />
+                          </button>
                         </div>
                         <span className="bg-name">{name}</span>
                       </div>
@@ -1695,21 +1889,39 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               {settingsTab === 'font' && (
                 <div className="settings-panel">
                   <input ref={fontInput} type="file" accept=".ttf,.otf,.ttc" multiple style={{ display: 'none' }} onChange={uploadFont} />
-                  <button className="btn btn-primary files-upload" disabled={fontUploading} onClick={() => fontInput.current?.click()}>
-                    {fontUploading ? '上传中…' : '＋ 上传字体'}
-                  </button>
-                  {currentFont && (
-                    <button className="btn-text" style={{ alignSelf: 'flex-start', color: 'var(--danger)', fontSize: 12 }} onClick={resetFontDefault}>
-                      恢复默认（文泉驿）
+                  <div className="settings-row">
+                    <button className="btn btn-sm" disabled={fontUploading} onClick={() => fontInput.current?.click()}>
+                      {fontUploading ? <Spinner size="sm" /> : <Icon name="upload" size={16} />}
+                      {fontUploading ? '上传中…' : '上传字体'}
                     </button>
-                  )}
-                  <div className="files-hint">支持 TTF / OTF / TTC 格式。应用字体后需重启微信（在面板杀一次）才能完全生效。</div>
-                  {fontList.length === 0 && <div className="muted small" style={{ padding: '10px 2px' }}>暂无字体</div>}
+                    {currentFont && (
+                      <button className="btn-text danger" onClick={resetFontDefault}>
+                        恢复默认（文泉驿）
+                      </button>
+                    )}
+                  </div>
+                  <div className="files-hint">支持 TTF / OTF / TTC。换了字体要重启一次{appLabel}才完全生效。</div>
+                  {fontList.length === 0 && <div className="files-empty">还没有上传字体</div>}
                   <div className="font-grid">
                     {fontList.map((name) => (
                       <div key={name} className={'font-card' + (currentFont === name ? ' active' : '')} onClick={() => applyUserFont(name)} title="点击应用">
-                        {currentFont === name && <span className="font-badge">✓ 使用中</span>}
-                        <button className="font-del" title="删除" onClick={(e) => { e.stopPropagation(); deleteFont(name); }}>✕</button>
+                        {currentFont === name && (
+                          <span className="font-badge">
+                            <Icon name="check" size={11} strokeWidth={3} />
+                            使用中
+                          </span>
+                        )}
+                        <button
+                          className="font-del"
+                          aria-label={`删除字体 ${name}`}
+                          title="删除"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteFont(name);
+                          }}
+                        >
+                          <Icon name="x" size={13} strokeWidth={2.6} />
+                        </button>
                         <div className="font-preview">
                           <span className="font-preview-text">Aa</span>
                         </div>
@@ -1744,7 +1956,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   aria-pressed={showKeys}
                   onClick={() => setShowKeys((v) => !v)}
                 >
-                  <KeyIcon d={ICON_KEYBOARD} />
+                  <Icon name="keyboard" size={18} />
                 </button>
                 <textarea
                   className="iv-imebar-input"
@@ -1758,12 +1970,13 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                       sendImeText();
                     }
                   }}
+                  title="回车发送，Shift+回车换行"
                   placeholder={
                     readOnly
-                      ? `「${control?.holder}」正在操作，你当前为只读；要操作请点桌面上的「申请控制」`
+                      ? `「${control?.holder}」正在操作，你现在只能看；要操作请点画面上的「接管操作」`
                       : autoEnter
-                        ? '中文输入这里 → 回车直接发送到应用（先点好应用的输入框）。Shift+回车换行。'
-                        : '中文输入这里 → 回车只把文字填进应用输入框，不自动发送（发送由你按）。Shift+回车换行。'
+                        ? `先点好${appLabel}里的输入框，再在这里打中文，回车发送`
+                        : `先点好${appLabel}里的输入框，再在这里打中文，回车只填入、不发送`
                   }
                   rows={1}
                 />
@@ -1778,20 +1991,41 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   aria-pressed={autoEnter}
                   onClick={toggleAutoEnter}
                 >
-                  <KeyIcon d={ICON_ENTER} />
+                  <Icon name="enter" size={18} />
                 </button>
                 <button
                   className="btn btn-primary iv-imebar-send"
                   disabled={imeSending || !imeText.trim() || readOnly}
                   onClick={sendImeText}
                 >
-                  {imeSending ? '发送中' : autoEnter ? '发送' : '填入'}
+                  {imeSending ? <Spinner size="sm" /> : <Icon name="send" size={16} />}
+                  <span className="iv-imebar-send-label">{imeSending ? '发送中' : autoEnter ? '发送' : '填入'}</span>
                 </button>
               </div>
             </>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// 实例没法直接进桌面时的状态卡：应用图标 + 右下角状态角标 + 标题，下面放说明和能直接点的操作
+type Tone = 'off' | 'busy' | 'warn' | 'err';
+const TONE_ICON: Record<Tone, IconName> = { off: 'power', busy: 'download', warn: 'download', err: 'alert' };
+function StateCard({ inst, tone, title, children }: { inst: InstanceWithStatus; tone: Tone; title: string; children?: ReactNode }) {
+  return (
+    <div className="iv-stage iv-center">
+      <div className="card iv-notice">
+        <div className="iv-notice-icon">
+          <InstanceIcon icon={inst.icon} appType={inst.appType} size={64} radius={18} />
+          <span className={'iv-notice-badge b-' + tone}>
+            <Icon name={TONE_ICON[tone]} size={13} strokeWidth={2.6} />
+          </span>
+        </div>
+        <div className="iv-notice-title">{title}</div>
+        {children}
+      </div>
     </div>
   );
 }

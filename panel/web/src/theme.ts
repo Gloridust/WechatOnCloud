@@ -20,6 +20,19 @@ export function applyThemeMode(m: ThemeMode): void {
     /* ignore */
   }
   document.documentElement.dataset.theme = m;
+  syncThemeColor();
+}
+
+// 手机浏览器顶栏 / 状态栏颜色（<meta name="theme-color">）跟着实际深浅走，和页面布底（--base）同色
+export function syncThemeColor(): void {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', resolveDark(getThemeMode()) ? '#121419' : '#edeff3');
+}
+// 跟随系统时，系统切深浅也要跟上
+try {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncThemeColor);
+} catch {
+  /* 老浏览器没有 addEventListener：忽略，刷新后即对 */
 }
 
 // 循环切换顺序：跟随系统 → 亮色 → 深色 → 跟随系统
