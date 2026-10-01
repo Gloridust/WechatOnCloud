@@ -105,5 +105,9 @@ RUN chmod 755 /custom-cont-init.d/01-woc-autostart
 COPY woc-app-init.sh /custom-cont-init.d/02-woc-app
 RUN chmod 755 /custom-cont-init.d/02-woc-app
 
+# 启动钩子（03）：清掉非正常退出（断电 / 强杀）残留的 X 显示锁，否则 Xvnc 可能误判显示被占用而起不来。
+COPY woc-xlock.sh /custom-cont-init.d/03-woc-xlock
+RUN chmod 755 /custom-cont-init.d/03-woc-xlock
+
 # 3000 = HTTP web 客户端, 3001 = HTTPS
 EXPOSE 3000 3001
