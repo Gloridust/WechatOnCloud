@@ -2075,7 +2075,7 @@ const APP_OPTIONS: { type: AppType; desc: string }[] = [
 ];
 const APP_HINT: Partial<Record<AppType, string>> = {
   wechat: '创建后在实例卡片上点「下载安装微信」（约 200MB），装好就能扫码登录。',
-  qq: '创建后在实例卡片上点「下载安装QQ」（约 180MB）。下载被腾讯拒绝时，可以在电脑浏览器打开 im.qq.com/linuxqq 下载 Linux 版的 .deb，再从卡片的「更多 → 上传安装包」传进来。',
+  qq: '创建后在实例卡片上点「下载安装QQ」（约 180MB）。下载被腾讯拒绝时，可以在电脑浏览器打开 im.qq.com/linuxqq 下载 Linux 版的 .deb，再点卡片「⋯」菜单里的「上传安装包」传进来。',
   chromium: '浏览器随镜像就绪，创建后直接进入，用来登录 Telegram、X、Instagram 等网页版。',
 };
 
