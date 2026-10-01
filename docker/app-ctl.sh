@@ -250,7 +250,7 @@ install_qq() {
     arm64) key=armDownloadUrl; aurkey=aarch64; label="ARM" ;;
     *) write_status error 0 "QQ 官方只提供 x86_64 / arm64 版本，当前架构（$arch）不支持"; return ;;
   esac
-  local manual="可以在电脑浏览器打开 im.qq.com/linuxqq 下载 Linux ${label} 版的 .deb 安装包，再在面板实例卡片的「管理」里点「上传安装包」"
+  local manual="可以在电脑浏览器打开 im.qq.com/linuxqq 下载 Linux ${label} 版的 .deb 安装包，再回面板点这个实例的「上传安装包」"
   # 同一时间只跑一个安装（面板重复触发时后来的直接跳过）；锁里的进程已不在（容器重启遗留）则接管
   local lock="$STATE_DIR/.qq-install.lock" lpid
   mkdir -p "$STATE_DIR"
