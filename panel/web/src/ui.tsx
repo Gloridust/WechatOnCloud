@@ -296,10 +296,14 @@ export function MenuButton({
         list[n].focus();
       }
     };
-    // 页面滚动 / 窗口变化就收起；菜单自己内部滚动（项多、屏幕矮时）不算
+    // 页面滚动 / 窗口变化时菜单跟着按钮走，按钮整个滚出视口才收起。不能一滚就关：点按钮前浏览器常会先把它
+    // 滚进视口（键盘 Tab 到屏幕外的按钮、手机上快速滑动后马上点），这次滚动的事件晚一拍才到，刚打开的菜单会被它关掉。
+    // 菜单自己内部滚动（项多、屏幕矮时）不算
     const onMove = (e: Event) => {
       if (e.type === 'scroll' && e.target instanceof Node && menu.current?.contains(e.target)) return;
-      setOpen(false);
+      const r = btn.current?.getBoundingClientRect();
+      if (!r || r.bottom < 0 || r.top > window.innerHeight) setOpen(false);
+      else place();
     };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('touchstart', onDown);
@@ -313,7 +317,7 @@ export function MenuButton({
       window.removeEventListener('resize', onMove);
       window.removeEventListener('scroll', onMove, true);
     };
-  }, [open]);
+  }, [open, place]);
 
   return (
     <>

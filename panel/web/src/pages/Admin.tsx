@@ -1441,10 +1441,9 @@ function InstanceAdminCard({
   else if (errored) primary = { label: '重试安装', icon: 'refresh', onClick: () => onTrigger(inst, 'install') };
   else primary = { label: `下载安装${profile.label}`, icon: 'download', onClick: () => onTrigger(inst, 'install') };
 
-  const items: MenuEntry[] = [
-    profile.needsInstall && !offline && { section: profile.label },
+  // 应用分组：装好了才有「更新」，QQ 多一个「上传安装包」；组里没有东西就连标题也不出（未安装的微信）
+  const appItems: MenuEntry[] = [
     profile.needsInstall && !offline && installed && { label: profile.updateLabel, icon: 'refresh', onClick: () => onTrigger(inst, 'update'), disabled: busy },
-    profile.needsInstall && !offline && !installed && errored && { label: '下载安装', icon: 'download', onClick: () => onTrigger(inst, 'install') },
     profile.packageUpload && !offline && {
       label: '上传安装包',
       icon: 'package',
@@ -1452,6 +1451,10 @@ function InstanceAdminCard({
       disabled: busy,
       hint: '腾讯拒绝下载时：在电脑浏览器打开 im.qq.com/linuxqq 下载 Linux 版的 .deb，从这里传进实例安装',
     },
+  ];
+  const items: MenuEntry[] = [
+    appItems.some(Boolean) && { section: profile.label },
+    ...appItems,
     { section: '实例' },
     { label: '升级实例', icon: 'upgrade', onClick: onUpgrade, hint: '拉取最新镜像并重建容器，聊天记录保留' },
     !offline && { label: '重启', icon: 'restart', onClick: onRestart },
