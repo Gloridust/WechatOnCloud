@@ -16,10 +16,27 @@ function desktopUrl(id: string) {
   );
 }
 
+// 中文转发期间要改走队列的编辑键 → xdotool 键名。noVNC 对它们直接发 keysym，会抢在中文前面生效。
+const QUEUED_KEYS: Record<string, string> = {
+  ' ': 'space',
+  Enter: 'Return',
+  Backspace: 'BackSpace',
+  Delete: 'Delete',
+  Tab: 'Tab',
+  ArrowLeft: 'Left',
+  ArrowRight: 'Right',
+  ArrowUp: 'Up',
+  ArrowDown: 'Down',
+  Home: 'Home',
+  End: 'End',
+  PageUp: 'Prior',
+  PageDown: 'Next',
+};
+
 // 「无感输入」钩子：装进同源 iframe，让用户直接在微信里打中文。
 // - compositionend（中文提交）→ 经 xclip+xdotool 转发（绕开 VNC keysym 容量上限）。
-// - 转发未完成期间（队列活跃），把后续可见字符 + 回车/退格也串进同一队列按序送出 →
-//   彻底消除"中文走异步、数字走 keysym 抢跑"导致的"你好123→23"丢字。
+// - 转发未完成期间（队列活跃），把后续按键也串进同一队列按序送出 →
+//   彻底消除"中文走异步、按键走 keysym 抢跑"导致的"你好123→23"丢字、空格跑到字前面（#155）。
 // - 队列空闲时不干预：英文/数字仍走原生 keysym，零延迟。
 // 返回清理函数（切回转发模式 / 重连 / 卸载时移除监听）。
 function installSeamlessIme(
@@ -33,8 +50,18 @@ function installSeamlessIme(
   const queue: Job[] = [];
   let draining = false;
   const active = () => draining || queue.length > 0;
-  // /type 单次上限 500 字（语音输入、长句提交可能超过），按段入队，免得整段被拒后丢失
+  // /type 单次上限 500 字（语音输入、长句提交可能超过），按段入队，免得整段被拒后丢失。
+  // 队尾还没发出的文字段直接接着拼：转发期间连着打的字合成一次发出，不会一个字一趟 HTTP、越排越久。
+  const pendingText = () => {
+    const last = queue.length > (draining ? 1 : 0) ? queue[queue.length - 1] : undefined; // 正在发的那段不算
+    return last?.kind === 'text' ? last : undefined;
+  };
   const pushText = (data: string) => {
+    const last = pendingText();
+    if (last && last.data.length + data.length <= 500) {
+      last.data += data;
+      return;
+    }
     for (let i = 0; i < data.length; i += 500) queue.push({ kind: 'text', data: data.slice(i, i + 500) });
   };
 
@@ -81,30 +108,24 @@ function installSeamlessIme(
   };
 
   // 捕获阶段（iframe window 最外层）抢先拦截，赶在 noVNC 之前 → stopImmediatePropagation 阻止它发 keysym。
-  // 关键：队列活跃（有中文正在转发）时，只接管【数字】和回车/退格——它们不参与拼音合成、且是原"混数字丢字"的祸首；
-  // 字母绝不接管，否则会把下一个词的拼音首字母（如"呀"的 y）当成字面字符抢走，造成"你好y呀"。字母交给输入法合成。
+  // 队列活跃（有中文正在转发）时，noVNC 会直接发 keysym 的键都改走队列：keysym 经 websocket 直达，比走 HTTP 的中文先到。
+  // 实测拼音上屏后连点空格，远端成了「   你好」（#155）；英文状态下紧跟的字母、标点、方向键同样抢跑。
+  // 可见字符并进待发文字，编辑键按键名送出（带上 Shift：微信里 Shift+回车是换行，丢了就成了发送）；
+  // 空格有待发文字时并进去一起贴，没有时按键名单发，不单独贴一个空格。
+  // 输入法正在处理的键（keyCode 229）一律不碰，包括下一个词的拼音首字母——抢走它就成了「你好y呀」；
+  // noVNC 自己也跳过这些键，输入法打出的字会经 compositionend / beforeinput 进同一队列。
   const onKeyDownCapture = (ev: Event) => {
     const e = ev as KeyboardEvent;
-    if (e.isComposing) return; // 拼音合成中，交给输入法（候选数字选词也在此放行）
+    if (e.isComposing || e.keyCode === 229) return; // 拼音合成中，交给输入法（候选数字选词也在此放行）
     if (e.ctrlKey || e.altKey || e.metaKey) return; // 快捷键放行
     if (!active()) return; // 没有中文在转发 → 不接管（英文/数字走原生 keysym，零延迟）
-    if (/^[0-9]$/.test(e.key)) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      queue.push({ kind: 'text', data: e.key });
-      drain();
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      queue.push({ kind: 'key', data: 'Return' });
-      drain();
-    } else if (e.key === 'Backspace') {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      queue.push({ kind: 'key', data: 'BackSpace' });
-      drain();
-    }
-    // 其它非可见键（方向键/功能键等）放行
+    const name = QUEUED_KEYS[e.key];
+    if (e.key.length === 1 && (e.key !== ' ' || (!e.shiftKey && pendingText()))) pushText(e.key);
+    else if (name) queue.push({ kind: 'key', data: e.shiftKey ? `shift+${name}` : name });
+    else return; // 其它键（功能键、Esc 等）放行
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    drain();
   };
 
   // 不经合成、直接插进输入框的文字：不少输入法的全角标点（，。？）、系统表情面板、语音输入都这样进来。
