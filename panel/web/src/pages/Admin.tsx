@@ -1736,11 +1736,11 @@ function VolumeManager({ inst, onClose, onChanged }: { inst: InstanceWithStatus;
       const running = inst.runtime === 'running';
       const ok = await confirm({
         title: '恢复整卷备份？',
-        body: `将用「${file.name}」覆盖该实例 /config 中的数据（含登录态、聊天库），不可撤销。只接受本系统导出的整卷备份。${
+        body: `该实例的 /config 将还原成「${file.name}」里的内容：现有数据（含登录态、聊天库）会被替换，备份里没有的文件也会删掉，不可撤销。只接受本系统导出的整卷备份；恢复失败会自动退回恢复前的数据。${
           running ? '实例正在运行，写入前会自动停止、写完自动启动。' : ''
         }`,
         danger: true,
-        confirmText: '覆盖恢复',
+        confirmText: '恢复',
       });
       if (!ok) return;
       await run(
