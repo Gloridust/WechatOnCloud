@@ -38,6 +38,13 @@ installer_running() {
 }
 
 print_status() {
+  # 浏览器随镜像装好，没有下载安装这回事。版本就是镜像里 chromium 包的版本，每次现查：面板卡片上显示出来，
+  # 升级实例后有没有真的换版本一眼可见（群里问过「Chrome 是不是没更新」，只能进浏览器的「关于」页才查得到）。
+  if [ "$APP" = chromium ] && is_installed; then
+    local v; v="$(dpkg-query -W -f='${Version}' chromium 2>/dev/null)"; v="${v%%-*}"
+    echo "{\"phase\":\"done\",\"percent\":100,\"installed\":true,\"version\":\"$v\",\"message\":\"Chromium 随镜像就绪\",\"updatedAt\":$(date +%s)}"
+    return
+  fi
   if [ -f "$STATUS_FILE" ]; then
     local s; s="$(cat "$STATUS_FILE")"
     if printf '%s' "$s" | grep -Eq '"phase":"(downloading|extracting|installing)"' && ! installer_running; then
