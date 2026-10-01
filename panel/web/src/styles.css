@@ -2319,6 +2319,10 @@ textarea.input {
   font-weight: 700;
   color: var(--danger-text);
 }
+/* 区块里单独一行的透明按钮：文字和上面的说明左对齐（按钮自带的内边距只留给悬停底色） */
+.danger-zone .btn-ghost.btn-sm {
+  margin-left: -13px;
+}
 .two-col {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2789,7 +2793,7 @@ textarea.input {
   color: var(--text-2);
 }
 .iv-loading-tip {
-  max-width: 420px;
+  max-width: 460px;
   margin-top: 6px;
   font-size: 12.5px;
   line-height: 1.6;

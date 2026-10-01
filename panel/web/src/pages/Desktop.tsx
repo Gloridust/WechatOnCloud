@@ -1672,7 +1672,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               <Spinner />
               <div className="iv-loading-text">正在连接桌面…</div>
               <div className="iv-loading-sub">{profile.enterHint}</div>
-              <div className="iv-loading-tip">文件可以直接拖进画面上传；要听声音，点顶部「声音」后在画面上点一下</div>
+              <div className="iv-loading-tip">文件可以直接拖进画面上传；要听声音，点顶部「声音」再点一下画面</div>
               {!window.isSecureContext && (
                 <div className="iv-loading-warn">
                   <Icon name="info" size={14} />
