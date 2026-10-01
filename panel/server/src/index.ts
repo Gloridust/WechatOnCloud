@@ -34,6 +34,7 @@ import {
   publicInstance,
   getDesktopDark,
   setDesktopDark,
+  instanceAppType,
   APP_TYPES,
   type AppType,
   type User,
@@ -64,8 +65,10 @@ import {
   instanceImageVersion,
   triggerWechat,
   wechatStatus,
+  BUSY_PHASES,
   instanceTarget,
   uploadToInstance,
+  uploadAppPackage,
   listInstanceFiles,
   downloadFromInstance,
   deleteInstanceFile,
@@ -210,6 +213,7 @@ function requireAuth(req: FastifyRequest, reply: FastifyReply): User | null {
 // ---------- 上传 ----------
 const UPLOAD_LIMIT_TRANSFER = 4 * GiB; // 桌面文件中转（有实例访问权限的人都能传）
 const UPLOAD_LIMIT_VOL_FILE = 20 * GiB; // 数据卷里上传单个文件（管理员）
+const UPLOAD_LIMIT_PACKAGE = 2 * GiB; // 应用安装包（管理员；QQ 的 .deb 约 180MB）
 const UPLOAD_LIMIT_ARCHIVE = 100 * GiB; // 上传并解压 / 整卷恢复（管理员；先暂存到面板数据目录，受那里的剩余空间约束）
 
 // 上传路由的响应一律带 connection: close：出错提前返回时，不必把客户端还在发的几个 GB 收完再回
@@ -1413,6 +1417,29 @@ app.post('/api/admin/instances/:id/wechat/install', async (req, reply) => {
 app.post('/api/admin/instances/:id/wechat/update', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   return triggerInstanceWechat((req.params as any).id, 'update', reply);
+});
+
+// QQ：上传自己下载的官方 .deb 并安装（仅管理员）。腾讯拒绝脚本下载时（#153）的出路：在电脑浏览器下好安装包，
+// 从卡片「管理 → 上传安装包」传进来，收完整后触发安装，app-ctl.sh 先装上传的包。
+app.post('/api/admin/instances/:id/app/package', async (req, reply) => {
+  uploadRoute(reply);
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  if (instanceAppType(inst) !== 'qq') return reply.code(400).send({ error: '只有 QQ 实例可以上传安装包' });
+  const name = String((req.query as any)?.name || '').trim();
+  if (!/\.deb$/i.test(name)) return reply.code(400).send({ error: '请选择 .deb 安装包（im.qq.com/linuxqq 上的 Linux 版）' });
+  if (BUSY_PHASES.has((await wechatStatus(inst)).phase)) return reply.code(409).send({ error: '正在安装，等这次结束后再上传' });
+  try {
+    await receiveFile(req, UPLOAD_LIMIT_PACKAGE, (size, body) => uploadAppPackage(inst, size, body));
+    await triggerWechat(inst, 'install');
+  } catch (e: any) {
+    appendPanelLog('WARN', `实例「${inst.name}」(id=${id}) 上传安装包失败：${e?.message || e}`);
+    return sendUploadError(reply, e, '上传失败');
+  }
+  appendPanelLog('INFO', `实例「${inst.name}」(id=${id}) 上传了安装包「${name.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 100)}」，开始安装`);
+  return { ok: true };
 });
 
 // ---------- 桌面壁纸管理 ----------

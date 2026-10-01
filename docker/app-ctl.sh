@@ -86,21 +86,171 @@ install_telegram() {
 }
 
 # ---------- QQ（Linux 官方版 QQNT）----------
-# 安装包地址取自腾讯官网 Linux QQ 页面自己用的配置（linuxConfig.js，随新版本更新），按架构选 deb，
+# 安装包来源，依次尝试：
+#   ① 面板卡片「上传安装包」传进来的包（$QQ_UPLOAD）：腾讯拒绝下载时，用户在电脑浏览器下好官方 .deb 传进来。
+#      核对是 QQ、架构对得上就装，不比版本（用户点名要装这个），装完或装不了都删掉；
+#   ② 腾讯官网 Linux QQ 页面自己用的配置（linuxConfig.js）里的地址，按浏览器的方式请求；
+#   ③ ② 被拒（HTTP 403 / 404）或取不到地址时，用 AUR linuxqq 包记录的地址（只认同一个腾讯 CDN qqdl.gtimg.cn），
+#      下完按 AUR 记录的 sha512 校验。
+# 实测（2026-10，#153）：官网配置给的 QQNTV2/…/release/ 地址对脚本下载一律 403，境外和中国大陆都一样，
+# 并不是此前以为的「只对大陆开放」；同一 CDN 上 QQNT/…/beta/ 路径的包境内外都能下（AUR、NapCat 都用它）。
 # 解压到数据卷 /config/qq（升级镜像不丢；更新 = 重新下载覆盖）。下载流程同 wechat-ctl.sh：断点续传、
-# 60 秒没速度即中断重试、连不上快速失败、解压前校验包完整。
-# 注意：腾讯的 QQ 下载服务器（qqdl.gtimg.cn）只对中国大陆网络开放，境外地址一律 403。
+# 60 秒没速度即中断重试、连不上快速失败、解压前校验包完整。每一步记进 install.log（诊断包会带上）。
 QQ_CONFIG_URL="${QQ_CONFIG_URL:-https://cdn-go.cn/qq-web/im.qq.com_new/latest/rainbow/linuxConfig.js}"
+QQ_AUR_SRCINFO="${QQ_AUR_SRCINFO:-https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=linuxqq}"
+QQ_AUR_URL_RE="${QQ_AUR_URL_RE:-^https://qqdl\.gtimg\.cn/[A-Za-z0-9._/-]+\.deb$}"
 QQ_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+QQ_HDR=(-A "$QQ_UA" -e "https://im.qq.com/" -H "Accept: */*" -H "Accept-Language: zh-CN,zh;q=0.9")
+QQ_WORK=/config/.woc-dl
+QQ_TMP="$QQ_WORK/qq.deb"
+QQ_UPLOAD="$QQ_WORK/qq-upload.deb" # 面板「上传安装包」写到这里（panel docker.ts uploadAppPackage）
+QQ_CODE="" # 最近一次被拒的 HTTP 状态码
+
+qlog() { echo "[$(date '+%F %T')] [qq] $*" >> "$STATE_DIR/install.log" 2>/dev/null; }
+
+# 已装 QQ 的版本（完整的 deb 版本号，如 3.2.34-53644）；1.5.1 装的没记，退而读状态文件里的
+qq_installed_version() {
+  [ -x /config/qq/opt/QQ/qq ] || return 0
+  cat /config/qq/.woc-version 2>/dev/null ||
+    sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$STATUS_FILE" 2>/dev/null
+}
+
+# deb 控制信息里的一个字段；含包名、版本号里不该有的字符时给「?」（要写进状态 JSON，上传的包里什么都可能有）
+deb_field() {
+  local v
+  v="$(dpkg-deb -f "$1" "$2" 2>/dev/null | head -1)"
+  case "$v" in *[!A-Za-z0-9.+:~_-]*) echo "?" ;; *) printf '%s\n' "${v:0:64}" ;; esac
+}
+
+# ① 面板上传的安装包：核对包名和架构后安装，结束后删掉（留着的话下次点「更新」还会装它）
+qq_install_upload() {
+  local arch="$1" label="$2" pkg debarch ver
+  pkg="$(deb_field "$QQ_UPLOAD" Package)"
+  debarch="$(deb_field "$QQ_UPLOAD" Architecture)"
+  ver="$(deb_field "$QQ_UPLOAD" Version)"
+  qlog "使用上传的安装包：包名 ${pkg:-?}，架构 ${debarch:-?}，版本 ${ver:-?}（$(stat -c%s "$QQ_UPLOAD" 2>/dev/null) 字节）"
+  if [ -z "$pkg" ]; then
+    write_status error 0 "上传的文件不是有效的 .deb 安装包（可能没下载完或已损坏），请重新下载后再上传"
+  elif [ "$pkg" != linuxqq ]; then
+    write_status error 0 "上传的不是 QQ 的安装包（包名 $pkg），请在 im.qq.com/linuxqq 下载 Linux ${label} 版的 .deb"
+  elif [ "$debarch" != "$arch" ]; then
+    write_status error 0 "上传的是 ${debarch} 版的 QQ，这台机器要用 Linux ${label} 版，请在 im.qq.com/linuxqq 重新下载"
+  else
+    qq_install_deb "$QQ_UPLOAD" upload
+  fi
+  rm -f "$QQ_UPLOAD"
+}
+
+# 探路请求的输出（响应头 + WOC_CODE=状态码）→「状态码 总大小」；没拿到响应时状态码为 -，大小不明为 0
+qq_probe_parse() {
+  awk '/^HTTP\//{cl = ""; cr = ""; next}
+       tolower($1) == "content-length:" {cl = $2}
+       tolower($1) == "content-range:" {n = split($0, a, "/"); cr = a[n]}
+       /^WOC_CODE=/ {c = substr($0, 10)}
+       END {t = cr; if (t == "" && c == "200") t = cl; if (c == "" || c == "000") c = "-"; if (t !~ /^[0-9]+$/) t = 0; print c, t}'
+}
+
+# 下载到 $QQ_TMP。返回 0 成功；10 = 服务器拒绝（403 / 404 等，换来源）；其它 = 失败（状态已写好）
+qq_download() {
+  local url="$1" ver="$2" head code total cur pct pid rc=1 attempt=0
+  [ "$(cat "$QQ_WORK/qq.url" 2>/dev/null)" = "$url" ] || rm -f "$QQ_TMP"
+  echo "$url" > "$QQ_WORK/qq.url"
+  # 先取 1 个字节探路：被拒就直接换来源，不用等六轮重试；顺便从 Content-Range 拿到总大小。
+  # --max-filesize 1：服务器不认 Range、回整个文件时只收响应头，不把 180MB 白下一遍。
+  # 状态码用 %{http_code}（最终响应的），大小只看最后一个响应的头：走 HTTP 代理时前面还有一段代理的
+  # 「200 Connection established」，隧道断了的话只剩它，按它判断会把没连上当成 200
+  read -r code total < <(curl -sS -D - -o /dev/null -w 'WOC_CODE=%{http_code}\n' -r 0-0 --max-filesize 1 \
+      --connect-timeout 15 --max-time 30 "${QQ_HDR[@]}" "$url" 2>/dev/null | tr -d '\r' | qq_probe_parse)
+  [ "$code" = - ] && code=""
+  qlog "探测 $url → HTTP ${code:-无响应}，大小 $total"
+  case "$code" in 401 | 403 | 404 | 410 | 451) QQ_CODE="$code"; return 10 ;; esac
+  # 磁盘预检：deb 约 180MB，解压后约 600MB，更新时新旧并存 → 按 deb 的 4 倍、不低于 900MB
+  local need_kb avail_kb
+  need_kb=$(( ( total > 0 ? total : 200000000 ) / 1024 * 4 )); [ "$need_kb" -lt 921600 ] && need_kb=921600
+  avail_kb="$(df -Pk "$QQ_WORK" 2>/dev/null | awk 'NR==2{print $4}')"
+  if [ -n "${avail_kb:-}" ] && [ "$avail_kb" -lt "$need_kb" ] 2>/dev/null; then
+    write_status error 0 "磁盘空间不足：约需 $((need_kb/1024))MB 空闲，当前仅 $((avail_kb/1024))MB。请在宿主清理磁盘后重试"
+    return 1
+  fi
+  while [ "$attempt" -lt 6 ]; do
+    attempt=$((attempt+1))
+    curl -fSL -C - --connect-timeout 20 --speed-limit 1024 --speed-time 60 \
+         "${QQ_HDR[@]}" -o "$QQ_TMP" "$url" 2>"$QQ_WORK/qq-curl.err" & pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+      if [ "$total" -gt 0 ] 2>/dev/null; then
+        cur="$(stat -c%s "$QQ_TMP" 2>/dev/null || echo 0)"
+        pct=$(( cur * 90 / total )); [ "$pct" -gt 90 ] && pct=90
+        write_status downloading "$pct" "正在下载 QQ ${ver}"
+      else
+        write_status downloading -1 "正在下载 QQ ${ver}"
+      fi
+      sleep 1
+    done
+    wait "$pid"; rc=$?
+    cur="$(stat -c%s "$QQ_TMP" 2>/dev/null || echo 0)"
+    [ "$rc" -eq 0 ] && break
+    if [ "$total" -gt 0 ] && [ "$cur" -ge "$total" ]; then rc=0; break; fi
+    qlog "curl 退出码 $rc（第 $attempt 轮），已下 $cur 字节：$(tail -c 200 "$QQ_WORK/qq-curl.err" 2>/dev/null | tr '\n' ' ')"
+    code="$(grep -o 'error: [0-9][0-9][0-9]' "$QQ_WORK/qq-curl.err" 2>/dev/null | tail -1 | cut -d' ' -f2)"
+    case "$code" in 401 | 403 | 404 | 410 | 451) QQ_CODE="$code"; return 10 ;; esac
+    # 连不上（DNS / 拒绝 / 超时 / TLS）且一个字节没拿到：再试也没用，两轮后直接说清楚
+    if [ "$attempt" -ge 2 ] && [ "$cur" -eq 0 ]; then
+      case "$rc" in
+        6 | 7 | 28 | 35) write_status error 0 "连不上腾讯 QQ 下载服务器（curl 退出码 $rc），请检查 DNS、防火墙或代理后重试"; return 1 ;;
+      esac
+    fi
+    write_status downloading -1 "下载中断，正在续传重试（$attempt/6）"
+    sleep 2
+  done
+  if [ "$rc" -ne 0 ]; then
+    write_status error 0 "下载失败（多次续传仍未完成，请检查网络后重试）"
+    return 1
+  fi
+  qlog "下载完成：$cur 字节"
+  return 0
+}
+
+# 解压安装一个 deb。src=download：下载来的，装完或包坏了都清掉（下次重新下载）；src=upload：上传的，由调用方删
+qq_install_deb() {
+  local deb="$1" src="$2" debver newdir="$QQ_WORK/qqx" retry
+  if [ "$src" = download ]; then retry="已清理，请再次点击安装（将重新下载）"; else retry="请重新下载后再上传"; fi
+  write_status extracting 92 "正在解压安装"
+  debver="$(deb_field "$deb" Version)"
+  if [ -z "$debver" ]; then
+    [ "$src" = download ] && rm -f "$deb" "$QQ_WORK/qq.url"
+    qlog "$deb 不是完整的 deb 包"
+    write_status error 0 "安装包不完整或损坏，$retry"
+    return 1
+  fi
+  rm -rf "$newdir"; mkdir -p "$newdir"
+  if ! dpkg-deb -x "$deb" "$newdir" 2>/dev/null || [ ! -x "$newdir/opt/QQ/qq" ]; then
+    rm -rf "$newdir"
+    [ "$src" = download ] && rm -f "$deb" "$QQ_WORK/qq.url"
+    qlog "解压 $deb 失败或包里没有 opt/QQ/qq"
+    write_status error 0 "解压失败或安装包里没有 QQ 程序，$retry"
+    return 1
+  fi
+  write_status installing 96 "正在安装"
+  echo "$debver" > "$newdir/.woc-version"
+  rm -rf /config/qq.old
+  [ -e /config/qq ] && mv /config/qq /config/qq.old
+  mv "$newdir" /config/qq
+  rm -rf /config/qq.old "$QQ_WORK/qq-curl.err"
+  [ "$src" = download ] && rm -f "$deb" "$QQ_WORK/qq.url"
+  qlog "安装完成：$debver"
+  write_status done 100 "安装完成" "${debver%%-*}"
+  pkill -f "/config/qq/opt/QQ/qq" 2>/dev/null || true # 正在运行的旧版退出后，autostart 会拉起新版
+}
 
 install_qq() {
-  local key arch
+  local arch key aurkey label
   arch="$(dpkg --print-architecture 2>/dev/null)"
   case "$arch" in
-    amd64) key=x64DownloadUrl ;;
-    arm64) key=armDownloadUrl ;;
+    amd64) key=x64DownloadUrl; aurkey=x86_64; label="x64" ;;
+    arm64) key=armDownloadUrl; aurkey=aarch64; label="ARM" ;;
     *) write_status error 0 "QQ 官方只提供 x86_64 / arm64 版本，当前架构（$arch）不支持"; return ;;
   esac
+  local manual="可以在电脑浏览器打开 im.qq.com/linuxqq 下载 Linux ${label} 版的 .deb 安装包，再在面板实例卡片的「管理」里点「上传安装包」"
   # 同一时间只跑一个安装（面板重复触发时后来的直接跳过）；锁里的进程已不在（容器重启遗留）则接管
   local lock="$STATE_DIR/.qq-install.lock" lpid
   mkdir -p "$STATE_DIR"
@@ -111,88 +261,62 @@ install_qq() {
   fi
   echo "$$" > "$lock/pid"
   trap 'rm -rf "'"$lock"'" 2>/dev/null' EXIT
+  mkdir -p "$QQ_WORK"
+  qlog "开始安装（$ACTION，架构 $arch，已装版本 $(qq_installed_version || true)）"
 
-  local work=/config/.woc-dl cfg url ver tmp total cur pct pid rc=1 attempt=0
-  mkdir -p "$work"; tmp="$work/qq.deb"
+  # ① 面板上传的安装包
+  if [ -f "$QQ_UPLOAD" ]; then
+    qq_install_upload "$arch" "$label"
+    return
+  fi
+
+  # ② 官网配置里的地址
+  local cfg url ver rc why=""
   write_status downloading -1 "正在获取 QQ 最新版本信息"
-  cfg="$(curl -fsSL --connect-timeout 20 --max-time 60 -A "$QQ_UA" "$QQ_CONFIG_URL" 2>/dev/null | tr -d '\r\n')"
+  cfg="$(curl -fsSL --connect-timeout 20 --max-time 60 "${QQ_HDR[@]}" "$QQ_CONFIG_URL" 2>/dev/null | tr -d '\r\n')"
   url="$(printf '%s' "$cfg" | grep -o "\"$key\":{[^}]*}" | grep -o '"deb":"[^"]*"' | head -1 | cut -d'"' -f4)"
   ver="$(printf '%s' "$cfg" | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)"
   case "$url" in
-    http://*.deb | https://*.deb) ;;
-    *) write_status error 0 "获取 QQ 下载地址失败（连不上腾讯官网或页面改版），请检查网络后重试"; return ;;
+    http://*.deb | https://*.deb)
+      qlog "官网配置：版本 $ver，$url"
+      qq_download "$url" "$ver"; rc=$?
+      if [ "$rc" -eq 0 ]; then qq_install_deb "$QQ_TMP" download; return; fi
+      [ "$rc" -eq 10 ] || return
+      why="官网下载地址被腾讯拒绝（HTTP $QQ_CODE）" ;;
+    *)
+      qlog "官网配置取不到 $key 的下载地址（${#cfg} 字节）"
+      why="取不到官网的下载地址" ;;
   esac
-  # 上次没下完的是同一个安装包才续传，版本变了就重下
-  [ "$(cat "$work/qq.url" 2>/dev/null)" = "$url" ] || rm -f "$tmp"
-  echo "$url" > "$work/qq.url"
-  total="$(curl -fsSLI --connect-timeout 10 --max-time 20 -A "$QQ_UA" "$url" 2>/dev/null | tr -d '\r' \
-          | awk 'tolower($1)=="content-length:"{v=$2} END{print v}')"
-  : "${total:=0}"
-  # 磁盘预检：deb 约 180MB，解压后约 600MB，更新时新旧并存 → 按 deb 的 4 倍、不低于 900MB
-  local need_kb avail_kb
-  need_kb=$(( ( total > 0 ? total : 200000000 ) / 1024 * 4 )); [ "$need_kb" -lt 921600 ] && need_kb=921600
-  avail_kb="$(df -Pk "$work" 2>/dev/null | awk 'NR==2{print $4}')"
-  if [ -n "${avail_kb:-}" ] && [ "$avail_kb" -lt "$need_kb" ] 2>/dev/null; then
-    write_status error 0 "磁盘空间不足：约需 $((need_kb/1024))MB 空闲，当前仅 $((avail_kb/1024))MB。请在宿主清理磁盘后重试"
+
+  # ③ AUR linuxqq 包记录的地址（同一个腾讯 CDN），按它记录的 sha512 校验
+  local si url2 ver2 sum
+  write_status downloading -1 "${why}，改用 AUR linuxqq 包记录的下载地址"
+  si="$(curl -fsSL --connect-timeout 20 --max-time 60 "$QQ_AUR_SRCINFO" 2>/dev/null | tr -d '\r')"
+  url2="$(printf '%s\n' "$si" | awk -F' = ' -v k="source_$aurkey" '{sub(/^[ \t]+/, "", $1)} $1==k {print $2; exit}')"
+  sum="$(printf '%s\n' "$si" | awk -F' = ' -v k="sha512sums_$aurkey" '{sub(/^[ \t]+/, "", $1)} $1==k {print $2; exit}')"
+  ver2="$(printf '%s\n' "$si" | awk -F' = ' '{sub(/^[ \t]+/, "", $1)} $1=="pkgver" {print $2; exit}' | tr '_' '-')"
+  if ! printf '%s' "$url2" | grep -Eq "$QQ_AUR_URL_RE"; then
+    qlog "AUR 记录里没有可用的 $aurkey 地址（${url2:-空}）"
+    write_status error 0 "${why}，备用下载地址也取不到。$manual"
     return
   fi
-
-  while [ "$attempt" -lt 6 ]; do
-    attempt=$((attempt+1))
-    curl -fSL -C - --connect-timeout 20 --speed-limit 1024 --speed-time 60 \
-         -A "$QQ_UA" -o "$tmp" "$url" 2>"$work/qq-curl.err" & pid=$!
-    while kill -0 "$pid" 2>/dev/null; do
-      if [ "$total" -gt 0 ] 2>/dev/null; then
-        cur="$(stat -c%s "$tmp" 2>/dev/null || echo 0)"
-        pct=$(( cur * 90 / total )); [ "$pct" -gt 90 ] && pct=90
-        write_status downloading "$pct" "正在下载 QQ ${ver}"
-      else
-        write_status downloading -1 "正在下载 QQ ${ver}"
-      fi
-      sleep 1
-    done
-    wait "$pid"; rc=$?
-    [ "$rc" -eq 0 ] && break
-    cur="$(stat -c%s "$tmp" 2>/dev/null || echo 0)"
-    if [ "$total" -gt 0 ] && [ "$cur" -ge "$total" ]; then rc=0; break; fi
-    if grep -q "error: 403" "$work/qq-curl.err" 2>/dev/null; then
-      write_status error 0 "腾讯 QQ 下载服务器拒绝了请求（HTTP 403）。QQ 安装包只对中国大陆网络开放，境外网络或走境外出口的代理无法下载"
+  qlog "AUR 记录：版本 $ver2，$url2"
+  qq_download "$url2" "$ver2"; rc=$?
+  if [ "$rc" -eq 10 ]; then
+    write_status error 0 "腾讯下载服务器拒绝了请求（HTTP $QQ_CODE），官网地址和备用地址都下不了。$manual"
+    return
+  fi
+  [ "$rc" -eq 0 ] || return
+  if [ -n "$sum" ]; then
+    if [ "$(sha512sum "$QQ_TMP" | cut -d' ' -f1)" != "$sum" ]; then
+      qlog "sha512 校验不通过，已删除下载的文件"
+      rm -f "$QQ_TMP" "$QQ_WORK/qq.url"
+      write_status error 0 "下载的安装包校验不通过（和 AUR 记录的不一致），已删除，请稍后重试"
       return
     fi
-    # 连不上（DNS / 拒绝 / 超时 / TLS）且一个字节没拿到：再试也没用，两轮后直接说清楚
-    if [ "$attempt" -ge 2 ] && [ "$cur" -eq 0 ]; then
-      case "$rc" in
-        6 | 7 | 28 | 35) write_status error 0 "连不上腾讯 QQ 下载服务器（curl 退出码 $rc），请检查 DNS、防火墙或代理后重试"; return ;;
-      esac
-    fi
-    write_status downloading -1 "下载中断，正在续传重试（$attempt/6）"
-    sleep 2
-  done
-  if [ "$rc" -ne 0 ]; then
-    write_status error 0 "下载失败（多次续传仍未完成，请检查网络后重试）"
-    return
+    qlog "sha512 校验通过"
   fi
-
-  write_status extracting 92 "正在解压安装"
-  local debver newdir="$work/qqx"
-  if ! debver="$(dpkg-deb -f "$tmp" Version 2>/dev/null)"; then
-    rm -f "$tmp" "$work/qq.url"
-    write_status error 0 "安装包不完整或损坏，已清理，请再次点击安装（将重新下载）"
-    return
-  fi
-  rm -rf "$newdir"; mkdir -p "$newdir"
-  if ! dpkg-deb -x "$tmp" "$newdir" 2>/dev/null || [ ! -x "$newdir/opt/QQ/qq" ]; then
-    rm -rf "$newdir" "$tmp" "$work/qq.url"
-    write_status error 0 "解压失败或安装包里没有 QQ 程序，请重试"
-    return
-  fi
-  write_status installing 96 "正在安装"
-  rm -rf /config/qq.old
-  [ -e /config/qq ] && mv /config/qq /config/qq.old
-  mv "$newdir" /config/qq
-  rm -rf /config/qq.old "$tmp" "$work/qq.url" "$work/qq-curl.err"
-  write_status done 100 "安装完成" "${debver%%-*}"
-  pkill -f "/config/qq/opt/QQ/qq" 2>/dev/null || true # 正在运行的旧版退出后，autostart 会拉起新版
+  qq_install_deb "$QQ_TMP" download
 }
 
 case "$ACTION" in

@@ -32,17 +32,19 @@ export const APP_LABELS: Record<AppType, string> = {
 //   needsInstall: 是否需要运行时下载安装（微信/Telegram 是；Chromium 已烤进镜像、即创建即就绪）。
 //   enterHint:    首次进入实例的提示。
 //   updateLabel:  「管理」菜单里的更新按钮文案（needsInstall=false 时不显示）。
+//   packageUpload: 「管理」菜单里有「上传安装包」（QQ：腾讯拒绝下载时传自己下载的 .deb，#153）。
 export interface AppProfile {
   label: string;
   needsInstall: boolean;
   enterHint: string;
   updateLabel: string;
+  packageUpload?: boolean;
 }
 export const APP_PROFILES: Record<AppType, AppProfile> = {
   wechat: { label: '微信', needsInstall: true, enterHint: '首次进入请扫码登录微信', updateLabel: '更新微信' },
   telegram: { label: 'Telegram', needsInstall: true, enterHint: '首次进入请登录 Telegram', updateLabel: '更新 Telegram' },
   chromium: { label: 'Chromium', needsInstall: false, enterHint: '浏览器已就绪，直接使用即可', updateLabel: '' },
-  qq: { label: 'QQ', needsInstall: true, enterHint: '首次进入请用手机 QQ 扫码登录', updateLabel: '更新 QQ' },
+  qq: { label: 'QQ', needsInstall: true, enterHint: '首次进入请用手机 QQ 扫码登录', updateLabel: '更新 QQ', packageUpload: true },
   custom: { label: '自定义应用', needsInstall: true, enterHint: '', updateLabel: '更新' },
 };
 export const appProfile = (t?: AppType): AppProfile => APP_PROFILES[t ?? 'wechat'] ?? APP_PROFILES.wechat;
@@ -128,7 +130,7 @@ async function apiFetch(input: string, init: RequestInit = {}): Promise<Response
 // 与服务端 index.ts 的 UPLOAD_LIMIT_* 一致。前端先比一下：超限时服务端会直接回 413 并断开连接，
 // 浏览器此时往往只报「网络错误」，看不到原因。
 const GB = 1024 ** 3;
-export const UPLOAD_LIMITS = { transfer: 4 * GB, volumeFile: 20 * GB, archive: 100 * GB };
+export const UPLOAD_LIMITS = { transfer: 4 * GB, volumeFile: 20 * GB, archive: 100 * GB, package: 2 * GB };
 export function assertUploadSize(file: Blob, limit: number) {
   if (file.size > limit) throw new Error(`文件太大（${fmtUploadSize(file.size)}，上限 ${fmtUploadSize(limit)}）`);
 }
@@ -303,6 +305,11 @@ export const api = {
   },
   instanceWechatInstall: (id: string) => req(`/api/admin/instances/${id}/wechat/install`, { method: 'POST' }),
   instanceWechatUpdate: (id: string) => req(`/api/admin/instances/${id}/wechat/update`, { method: 'POST' }),
+  // 上传自己下载的安装包并安装（QQ 的 .deb；传完服务端即触发安装，进度看实例的安装状态）
+  uploadAppPackage: async (id: string, file: File, onProgress?: UploadProgress) => {
+    assertUploadSize(file, UPLOAD_LIMITS.package);
+    return rawUpload(`/api/admin/instances/${id}/app/package?name=${encodeURIComponent(file.name)}`, file, onProgress);
+  },
   instanceStart: (id: string) => req(`/api/admin/instances/${id}/start`, { method: 'POST' }),
   instanceStop: (id: string) => req(`/api/admin/instances/${id}/stop`, { method: 'POST' }),
   instanceRestart: (id: string) => req(`/api/admin/instances/${id}/restart`, { method: 'POST' }),

@@ -406,10 +406,40 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
       );
       window.clearTimeout(timer.current);
       timer.current = window.setTimeout(load, 1000);
-      toast(kind === 'install' ? '已开始下载微信' : '已开始更新', 'ok');
+      toast(kind === 'install' ? `已开始下载${appProfile(inst.appType).label}` : '已开始更新', 'ok');
     } catch (e: any) {
       toast(e.message || '操作失败', 'error');
     }
+  };
+
+  // 上传安装包（QQ）：腾讯拒绝下载时，把在电脑浏览器下好的 .deb 传进实例安装（#153）。传完服务端即触发安装
+  const pkgInput = useRef<HTMLInputElement>(null);
+  const pkgTarget = useRef<InstanceWithStatus | null>(null);
+  const pickPackage = (inst: InstanceWithStatus) => {
+    pkgTarget.current = inst;
+    pkgInput.current?.click();
+  };
+  const uploadPackage = async (file: File) => {
+    const inst = pkgTarget.current;
+    if (!inst) return;
+    setAct(inst.id, '上传安装包 0%');
+    try {
+      await api.uploadAppPackage(inst.id, file, (loaded, size) =>
+        setAct(inst.id, loaded < size ? `上传安装包 ${Math.floor((loaded / size) * 100)}%` : '上传安装包：写入中'),
+      );
+      setInstances((list) =>
+        list.map((i) =>
+          i.id === inst.id ? { ...i, wechat: { ...i.wechat, phase: 'extracting', percent: -1, message: '正在准备安装…' } } : i,
+        ),
+      );
+      toast('安装包已上传，正在安装', 'ok');
+    } catch (e: any) {
+      toast(e.message || '上传失败', 'error');
+    } finally {
+      setAct(inst.id, null);
+    }
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(load, 1000);
   };
 
   const start = async (inst: InstanceWithStatus) => {
@@ -626,6 +656,7 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                     acting={acting[inst.id]}
                     onEnter={() => nav(`/i/${inst.id}`)}
                     onTrigger={trigger}
+                    onPackage={() => pickPackage(inst)}
                     onStart={() => start(inst)}
                     onStop={() => lifecycle(inst, 'stop')}
                     onRestart={() => lifecycle(inst, 'restart')}
@@ -892,6 +923,17 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
       {volumeInst && (
         <VolumeManager inst={volumeInst} onClose={() => setVolumeInst(null)} onChanged={load} />
       )}
+      <input
+        ref={pkgInput}
+        type="file"
+        accept=".deb"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = '';
+          if (f) void uploadPackage(f);
+        }}
+      />
       {iconInst && (
         <InstanceIconEditor
           inst={iconInst}
@@ -1266,6 +1308,7 @@ function InstanceAdminCard({
   acting,
   onEnter,
   onTrigger,
+  onPackage,
   onStart,
   onStop,
   onRestart,
@@ -1283,6 +1326,7 @@ function InstanceAdminCard({
   acting?: string;
   onEnter: () => void;
   onTrigger: (inst: InstanceWithStatus, kind: 'install' | 'update') => void;
+  onPackage: () => void;
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
@@ -1397,6 +1441,11 @@ function InstanceAdminCard({
                   {!offline && profile.needsInstall && (
                     <button className="btn-text" onClick={() => onTrigger(inst, installed ? 'update' : 'install')}>
                       {installed ? profile.updateLabel : '下载安装'}
+                    </button>
+                  )}
+                  {!offline && profile.packageUpload && (
+                    <button className="btn-text" onClick={onPackage} title="腾讯拒绝下载时：在电脑浏览器打开 im.qq.com/linuxqq 下载 Linux 版的 .deb，从这里传进实例安装">
+                      上传安装包
                     </button>
                   )}
                   <button className="btn-text" onClick={onUpgrade} title="拉取最新镜像并重建（保留聊天记录）">
@@ -2017,7 +2066,7 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
           <div className="muted small">Chromium 浏览器随镜像就绪，创建后直接「进入实例」即可（无需下载安装）。</div>
         )}
         {appType === 'qq' && (
-          <div className="muted small">QQ 为腾讯官方 Linux 版，创建后点「下载并安装」从腾讯官方下载（约 180MB）。腾讯只对中国大陆网络开放下载，境外网络会被拒绝。</div>
+          <div className="muted small">QQ 为腾讯官方 Linux 版，创建后在卡片「管理」里点「下载安装」，从腾讯官方 CDN 下载（约 180MB）。下载被腾讯拒绝时，可以在电脑浏览器打开 im.qq.com/linuxqq 下载 Linux 版的 .deb 安装包，再在「管理」里点「上传安装包」。</div>
         )}
         <div className="field-label">允许访问的子账号（管理员默认可访问全部）</div>
         <ChipMultiSelect

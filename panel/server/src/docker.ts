@@ -1299,7 +1299,9 @@ export async function triggerWechat(inst: Instance, cmd: 'install' | 'update'): 
     AttachStderr: false,
     User: 'abc',
   });
+  const at0 = Math.floor(Date.now() / 1000); // 先取时间再启动：脚本写的状态都不会早于它
   await exec.start({ Detach: true });
+  installTriggeredAt.set(inst.id, at0);
 }
 
 export interface WechatStatus {
@@ -1313,6 +1315,25 @@ export interface WechatStatus {
 
 const DEFAULT_STATUS: WechatStatus = { phase: 'idle', percent: 0, installed: false, version: '', message: '未安装', updatedAt: 0 };
 
+// 下载安装 / 更新的结果写进面板日志和实例日志。此前面板日志只有「触发下载安装应用」一句，失败原因只显示在卡片上，
+// 事后排查无从看起（#153）。面板触发过安装、之后读到的状态是触发以后写的「完成 / 失败」，就记一次：
+// 被拒这类失败一两秒就结束，等不到面板下一次轮询，不能靠「看到进行中再看到结束」来判断。
+export const BUSY_PHASES = new Set(['downloading', 'extracting', 'installing']);
+const installTriggeredAt = new Map<string, number>(); // 实例 id → 触发安装的时间（秒，和状态文件的 updatedAt 同一时钟）
+function noteAppStatus(inst: Instance, st: WechatStatus): void {
+  const since = installTriggeredAt.get(inst.id);
+  if (since === undefined || BUSY_PHASES.has(st.phase) || !(st.updatedAt >= since)) return;
+  installTriggeredAt.delete(inst.id);
+  if (st.phase === 'done') {
+    const v = st.version ? `（版本 ${st.version}）` : '';
+    appendPanelLog('INFO', `实例「${inst.name}」(id=${inst.id}) 应用安装完成${v}`);
+    appendInstanceLog(inst.id, `应用安装完成${v}`);
+  } else if (st.phase === 'error') {
+    appendPanelLog('WARN', `实例「${inst.name}」(id=${inst.id}) 应用安装失败：${st.message}`);
+    appendInstanceLog(inst.id, `应用安装失败：${st.message}（每一步的详情见诊断包里的 install.log）`);
+  }
+}
+
 export async function wechatStatus(inst: Instance): Promise<WechatStatus> {
   try {
     // 兼容旧容器（无 /woc/app-ctl.sh）：有则按 appType 取状态，无则回退老的 wechat-ctl.sh（旧实例皆微信）。
@@ -1322,8 +1343,9 @@ export async function wechatStatus(inst: Instance): Promise<WechatStatus> {
       '-c',
       `if [ -x /woc/app-ctl.sh ]; then /woc/app-ctl.sh ${at} status; else /woc/wechat-ctl.sh status; fi`,
     ]);
-    const json = JSON.parse(raw.trim());
-    return { ...DEFAULT_STATUS, ...json };
+    const st: WechatStatus = { ...DEFAULT_STATUS, ...JSON.parse(raw.trim()) };
+    noteAppStatus(inst, st);
+    return st;
   } catch {
     return DEFAULT_STATUS;
   }
@@ -1599,6 +1621,11 @@ async function putFileStream(inst: Instance, dir: string, name: string, size: nu
 
 export async function uploadToInstance(inst: Instance, name: string, size: number, body: AsyncIterable<Buffer>): Promise<void> {
   await putFileStream(inst, TRANSFER_DIR, name, size, body);
+}
+
+// QQ 手动上传的安装包（#153）：写到 app-ctl.sh 约定的位置，随后触发安装时它先装这个包（核对包名和架构，装完删掉）
+export async function uploadAppPackage(inst: Instance, size: number, body: AsyncIterable<Buffer>): Promise<void> {
+  await putFileStream(inst, '/config/.woc-dl', 'qq-upload.deb', size, body);
 }
 
 export interface TransferFile {
