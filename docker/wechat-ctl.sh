@@ -61,9 +61,14 @@ print_status() {
     # 进行中却没有任何安装进程 = 残留状态，纠正为 error 放开「重试」。
     # 只改输出、不回写文件：避免与刚启动的新安装抢写 status.json。
     if printf '%s' "$s" | grep -Eq '"phase":"(downloading|extracting|installing)"' && ! installer_running; then
-      local inst=false; is_installed && inst=true
-      echo "{\"phase\":\"error\",\"percent\":0,\"installed\":$inst,\"version\":\"$(cur_version)\",\"message\":\"上次安装被中断（容器重启或升级），请重新点击安装\",\"updatedAt\":$(date +%s)}"
-      return
+      # 读状态和查进程不在同一刻：安装恰好在这两步之间结束（先写完 done / error 才退出），会被误判成中断。
+      # 查不到进程时再读一次：真被打断的停在进行中，正常结束的已经是终态
+      s="$(cat "$STATUS_FILE")"
+      if printf '%s' "$s" | grep -Eq '"phase":"(downloading|extracting|installing)"'; then
+        local inst=false; is_installed && inst=true
+        echo "{\"phase\":\"error\",\"percent\":0,\"installed\":$inst,\"version\":\"$(cur_version)\",\"message\":\"上次安装被中断（容器重启或升级），请重新点击安装\",\"updatedAt\":$(date +%s)}"
+        return
+      fi
     fi
     printf '%s\n' "$s"
   elif is_installed; then
