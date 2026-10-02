@@ -89,9 +89,27 @@ install_telegram() {
 # 安装包地址取自腾讯官网 Linux QQ 页面自己用的配置（linuxConfig.js，随新版本更新），按架构选 deb，
 # 解压到数据卷 /config/qq（升级镜像不丢；更新 = 重新下载覆盖）。下载流程同 wechat-ctl.sh：断点续传、
 # 60 秒没速度即中断重试、连不上快速失败、解压前校验包完整。
-# 注意：腾讯的 QQ 下载服务器（qqdl.gtimg.cn）只对中国大陆网络开放，境外地址一律 403。
+# 注意：linuxConfig.js 里给的是【裸链】，腾讯已对它加了实时签名校验——不带签名一律 403，且与出口地区
+# 无关（大陆网络同样 403，issue #153）。官网 Linux 页面自己也是先调签名接口换成带 sign & t 的临时链再
+# 下载，这里复刻同一行为。签名的 t 有时效，故每次下载（含每次重试）都现签，不复用、不落盘。
 QQ_CONFIG_URL="${QQ_CONFIG_URL:-https://cdn-go.cn/qq-web/im.qq.com_new/latest/rainbow/linuxConfig.js}"
+QQ_SIGN_URL="${QQ_SIGN_URL:-https://im.qq.com/http2rpc/gotrpc/noauth/trpc.qqntv2.urlsign.UrlSign/GetSign}"
 QQ_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+
+# 原始 deb 地址 → 带签名的可用地址；接口变更 / 网络不通时输出空串（调用方据此报错，不静默降级成裸链）。
+# x-oidb 是服务路由标识，Origin / Referer 是来源校验，三者缺一不可。
+qq_sign_url() {
+  local resp
+  resp="$(curl -fsS --connect-timeout 20 --max-time 40 -X POST "$QQ_SIGN_URL" \
+    -H 'Content-Type: application/json' \
+    -H 'x-oidb: {"uint32_command":"0x9b8e","uint32_service_type":1}' \
+    -H 'Origin: https://im.qq.com' -H 'Referer: https://im.qq.com/new/' \
+    -A "$QQ_UA" -d "{\"url\":\"$1\"}" 2>/dev/null)" || return 0
+  printf '%s' "$resp" | grep -q '"retcode":0' || return 0
+  # 注意：接口返回的 JSON 把 / 转义成 \/（"url":"https:\/\/qqdl..."），提取后必须还原，
+  # 否则 curl 报 (3) URL using bad/illegal format——踩过。
+  printf '%s' "$resp" | grep -o '"url":"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's|\\/|/|g'
+}
 
 install_qq() {
   local key arch
@@ -112,7 +130,7 @@ install_qq() {
   echo "$$" > "$lock/pid"
   trap 'rm -rf "'"$lock"'" 2>/dev/null' EXIT
 
-  local work=/config/.woc-dl cfg url ver tmp total cur pct pid rc=1 attempt=0
+  local work=/config/.woc-dl cfg url dl ver tmp total cur pct pid rc=1 attempt=0
   mkdir -p "$work"; tmp="$work/qq.deb"
   write_status downloading -1 "正在获取 QQ 最新版本信息"
   cfg="$(curl -fsSL --connect-timeout 20 --max-time 60 -A "$QQ_UA" "$QQ_CONFIG_URL" 2>/dev/null | tr -d '\r\n')"
@@ -122,10 +140,15 @@ install_qq() {
     http://*.deb | https://*.deb) ;;
     *) write_status error 0 "获取 QQ 下载地址失败（连不上腾讯官网或页面改版），请检查网络后重试"; return ;;
   esac
-  # 上次没下完的是同一个安装包才续传，版本变了就重下
+  # 上次没下完的是同一个安装包才续传，版本变了就重下（比较裸链；签名链每次都不一样，不能拿来比）
   [ "$(cat "$work/qq.url" 2>/dev/null)" = "$url" ] || rm -f "$tmp"
   echo "$url" > "$work/qq.url"
-  total="$(curl -fsSLI --connect-timeout 10 --max-time 20 -A "$QQ_UA" "$url" 2>/dev/null | tr -d '\r' \
+  dl="$(qq_sign_url "$url")"
+  if [ -z "$dl" ]; then
+    write_status error 0 "获取 QQ 下载授权失败（腾讯签名接口无响应或已变更），请稍后重试；持续失败请把面板日志发给我们"
+    return
+  fi
+  total="$(curl -fsSLI --connect-timeout 10 --max-time 20 -A "$QQ_UA" "$dl" 2>/dev/null | tr -d '\r' \
           | awk 'tolower($1)=="content-length:"{v=$2} END{print v}')"
   : "${total:=0}"
   # 磁盘预检：deb 约 180MB，解压后约 600MB，更新时新旧并存 → 按 deb 的 4 倍、不低于 900MB
@@ -139,8 +162,16 @@ install_qq() {
 
   while [ "$attempt" -lt 6 ]; do
     attempt=$((attempt+1))
+    # 每次重试都重签：签名带时效，续传时换了 query 不影响（同一个文件，仍按字节偏移取）
+    if [ "$attempt" -gt 1 ]; then
+      dl="$(qq_sign_url "$url")"
+      if [ -z "$dl" ]; then
+        write_status error 0 "获取 QQ 下载授权失败（腾讯签名接口无响应或已变更），请稍后重试"
+        return
+      fi
+    fi
     curl -fSL -C - --connect-timeout 20 --speed-limit 1024 --speed-time 60 \
-         -A "$QQ_UA" -o "$tmp" "$url" 2>"$work/qq-curl.err" & pid=$!
+         -A "$QQ_UA" -o "$tmp" "$dl" 2>"$work/qq-curl.err" & pid=$!
     while kill -0 "$pid" 2>/dev/null; do
       if [ "$total" -gt 0 ] 2>/dev/null; then
         cur="$(stat -c%s "$tmp" 2>/dev/null || echo 0)"
@@ -156,7 +187,7 @@ install_qq() {
     cur="$(stat -c%s "$tmp" 2>/dev/null || echo 0)"
     if [ "$total" -gt 0 ] && [ "$cur" -ge "$total" ]; then rc=0; break; fi
     if grep -q "error: 403" "$work/qq-curl.err" 2>/dev/null; then
-      write_status error 0 "腾讯 QQ 下载服务器拒绝了请求（HTTP 403）。QQ 安装包只对中国大陆网络开放，境外网络或走境外出口的代理无法下载"
+      write_status error 0 "腾讯 QQ 下载服务器拒绝了请求（HTTP 403）：签名已失效或腾讯又改了下载校验，请再次点击安装（会重新签名）；持续失败请把面板日志发给我们"
       return
     fi
     # 连不上（DNS / 拒绝 / 超时 / TLS）且一个字节没拿到：再试也没用，两轮后直接说清楚
