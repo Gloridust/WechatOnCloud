@@ -1,8 +1,8 @@
-# 云微 (woc) — fnOS 应用包
+# 云微 (wechat-on-cloud) — fnOS 应用包
 
 将 [WechatOnCloud](https://github.com/Gloridust/WechatOnCloud) 面板打包为飞牛 fnOS `.fpk`。
 
-桌面入口使用 `type: url` + 安装端口，在**系统浏览器**打开；FN Connect 下访问域名为 `woc-main.[fnid].fnos.net`（由 `appname=woc` + 桌面入口 `woc.main` 拼成；不走统一网关子路径 `/app/woc`，以避免上游面板绝对路径与无 basename 的 SPA 在子路径下空白页）。
+桌面入口使用 `type: url` + 安装端口，在**系统浏览器**打开；FN Connect 下访问域名为 `wechat-on-cloud-main.[fnid].fnos.net`（由 `appname=wechat-on-cloud` + 桌面入口 `wechat-on-cloud.main` 拼成；不走统一网关子路径 `/app/wechat-on-cloud`，以避免上游面板绝对路径与无 basename 的 SPA 在子路径下空白页）。
 
 ## 目录结构
 
@@ -29,20 +29,20 @@ cd fnos/woc
 fnpack build
 ```
 
-在飞牛「应用中心 → 手动安装」上传产出的 `.fpk`。建议 fnOS ≥ 1.2.0401。
+在飞牛「应用中心 → 手动安装」上传产出的 `.fpk`。`os_min_version` 与上游一致为 `0.9.0`。
 
 ## 访问方式
 
 | 方式 | 地址 | 说明 |
 |------|------|------|
-| FN Connect（推荐） | `https://woc-main.[fnid].fnos.net/` | 桌面图标在系统浏览器打开 |
+| FN Connect（推荐） | `https://wechat-on-cloud-main.[fnid].fnos.net/` | 桌面图标在系统浏览器打开 |
 | LAN 端口 | `http://<NAS_IP>:<wizard_port>/` | 默认端口 `36080` |
 
 ## 架构要点（1.0.1）
 
 - **panel**：默认镜像 `docker.io/gloridust/woc-panel`，挂载 `docker.sock`；端口 `${wizard_port:-36080}:8080`；`PANEL_ALLOWED_HOSTS` 默认 `*.fnos.net,*.5ddd.com`。
 - **桌面**：`micro_app=true`，`type=url`，`port=${wizard_port}`，`url=/`。
-- **appname**：`woc`（缩短 FN Connect 三级域名；从旧包 `wechat-on-cloud` 升级需先卸载再装）。
+- **appname**：保持 `wechat-on-cloud`（与上游 1.0.0 一致，保证应用中心升级与 `./data-panel` 数据目录连续）；系统浏览器入口不依赖短 appname。
 
 ## 已知限制
 

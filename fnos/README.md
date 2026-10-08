@@ -4,7 +4,7 @@
 
 > 飞牛开发文档：<https://developer.fnnas.com/docs/guide/>
 
-当前包设计：桌面入口 `type: url`，FN Connect 域名为 `woc-main.[fnid].fnos.net`（系统浏览器打开）。详见 [`woc/README.md`](./woc/README.md)。
+当前包设计：桌面入口 `type: url`，FN Connect 域名为 `wechat-on-cloud-main.[fnid].fnos.net`（系统浏览器打开）。`appname` 保持 `wechat-on-cloud` 以兼容从 1.0.0 升级。详见 [`woc/README.md`](./woc/README.md)。
 
 ## 构建
 
