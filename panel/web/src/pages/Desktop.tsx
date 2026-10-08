@@ -79,7 +79,7 @@ function installSeamlessIme(
   };
 
   // 捕获阶段（iframe window 最外层）抢先拦截，赶在 noVNC 之前 → stopImmediatePropagation 阻止它发 keysym。
-  // 关键：队列活跃（有中文正在转发）时，只接管【数字】和回车/退格——它们不参与拼音合成、且是原"混数字丢字"的祸首；
+  // 关键：队列活跃（有中文正在转发）时，只接管【数字】、空格和回车/退格——它们不参与拼音合成、且是原"混数字丢字"的祸首；
   // 字母绝不接管，否则会把下一个词的拼音首字母（如"呀"的 y）当成字面字符抢走，造成"你好y呀"。字母交给输入法合成。
   const onKeyDownCapture = (ev: Event) => {
     const e = ev as KeyboardEvent;
@@ -90,6 +90,14 @@ function installSeamlessIme(
       e.preventDefault();
       e.stopImmediatePropagation();
       queue.push({ kind: 'text', data: e.key });
+      drain();
+    } else if (e.key === ' ' && e.keyCode !== 229 && !e.shiftKey) {
+      // 拼音上屏后紧接着按空格（issue #155「连点空格，空格出现在文字之前」）：上屏那一下空格在合成中、已放行，
+      // 下一下不在合成中，KasmVNC 只把 keyCode 229 和数字键当输入法交互，空格会立刻按 keysym 直发、抢在还在走
+      // HTTP 转发的中文前面。229 = 输入法自己处理了这个键（如全角空格），成品走 beforeinput，那边会按序接管。
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      queue.push({ kind: 'text', data: ' ' });
       drain();
     } else if (e.key === 'Enter') {
       e.preventDefault();
