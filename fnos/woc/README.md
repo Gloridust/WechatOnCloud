@@ -40,7 +40,7 @@ fnpack build
 
 ## 架构要点（1.0.1）
 
-- **panel**：默认镜像 `docker.io/gloridust/woc-panel`，挂载 `docker.sock`；端口 `${wizard_port:-36080}:8080`；`PANEL_ALLOWED_HOSTS` 默认 `*.fnos.net,*.5ddd.com`。
+- **panel**：默认镜像 `docker.io/gloridust/woc-panel`，挂载 `docker.sock`；端口 `${wizard_port:-36080}:8080`；`PANEL_ALLOWED_HOSTS` 默认 `*.fnos.net`。
 - **桌面**：`micro_app=true`，`type=url`，`port=${wizard_port}`，`url=/`。
 - **appname**：保持 `wechat-on-cloud`（与上游 1.0.0 一致，保证应用中心升级与 `./data-panel` 数据目录连续）；系统浏览器入口不依赖短 appname。
 

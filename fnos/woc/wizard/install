@@ -37,7 +37,7 @@
         "type": "text",
         "field": "WOC_ALLOWED_HOSTS",
         "label": "面板域名白名单（逗号分隔，FN Connect 建议保留默认）",
-        "initValue": "*.fnos.net,*.5ddd.com"
+        "initValue": "*.fnos.net"
       }
     ]
   }

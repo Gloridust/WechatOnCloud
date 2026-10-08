@@ -12,7 +12,7 @@ services:
       - PANEL_ADMIN_USER=${WOC_USER:-admin}
       - PANEL_ADMIN_PASSWORD=${WOC_PASSWORD:-wechat}
       - PANEL_DATA=/data/accounts.json
-      - PANEL_ALLOWED_HOSTS=${WOC_ALLOWED_HOSTS:-*.fnos.net,*.5ddd.com}
+      - PANEL_ALLOWED_HOSTS=${WOC_ALLOWED_HOSTS:-*.fnos.net}
     volumes:
       - ./data-panel:/data
       - /var/run/docker.sock:/var/run/docker.sock
