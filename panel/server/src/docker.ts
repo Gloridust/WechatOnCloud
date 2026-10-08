@@ -1410,7 +1410,7 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
       '  system.txt        系统/Docker/镜像信息',
       '  panel.log         面板全局运维日志（创建/删除/升级/启停/镜像拉取/错误）',
       '  containers.txt    所有 woc-* 容器清单（含残留/未登记）',
-      '  instances/<id>.log 每个实例：容器状态 + 持久日志 + 应用安装状态/日志 + 实时容器日志',
+      '  instances/<id>.log 每个实例：容器状态 + 持久日志 + 应用安装状态/日志 + 桌面服务（nginx/KasmVNC）+ 实时容器日志',
       '',
       '把本压缩包发给维护者即可协助排查（不含密码/密钥等敏感信息）。',
     ].join('\n'),
@@ -1448,7 +1448,9 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
   // 在小内存 Ubuntu server 上尤其常见，表现为黑屏/502/反复重启）。
   sys += `\n面板实例配置: SHM=${(SHM_SIZE / 1073741824).toFixed(0)}GiB`;
   sys += ` · docker硬内存上限=${INSTANCE_MEM > 0 ? (INSTANCE_MEM / 1073741824).toFixed(1) + 'GiB' : '未设(不限，靠宿主 OOM 兜底)'}`;
-  sys += ` · GPU=${ENABLE_GPU ? '开' : '关(软件渲染)'}\n`;
+  sys += ` · GPU=${ENABLE_GPU ? '开' : '关(软件渲染)'}`;
+  // 宿主禁用 IPv6 而没去掉实例 nginx 的 `listen [::]` 时，nginx 起不来、桌面永远「未就绪」（#134）
+  sys += ` · 实例 nginx 仅 IPv4=${NO_IPV6 ? '是' : '否'}${process.env.WOC_DISABLE_IPV6 ? '（WOC_DISABLE_IPV6 强制）' : ''}\n`;
   sys += `内存自愈阈值(MiB): soft=${process.env.WOC_INSTANCE_MEM_SOFT_MB || '1500'} · hard=${process.env.WOC_INSTANCE_MEM_HARD_MB || '2500'}\n`;
   sys += `\n实例数: ${instances.length}\n`;
   entries.push({ name: 'system.txt', content: sys });
@@ -1490,6 +1492,21 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
       c += `===== 安装日志（install.log 尾 50 行） =====\n${il || '（无 / 旧镜像未记录）'}\n\n`;
     } catch (e: any) {
       c += `===== 应用安装状态 / 安装日志 =====\n获取失败（容器可能未运行）：${e?.message || e}\n\n`;
+    }
+    // 桌面服务：「正在连接桌面」/「桌面长时间未就绪」时，先看实例里 nginx（3000，面板反代的入口）和 KasmVNC（6901）
+    // 有没有在监听，再看 nginx 的错误日志（写在容器内 /var/log/nginx，不进容器日志，此前诊断包里看不到）。
+    try {
+      const desk = (
+        await execCapture(inst, [
+          'sh',
+          '-c',
+          "echo '[监听端口]'; ss -ltn 2>/dev/null | grep -E ':(3000|6901) ' || echo '（3000/6901 均未监听）';" +
+            " echo; echo '[nginx error.log 尾 30 行]'; tail -n 30 /var/log/nginx/error.log 2>/dev/null || true",
+        ], 'root') // error.log 是 www-data:adm 0640，abc 读不了；这里只读不写
+      ).trimEnd();
+      c += `===== 桌面服务（nginx / KasmVNC） =====\n${desk}\n\n`;
+    } catch (e: any) {
+      c += `===== 桌面服务（nginx / KasmVNC） =====\n获取失败（容器可能未运行）：${e?.message || e}\n\n`;
     }
     try {
       c += `===== 本次容器日志（实时 tail 300） =====\n${(await instanceLogs(inst, 300)).trimEnd() || '（无）'}\n`;
