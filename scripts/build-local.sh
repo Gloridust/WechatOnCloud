@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 本地构建面板镜像 + 微信实例镜像，打成与 docker-compose.yml 一致的 GHCR 标签。
+# 本地构建面板镜像 + 微信实例镜像，打成与 docker-compose.yml 一致的标签（同一个 WOC_IMAGE_PREFIX）。
 # 用途：GHCR 尚未发布（没打 tag）时自测，或自托管者想自己构建而非拉取官方镜像。
 # 构建完成后直接 `docker compose up -d` 即可（compose 默认 pull_policy=missing，会优先用本地镜像）。
 #
@@ -8,15 +8,20 @@
 #   WOC_VERSION=v1.0.0 ./scripts/build-local.sh   # 指定标签（需与 .env 的 WOC_VERSION 一致）
 set -euo pipefail
 
-OWNER="${WOC_IMAGE_OWNER:-gloridust}"
 TAG="${WOC_VERSION:-latest}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# 镜像前缀与 compose 取同一个 WOC_IMAGE_PREFIX：环境变量 > 仓库根 .env > 默认 docker.io/gloridust。
+# 前缀对不上时 compose 找不到本地镜像，会去镜像源拉官方版，等于白构建。
+if [ -z "${WOC_IMAGE_PREFIX:-}" ] && [ -f "$ROOT/.env" ]; then
+  WOC_IMAGE_PREFIX="$(sed -n 's/^WOC_IMAGE_PREFIX=//p' "$ROOT/.env" | tail -n 1 | tr -d '"'"'"'\r')"
+fi
+PREFIX="${WOC_IMAGE_PREFIX:-docker.io/${WOC_IMAGE_OWNER:-gloridust}}"
 # 烤进面板镜像的版本号：设了 WOC_VERSION 就用它（如 v1.2.0），否则用 dev-<短SHA>（本地构建标识）。
 # 开发版不是正式发布版，面板「关于」会标「开发版」、不会触发「有新版」红点。
 VER="${WOC_VERSION:-dev-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo local)}"
 
-PANEL_IMAGE="ghcr.io/${OWNER}/woc-panel:${TAG}"
-WECHAT_IMAGE="ghcr.io/${OWNER}/wechat-on-cloud:${TAG}"
+PANEL_IMAGE="${PREFIX}/woc-panel:${TAG}"
+WECHAT_IMAGE="${PREFIX}/wechat-on-cloud:${TAG}"
 
 # --provenance=false --sbom=false：本地构建出「单一镜像」而非带 attestation 的 manifest list。
 # 否则在 Docker 29 + containerd 镜像存储下，经典 API（docker image inspect / docker run / 面板用的
