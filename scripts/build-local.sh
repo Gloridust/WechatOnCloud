@@ -35,8 +35,8 @@ docker build --provenance=false --sbom=false -t "${WECHAT_IMAGE}" "${ROOT}/docke
 
 echo
 echo "完成。本地镜像："
-# 注意：docker images 只接受一个仓库参数，故用 --filter 各列一次
-docker images --filter "reference=${PANEL_IMAGE}" --format '  {{.Repository}}:{{.Tag}}  {{.Size}}'
-docker images --filter "reference=${WECHAT_IMAGE}" --format '  {{.Repository}}:{{.Tag}}  {{.Size}}'
+# 注意：docker images 只接受一个仓库参数，故用 --filter 各列一次；Docker Hub 镜像在本地记作省略 docker.io/ 的名字，过滤时要去掉
+docker images --filter "reference=${PANEL_IMAGE#docker.io/}" --format '  {{.Repository}}:{{.Tag}}  {{.Size}}'
+docker images --filter "reference=${WECHAT_IMAGE#docker.io/}" --format '  {{.Repository}}:{{.Tag}}  {{.Size}}'
 echo
 echo "下一步：docker compose up -d   （记得先把 .env 里 WOC_VERSION 设为 ${TAG}）"
