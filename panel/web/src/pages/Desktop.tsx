@@ -5,6 +5,7 @@ import { useUI } from '../ui';
 import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
 import { VncAudio } from '../vncAudio';
+import { markClipInjected } from '../clipboardInject';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
 function desktopUrl(id: string) {
@@ -201,6 +202,7 @@ function installPasteBridge(
     onPlainPaste: () => void;
     onLocalText: (text: string, localIsFresh: boolean) => boolean;
   },
+  opts?: { onContainerCopyGesture?: () => void },
 ): () => void {
   type Pending = { handled: boolean; text: string };
   let pending: Pending | null = null;
@@ -213,6 +215,7 @@ function installPasteBridge(
     if (!e.isTrusted || e.isComposing) return;
     if (isKey(e, 'KeyC', 'c') || isKey(e, 'KeyX', 'x')) {
       localIsFresh = false; // 在应用里复制/剪切 → 容器剪贴板更新（按键照常交给 noVNC）
+      opts?.onContainerCopyGesture?.(); // 容器侧复制手势（写回桥据此认领，#139 多端）
       return;
     }
     if (e.repeat || !isKey(e, 'KeyV', 'v')) return;
@@ -252,18 +255,25 @@ function installPasteBridge(
     localIsFresh = true;
   };
   const onMouseDown = (e: MouseEvent) => {
-    if (e.button === 2) localIsFresh = false; // 右键菜单多半是在应用里「复制」
+    if (e.button === 2) {
+      localIsFresh = false; // 右键菜单多半是在应用里「复制」
+      opts?.onContainerCopyGesture?.();
+    }
   };
+  // 长按呼出菜单（触屏）：mousedown 不带 button=2，靠 contextmenu 兜住「即将复制」信号
+  const onContextMenu = () => opts?.onContainerCopyGesture?.();
 
   win.addEventListener('keydown', onKeyDown, true);
   doc.addEventListener('paste', onPaste, true);
   win.addEventListener('mousedown', onMouseDown, true);
+  win.addEventListener('contextmenu', onContextMenu, true);
   topWin.addEventListener('focus', onFocus);
   win.addEventListener('focus', onFocus);
   return () => {
     win.removeEventListener('keydown', onKeyDown, true);
     doc.removeEventListener('paste', onPaste, true);
     win.removeEventListener('mousedown', onMouseDown, true);
+    win.removeEventListener('contextmenu', onContextMenu, true);
     topWin.removeEventListener('focus', onFocus);
     win.removeEventListener('focus', onFocus);
   };
@@ -365,6 +375,122 @@ function shouldPasteLocal(st: ClipState, text: string, localIsFresh: boolean, do
     st.remoteNewer = false;
   }
   return local;
+}
+
+// 容器 → 本机 剪贴板写回（#139 双向的另一半）：在微信里复制一条消息，本机其他应用里直接 Ctrl+V 就能粘出。
+// 链路：kasmweb 收到 ServerCutText 后会【程序化】更新剪贴板面板的 textarea（UI.clipboardReceive，
+// clipboard_down=true 时面板隐藏也写）——钩住 iframe 原型上的 value setter 即可事件级感知，零轮询、
+// 零 bundle 补丁。然后在本 iframe 文档里用 execCommand('copy') 把文字写进本机 OS 剪贴板。
+// 为什么用 execCommand：http 下 navigator.clipboard 不存在（secure context only），而它是遗留同步
+// API、http 可用；代价是需要瞬时 user activation——而这恰好是天然门禁：容器侧复制（Ctrl/Cmd+C、X
+// 的 keydown 或右键的 mousedown）刚刚就发生在本 iframe 里，ServerCutText 紧随其后到达，必落在激活
+// 窗口内；反之（如另一台设备复制）本页无激活，execCommand 返回 false，静默跳过——本机剪贴板不会
+// 被别的设备覆盖。https 下 kasmweb 的 clipboard_seamless 自己走 navigator.clipboard（还支持图片等
+// 二进制格式），本桥自动让位。
+// 写入用经典「复制按钮」三步：隐藏 textarea → focus()+select() → execCommand('copy')。必须走控件
+// 内部选区（value 不在 DOM 文本节点里，Range.selectNodeContents 选不到它，实测会「成功」但写入空
+// 内容）；焦点在同步复制后立即还给原元素，不影响无感输入续打。execCommand 失败则回滚已同步标记，
+// 同一内容下次落在激活窗口内还能补写（例：先被另一台设备复制过一次、随后本机用户又复制了同一段
+// 文字）。成功时回调 onSynced（提示用）；skip 用于跳过自己注入的回显（OS 剪贴板本就有那段文字）。
+function installClipboardBacksync(
+  win: Window,
+  doc: Document,
+  opts: {
+    skip?: (text: string) => boolean;
+    enabled?: () => boolean;
+    onSynced?: (text: string) => void;
+    isLocalCopy?: () => boolean;
+    onForeignArrival?: () => void;
+  },
+): { dispose: () => void; pull: () => void } {
+  const noop = { dispose: () => {}, pull: () => {} };
+  if (win.isSecureContext && 'clipboard' in win.navigator) return noop;
+  const proto = (win as any).HTMLTextAreaElement.prototype as HTMLTextAreaElement;
+  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+  if (!desc || !desc.get || !desc.set) return noop;
+  let lastSynced = ''; // 已见内容（含外来/回显/禁用期的「只标记不写入」）
+  let lastWritten = ''; // 已实际写进本机 OS 剪贴板的内容（pull 据此判重）
+  const onServerText = (text: string, force = false) => {
+    if (!text) return;
+    if (opts.enabled && !opts.enabled()) {
+      lastSynced = text; // 开关关：一律不写不提示，但记下已见，避免重新打开后补写旧内容
+      return;
+    }
+    if (!force && text === lastSynced) return; // force（pull，用户显式动作）：跳过已见检查
+    if (opts.skip && opts.skip(text)) {
+      lastSynced = text; // 自己注入的回显：OS 剪贴板本就有这段文字，无需重写也不提示
+      return;
+    }
+    // 只同步给「复制发生时正在容器上操作的人」：本页 iframe 刚见过复制手势（Ctrl/Cmd+C、X、
+    // 右键、长按菜单）才认领这次容器剪贴板更新；其余（多为别台电脑在容器里复制）只更新页内
+    // 状态、不写本机 OS 剪贴板，并通知粘贴桥——本机随后的粘贴仍以本机剪贴板为准。
+    if (!force && opts.isLocalCopy && !opts.isLocalCopy()) {
+      lastSynced = text;
+      opts.onForeignArrival?.();
+      return;
+    }
+    lastSynced = text;
+    const body = doc.body || doc.documentElement;
+    if (!body) return;
+    const sel = win.getSelection();
+    const prevFocus = doc.activeElement as HTMLElement | null;
+    const prev = sel && sel.rangeCount > 0 ? Array.from({ length: sel.rangeCount }, (_, i) => sel.getRangeAt(i).cloneRange()) : null;
+    const ta = doc.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none';
+    body.appendChild(ta);
+    let ok = false;
+    try {
+      ta.focus();
+      ta.select(); // 控件内部全选：value 不在 DOM 文本节点里，只能这样选
+      ok = doc.execCommand('copy');
+    } catch {
+      ok = false;
+    } finally {
+      ta.remove();
+      try {
+        if (prevFocus && prevFocus !== ta && typeof prevFocus.focus === 'function') prevFocus.focus();
+      } catch {
+        /* 焦点恢复尽力而为 */
+      }
+      try {
+        sel?.removeAllRanges();
+        if (prev) for (const r of prev) sel?.addRange(r);
+      } catch {
+        /* 选区恢复尽力而为 */
+      }
+    }
+    if (!ok) {
+      lastSynced = ''; // 无激活（多半不是本机用户在复制）：回滚，待下次向激活窗口内重试
+    } else {
+      lastWritten = text;
+      opts.onSynced?.(text);
+    }
+  };
+  Object.defineProperty(proto, 'value', {
+    get: desc.get,
+    set: function (this: HTMLTextAreaElement, v: string) {
+      desc.set!.call(this, v);
+      if (this.id === 'noVNC_clipboard_text') onServerText(String(v));
+    },
+    configurable: true,
+    enumerable: desc.enumerable,
+  });
+  const dispose = () => {
+    try {
+      Object.defineProperty(proto, 'value', desc);
+    } catch {
+      /* 恢复尽力而为 */
+    }
+  };
+  // 把容器剪贴板的【当前值】立即同步到本机（开关打开瞬间用；点击手势即 user activation）
+  // 把容器剪贴板的【当前值】立即同步到本机（开关打开瞬间用；点击手势即 user activation）。
+  // 用 lastWritten 判重：禁用期/外来只标记过 lastSynced 的内容 pull 仍会写入，刚写过的则跳过。
+  const pull = () => {
+    const ta = doc.getElementById('noVNC_clipboard_text') as HTMLTextAreaElement | null;
+    if (ta && ta.value && ta.value !== lastWritten) onServerText(ta.value, true);
+  };
+  return { dispose, pull };
 }
 
 interface TFile {
@@ -572,6 +698,35 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     } catch {
       /* ignore */
     }
+  };
+  // 剪贴板双向互通开关（#139，默认关）：开启 = 补上 http 下缺失的「容器→本机」写回 + 多端语义
+  // （正向「本机→容器」直粘 v1.5.1 已内置、常开，与本开关无关）。默认关是保守选择：显式 opt-in。
+  // 用 ref 让钩子闭包读到实时值，开关切换不需要重装钩子。
+  const [clipSync, setClipSync] = useState(() => {
+    try {
+      return window.localStorage.getItem('woc_clip_sync') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const clipSyncRef = useRef(clipSync);
+  const backsyncRef = useRef<{ pull: () => void } | null>(null);
+  // 「外来容器更新」标记：别台电脑在容器里复制、经 ServerCutText 在本页失焦期间到达（#139 多端）
+  const foreignRef = useRef(false);
+  // 本页 iframe 里最近一次容器侧复制手势的时间（写回桥据此认领）
+  const copyGestureAt = useRef(0);
+  const lastInjectedText = useRef(''); // 最近注入容器的文字（写回桥据此跳过自己的回显）
+  const toggleClipSync = () => {
+    const v = !clipSync;
+    clipSyncRef.current = v;
+    setClipSync(v);
+    try {
+      window.localStorage.setItem('woc_clip_sync', v ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+    // 打开的瞬间把容器当前剪贴板带过来（点开关本身就是 user activation，写回合法）
+    if (v) backsyncRef.current?.pull();
   };
   // 麦克风开关（默认关）：仅在「声音」开启时有意义；默认不抢占麦克风，避免把 AirPods 切到低质通话模式。
   const [micOn, setMicOn] = useState(() => {
@@ -824,28 +979,67 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     const win = frameRef.current?.contentWindow;
     const doc = frameRef.current?.contentDocument;
     if (!win || !doc) return;
-    return installPasteBridge(win, doc, window, {
-      onImage: async (file) => {
-        if (pastingImage.current) return;
-        pastingImage.current = true;
-        toast('正在粘贴本机图片…', 'ok');
-        try {
-          await api.pasteImage(id, file);
-        } catch (e: any) {
-          toast(e?.message || '粘贴图片失败：请确认实例已「升级实例」', 'error');
-        } finally {
-          pastingImage.current = false;
-        }
-      },
-      // 粘贴容器剪贴板：失败时静默（与以前按键直通 noVNC 一样，不额外打扰）
-      onPlainPaste: () => void api.keyInInstance(id, 'ctrl+v').catch(() => {}),
-      // 本机剪贴板的文字比容器的新：直接贴本机的
+    const unPaste = installPasteBridge(
+      win,
+      doc,
+      window,
+      {
+        onImage: async (file) => {
+          if (pastingImage.current) return;
+          pastingImage.current = true;
+          toast('正在粘贴本机图片…', 'ok');
+          try {
+            await api.pasteImage(id, file);
+          } catch (e: any) {
+            toast(e?.message || '粘贴图片失败：请确认实例已「升级实例」', 'error');
+          } finally {
+            pastingImage.current = false;
+          }
+        },
+        // 粘贴容器剪贴板：失败时静默（与以前按键直通 noVNC 一样，不额外打扰）
+        onPlainPaste: () => void api.keyInInstance(id, 'ctrl+v').catch(() => {}),
+        // 本机剪贴板的文字比容器的新：直接贴本机的
       onLocalText: (text, localIsFresh) => {
+        // 多端共享（#139）：别台电脑在容器里复制时（本页失焦期间经 ServerCutText 到达、本页没见过
+        // 手势、本机剪贴板也没被镜像），不能让它夺走本机的粘贴——清掉上次粘贴记录，让本机内容成为
+        // 新证据。要容器里的内容走「剪贴板」面板中转。
+        if (clipSyncRef.current && foreignRef.current) {
+          foreignRef.current = false;
+          clip.current.lastLocal = null;
+        }
         if (!shouldPasteLocal(clip.current, text, localIsFresh, frameRef.current?.contentDocument)) return false;
+        markClipInjected(text); // #138：注入的文本会经 ServerCutText 回推，剪贴板历史据此跳过入册
+        lastInjectedText.current = text; // 写回桥据此跳过自己的回显
         void api.pasteText(id, text).catch((e: any) => toast(e?.message || '粘贴失败', 'error'));
         return true;
       },
+      },
+      {
+        onContainerCopyGesture: () => {
+          copyGestureAt.current = Date.now(); // 写回认领时间戳
+          foreignRef.current = false; // 本页亲见的容器复制是权威，外来标记作废
+        },
+      },
+    );
+    // 容器 → 本机 剪贴板写回（#139 双向的另一半）：http 下接管，https 下 kasmweb 自带（自动让位）。
+    // 回显跳过：自己刚注入的文字会经容器剪贴板弹回，OS 剪贴板本就有它，不重写也不提示。
+    // 认领制：只有本页 8s 内见过复制手势（C/X/右键/长按）才写回本机 OS 剪贴板；别机的复制只更新
+    // 页内状态并打外来标记（onLocalText 据此保住本机粘贴）。成功 toast；开关关闭时静默。
+    const backsync = installClipboardBacksync(win, doc, {
+      skip: (t) => t === lastInjectedText.current,
+      enabled: () => clipSyncRef.current,
+      onSynced: () => toast('已同步到本机剪贴板', 'ok'),
+      isLocalCopy: () => Date.now() - copyGestureAt.current < 8000,
+      onForeignArrival: () => {
+        foreignRef.current = true;
+      },
     });
+    backsyncRef.current = backsync;
+    return () => {
+      unPaste();
+      backsync.dispose();
+      backsyncRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showVnc, frameLoaded, frameGen, id]);
 
@@ -1641,19 +1835,44 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   关闭
                 </button>
               </div>
-              <textarea
-                className="clip-area"
-                value={clipText}
-                onChange={(e) => setClipText(e.target.value)}
-                placeholder="在此输入或粘贴文本，点「发送到剪贴板」后到应用输入框按 Ctrl+V 粘贴"
-                rows={5}
-              />
-              <button className="btn btn-primary files-upload" onClick={sendClip}>
-                发送到剪贴板
+              <button
+                className={'clip-sync-toggle' + (clipSync ? ' on' : '')}
+                onClick={toggleClipSync}
+                aria-pressed={clipSync}
+                title={
+                  clipSync
+                    ? '双向互通：开。容器里复制自动写回本机。点击关闭'
+                    : '双向互通：关。开启后容器复制自动写回本机（多台电脑各用各的），并立即带回容器当前剪贴板。点击开启'
+                }
+              >
+                <span className="clip-sync-switch" aria-hidden="true" />
+                ⇄ 双向互通
               </button>
-              <button className="btn-text" style={{ alignSelf: 'flex-start', marginTop: 6 }} onClick={pullClipboardFromRemote}>
-                ↓ 读取容器剪贴板到此框
-              </button>
+              {!clipSync && (
+                <>
+                  <textarea
+                    className="clip-area"
+                    value={clipText}
+                    onChange={(e) => setClipText(e.target.value)}
+                    placeholder="在此输入或粘贴文本，点「发送到剪贴板」后到应用输入框按 Ctrl+V 粘贴"
+                    rows={5}
+                  />
+                  <button className="btn btn-primary files-upload" onClick={sendClip}>
+                    发送到剪贴板
+                  </button>
+                  <button className="btn-text" style={{ alignSelf: 'flex-start', marginTop: 6 }} onClick={pullClipboardFromRemote}>
+                    ↓ 读取容器剪贴板到此框
+                  </button>
+                </>
+              )}
+              {clipSync && (
+                <div className="files-hint">
+                  容器里复制自动写回本机；多台电脑共享时，复制只同步给正在操作的人、粘贴各用各的。
+                  <div style={{ color: 'var(--danger, #e5484d)', marginTop: 4 }}>
+                    http 下右键粘贴无法进行剪贴板互通，请使用 Ctrl/CMD+V 进行粘贴。
+                  </div>
+                </div>
+              )}
               <div className="files-hint">
                 局域网 http 访问时浏览器会禁用系统级剪贴板同步，故用此框中转：文本→容器剪贴板，再在应用里 Ctrl+V。
               </div>
