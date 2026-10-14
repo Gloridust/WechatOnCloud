@@ -1900,6 +1900,26 @@ export async function pasteImageInInstance(inst: Instance, mime: string, content
   });
 }
 
+// 反方向：把应用里复制的图片（容器 X 剪贴板里的 image/png）读出来，交给前端写进本机剪贴板 / 存成文件。
+// 只读、不按键。打字借用的剪贴板若还没归还，先归还再读，否则读到的是刚打的字而不是用户复制的图。
+// execCapture 按 utf8 收 stdout，二进制会被破坏，故在容器内 base64 后再传出。
+export const CLIPBOARD_IMAGE_MAX = 64 * 1024 * 1024;
+export async function readClipboardImage(inst: Instance): Promise<Buffer> {
+  return withClipLock(inst.id, async () => {
+    if (cancelClipRestore(inst.id)) await restoreClipboard(inst);
+    const cmd = [
+      ...X_PRELUDE,
+      'timeout 1 xclip -o -selection clipboard -t TARGETS 2>/dev/null | grep -qxF image/png || { echo "应用剪贴板里没有图片：请先在应用里右键图片「复制」" >&2; exit 3; }',
+      `timeout 5 xclip -o -selection clipboard -t image/png 2>/dev/null | head -c ${CLIPBOARD_IMAGE_MAX + 1} | base64 -w0`,
+    ].join('\n');
+    const content = Buffer.from((await execCapture(inst, ['bash', '-c', cmd])).trim(), 'base64');
+    if (content.length > CLIPBOARD_IMAGE_MAX) throw new Error('图片超过 64 MiB');
+    const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    if (content.length < 8 || !content.subarray(0, 8).equals(PNG_SIG)) throw new Error('读取到的剪贴板图片无效');
+    return content;
+  });
+}
+
 // 通过 xdotool 在实例容器内模拟一次按键（如 Return / BackSpace）。
 // 用于「无感输入」模式：中文经 xclip 转发期间，把被截下的回车/退格按序送出，保证顺序、避免抢跑。
 // key 为 xdotool keysym 名，可带至多 3 个修饰键前缀（如 ctrl+v、ctrl+shift+Tab）；

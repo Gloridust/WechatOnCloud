@@ -344,6 +344,13 @@ export const api = {
     if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error || '粘贴图片失败');
     return res.json();
   },
+  // 应用里复制的图片（容器剪贴板 image/png）→ 本机
+  clipboardImage: async (id: string): Promise<Blob> => {
+    const res = await apiFetch(`/api/instances/${id}/clipboard-image`, { credentials: 'same-origin', cache: 'no-store' });
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error || '读取应用剪贴板图片失败');
+    if (!res.headers.get('content-type')?.startsWith('image/png')) throw new Error('图片响应无效，请刷新页面后重试');
+    return res.blob();
+  },
   downloadFileUrl: (id: string, name: string) => `/api/instances/${id}/download?name=${encodeURIComponent(name)}`,
   deleteFile: (id: string, name: string) => req(`/api/instances/${id}/files?name=${encodeURIComponent(name)}`, { method: 'DELETE' }),
 

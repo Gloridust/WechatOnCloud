@@ -1314,6 +1314,31 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     }
   };
 
+  // 应用里复制的图片 → 本机：HTTPS 下写进本机剪贴板；局域网 http 下浏览器不给写剪贴板，改为存成图片文件。
+  // ClipboardItem 直接收 Promise，write 在点击的同一轮里发起，不会因等待网络丢掉用户手势而被拒。
+  const [copyingImage, setCopyingImage] = useState(false);
+  const copyRemoteImage = () => {
+    if (!id || copyingImage) return;
+    setCopyingImage(true);
+    const image = api.clipboardImage(id);
+    const canWrite = window.isSecureContext && !!navigator.clipboard?.write && typeof ClipboardItem !== 'undefined';
+    const done = canWrite
+      ? navigator.clipboard.write([new ClipboardItem({ 'image/png': image })]).then(() => '已复制到本机剪贴板，可直接粘贴')
+      : image.then((blob) => {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = `应用图片-${Date.now()}.png`;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+          return '当前为 http 访问，浏览器不允许写剪贴板，已存为图片文件';
+        });
+    done
+      .then((msg) => toast(msg, 'ok'))
+      // 图片读取失败时 write 也会失败，优先报读取的原因（如「剪贴板里没有图片」）
+      .catch((e: any) => image.then(() => e, (readErr) => readErr).then((err: any) => toast(err?.message || '复制图片失败', 'error')))
+      .finally(() => setCopyingImage(false));
+  };
+
   const restartInstance = async () => {
     const ok = await confirm({
       title: '重启该实例？',
@@ -1653,6 +1678,9 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               </button>
               <button className="btn-text" style={{ alignSelf: 'flex-start', marginTop: 6 }} onClick={pullClipboardFromRemote}>
                 ↓ 读取容器剪贴板到此框
+              </button>
+              <button className="btn-text" style={{ alignSelf: 'flex-start' }} disabled={copyingImage} onClick={copyRemoteImage}>
+                {copyingImage ? '正在读取图片…' : '↓ 复制应用里的图片到本机'}
               </button>
               <div className="files-hint">
                 局域网 http 访问时浏览器会禁用系统级剪贴板同步，故用此框中转：文本→容器剪贴板，再在应用里 Ctrl+V。
