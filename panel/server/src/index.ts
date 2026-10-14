@@ -74,6 +74,7 @@ import {
   typeInInstance,
   keyInInstance,
   pasteImageInInstance,
+  readClipboardImage,
   pasteTextInInstance,
   listOrphanVolumes,
   removeVolume,
@@ -1068,6 +1069,25 @@ app.post('/api/instances/:id/paste-image', async (req, reply) => {
     return { ok: true };
   } catch (e: any) {
     return sendUploadError(reply, e, '粘贴图片失败');
+  }
+});
+
+// 应用里复制的图片 → 本机（粘贴图片的反方向）：只读容器剪贴板、不往应用里送任何输入，故不占控制权，
+// 只读的一方也能把图片取走（与能看到桌面画面一致）。
+app.get('/api/instances/:id/clipboard-image', async (req, reply) => {
+  reply.header('Cache-Control', 'no-store');
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  try {
+    const png = await readClipboardImage(inst);
+    return reply.type('image/png').send(png);
+  } catch (e: any) {
+    const msg = String(e?.message || '');
+    return reply.code(/没有图片/.test(msg) ? 422 : 500).send({ error: msg || '读取应用剪贴板图片失败' });
   }
 });
 
