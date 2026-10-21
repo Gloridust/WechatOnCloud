@@ -1795,6 +1795,11 @@ if [ ! -e "$D/saved.type" ] || [ $(( $(date +%s) - $(stat -c %Y "$D/saved.type")
     if printf '%s\\n' "$tg" | grep -qxF "$t"; then ty=$t; break; fi
   done
   if [ "$ty" != none ] && ! timeout 2 xclip -o -selection clipboard -t "$ty" > "$D/saved.data" 2>/dev/null; then ty=none; fi
+  # 超过 ~1MB 的内容不保存、也就不归还（#165 #159）：归还要用 xclip 重新持有它，超过 ~1MB 时 xclip 走 INCR 分段，
+  # 而 KasmVNC 剪贴板一换主人就去取（图片按 DLP_ClipTypes，文字总会取）却从不把 INCR 收完，xclip 就此卡死，之后应用
+  # 一读剪贴板就挂住（浏览器 / QQ 无响应，要重启应用）。新实例镜像去掉了 image/png，但大段文字照样会卡，所以按大小、
+  # 不分类型。代价只是：打完字后剪贴板里是刚打的那段字，而不是用户之前复制的那个大块内容。
+  if [ "$ty" != none ] && [ "$(stat -c %s "$D/saved.data" 2>/dev/null || echo 0)" -gt 1000000 ]; then ty=none; rm -f "$D/saved.data"; fi
   echo "$ty" > "$D/saved.type"
 else
   touch "$D/saved.type"
