@@ -1387,6 +1387,12 @@ function InstanceAdminCard({
               <button className="btn btn-primary inst-act-wide" onClick={onStart}>
                 {createFailed ? '重试创建' : inst.runtime === 'missing' ? '创建并启动' : '启动实例'}
               </button>
+            ) : !installed && profile.needsInstall ? (
+              // 容器建好但应用还没装：主按钮直接是「下载安装」。此前是一个灰掉的「进入实例」、安装入口藏在「管理」菜单里，
+              // 用户以为实例没建好（#129 下「同问」的用户最后是在「管理」里找到了下载安装）
+              <button className="btn btn-primary inst-act-wide" onClick={() => onTrigger(inst, 'install')}>
+                {wx.phase === 'error' ? '重新下载安装' : `下载安装${profile.label}`}
+              </button>
             ) : (
               <button className="btn btn-primary inst-act-wide" disabled={!installed} onClick={onEnter} title={installed ? '' : '需先下载安装' + profile.label}>
                 进入实例
@@ -2031,7 +2037,7 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
           <div className="muted small">Chromium 浏览器随镜像就绪，创建后直接「进入实例」即可（无需下载安装）。</div>
         )}
         {appType === 'qq' && (
-          <div className="muted small">QQ 为腾讯官方 Linux 版，创建后点「下载并安装」从腾讯官方下载（约 180MB）。</div>
+          <div className="muted small">QQ 为腾讯官方 Linux 版，安装包从腾讯官方下载（约 180MB）。</div>
         )}
         <div className="field-label">允许访问的子账号（管理员默认可访问全部）</div>
         <ChipMultiSelect
@@ -2059,7 +2065,8 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
         )}
         {err && <div className="error">{err}</div>}
         <div className="muted small" style={{ marginTop: 4 }}>
-          创建后拉起一个新的 {APP_LABELS[appType]} 容器；进入实例后点「下载并安装」，再登录即可。
+          创建后在后台拉起一个新的 {APP_LABELS[appType]} 容器（本地没有实例镜像时先自动拉取，首次可能要几分钟，进度见卡片）
+          {appProfile(appType).needsInstall ? `；建好后点卡片上的「下载安装${APP_LABELS[appType]}」，再进入实例登录。` : '。'}
         </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>
