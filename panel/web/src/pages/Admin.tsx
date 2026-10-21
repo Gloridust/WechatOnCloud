@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Cropper from 'react-easy-crop';
-import { api, APP_LABELS, appProfile, fmtUploadSize, type PanelUser, type InstanceWithStatus, type VolEntry, type AppType, type VersionInfo } from '../api';
+import { api, APP_LABELS, appProfile, fmtUploadSize, provisionProgressText, type PanelUser, type InstanceWithStatus, type VolEntry, type AppType, type VersionInfo } from '../api';
 import { InstanceIcon, ICON_CHOICES } from '../AppIcon';
 import { useUI, PasswordInput } from '../ui';
 import { useAuth } from '../auth';
@@ -389,10 +389,10 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
     return () => window.clearTimeout(timer.current);
   }, []);
 
-  // 安装/更新进行中时轮询进度
+  // 安装/更新、后台创建（拉镜像）进行中时轮询进度
   useEffect(() => {
     window.clearTimeout(timer.current);
-    if (instances.some((i) => BUSY_PHASES.includes(i.wechat.phase))) timer.current = window.setTimeout(load, 1500);
+    if (instances.some((i) => BUSY_PHASES.includes(i.wechat.phase) || i.provision?.state === 'creating')) timer.current = window.setTimeout(load, 1500);
     return () => window.clearTimeout(timer.current);
   }, [instances]);
 
@@ -415,8 +415,10 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
   const start = async (inst: InstanceWithStatus) => {
     setAct(inst.id, '启动中…');
     try {
-      await api.instanceStart(inst.id);
-      toast('实例已启动', 'ok');
+      const r = await api.instanceStart(inst.id);
+      // 容器不存在时服务端转为后台重新创建（可能要拉镜像），进度和结果显示在卡片上
+      if (r?.started) toast('已开始创建容器，进度见卡片', 'info');
+      else toast('实例已启动', 'ok');
       await load();
     } catch (e: any) {
       toast(e.message || '启动失败', 'error');
@@ -1298,7 +1300,11 @@ function InstanceAdminCard({
   const busy = BUSY_PHASES.includes(wx.phase);
   const installed = wx.installed && wx.phase !== 'downloading';
   const offline = inst.runtime !== 'running';
-  const working = !!acting || busy; // 生命周期操作中 或 微信下载/更新中 → 锁住卡片
+  // 容器还没建成（#129）：创建中锁住卡片显示进度；失败则显示原因 + 怎么办 + 「重试创建」
+  const prov = inst.provision;
+  const creating = prov?.state === 'creating';
+  const createFailed = prov?.state === 'failed';
+  const working = !!acting || busy || creating; // 生命周期操作中 / 微信下载更新中 / 后台创建中 → 锁住卡片
   const [menuOpen, setMenuOpen] = useState(false); // 「管理」菜单是否展开（悬浮层，不占文档流）
   const menuRef = useRef<HTMLDivElement>(null);
   // 悬浮下拉：点击菜单外部时关闭
@@ -1315,6 +1321,8 @@ function InstanceAdminCard({
 
   let badge: { text: string; cls: string };
   if (acting) badge = { text: '处理中', cls: 'tag-busy' };
+  else if (creating) badge = { text: '创建中', cls: 'tag-busy' };
+  else if (createFailed) badge = { text: '创建失败', cls: 'tag-off' };
   else if (offline) badge = { text: inst.runtime === 'missing' ? '未创建' : '已停止', cls: 'tag-off' };
   else if (busy) badge = { text: '处理中', cls: 'tag-busy' };
   else if (installed) badge = { text: '在线', cls: 'tag-on' };
@@ -1322,6 +1330,8 @@ function InstanceAdminCard({
 
   let sub: string;
   if (acting) sub = acting;
+  else if (prov && creating) sub = provisionProgressText(prov);
+  else if (createFailed) sub = prov?.error || '创建失败';
   else if (busy) sub = wx.percent >= 0 ? `${wx.message || '处理中'} ${wx.percent}%` : wx.message || '请稍候…';
   else if (wx.phase === 'error') sub = wx.message || '操作失败，可重试';
   else if (offline) sub = inst.runtime === 'missing' ? '容器尚未创建' : '容器已停止';
@@ -1354,16 +1364,17 @@ function InstanceAdminCard({
           )}
         </div>
       )}
-      <div className="inst-sub">
+      <div className={'inst-sub' + (createFailed && !acting ? ' is-error' : '')}>
         {sub}
-        {!acting && ` · 可访问 ${userCount} 人`}
+        {!acting && !createFailed && ` · 可访问 ${userCount} 人`}
       </div>
+      {createFailed && !acting && prov?.hint && <div className="inst-hint">{prov.hint}</div>}
 
       {working && (
         <div className="wx-progress">
           <div
-            className={'wx-progress-bar' + (acting || wx.percent < 0 ? ' indeterminate' : '')}
-            style={!acting && wx.percent >= 0 ? { width: `${wx.percent}%` } : undefined}
+            className={'wx-progress-bar' + (acting || creating || wx.percent < 0 ? ' indeterminate' : '')}
+            style={!acting && !creating && wx.percent >= 0 ? { width: `${wx.percent}%` } : undefined}
           />
         </div>
       )}
@@ -1374,7 +1385,13 @@ function InstanceAdminCard({
           <div className="inst-actions">
             {offline ? (
               <button className="btn btn-primary inst-act-wide" onClick={onStart}>
-                {inst.runtime === 'missing' ? '创建并启动' : '启动实例'}
+                {createFailed ? '重试创建' : inst.runtime === 'missing' ? '创建并启动' : '启动实例'}
+              </button>
+            ) : !installed && profile.needsInstall ? (
+              // 容器建好但应用还没装：主按钮直接是「下载安装」。此前是一个灰掉的「进入实例」、安装入口藏在「管理」菜单里，
+              // 用户以为实例没建好（#129 下「同问」的用户最后是在「管理」里找到了下载安装）
+              <button className="btn btn-primary inst-act-wide" onClick={() => onTrigger(inst, 'install')}>
+                {wx.phase === 'error' ? '重新下载安装' : `下载安装${profile.label}`}
               </button>
             ) : (
               <button className="btn btn-primary inst-act-wide" disabled={!installed} onClick={onEnter} title={installed ? '' : '需先下载安装' + profile.label}>
@@ -1961,6 +1978,7 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const { toast } = useUI();
   // 未使用的旧数据卷（之前删除实例但未勾选「彻底清除」时保留下来的），允许在此复用以继承聊天记录。
   const [orphans, setOrphans] = useState<{ name: string; createdAt?: string }[]>([]);
   const [reuse, setReuse] = useState<string>(''); // '' = 不复用，新建空卷
@@ -1983,7 +2001,9 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
     setErr('');
     setBusy(true);
     try {
+      // 服务端登记后立即返回、后台建容器（可能要先拉镜像）：关掉弹窗，进度和结果看卡片（#129）
       await api.createInstance(name.trim(), [...sel], reuse || undefined, appType);
+      toast('实例已登记，正在后台创建，进度见卡片', 'info');
       onDone();
     } catch (e: any) {
       setErr(e.message || '创建失败');
@@ -2017,7 +2037,7 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
           <div className="muted small">Chromium 浏览器随镜像就绪，创建后直接「进入实例」即可（无需下载安装）。</div>
         )}
         {appType === 'qq' && (
-          <div className="muted small">QQ 为腾讯官方 Linux 版，创建后点「下载并安装」从腾讯官方下载（约 180MB）。</div>
+          <div className="muted small">QQ 为腾讯官方 Linux 版，安装包从腾讯官方下载（约 180MB）。</div>
         )}
         <div className="field-label">允许访问的子账号（管理员默认可访问全部）</div>
         <ChipMultiSelect
@@ -2045,7 +2065,8 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
         )}
         {err && <div className="error">{err}</div>}
         <div className="muted small" style={{ marginTop: 4 }}>
-          创建后拉起一个新的 {APP_LABELS[appType]} 容器；进入实例后点「下载并安装」，再登录即可。
+          创建后在后台拉起一个新的 {APP_LABELS[appType]} 容器（本地没有实例镜像时先自动拉取，首次可能要几分钟，进度见卡片）
+          {appProfile(appType).needsInstall ? `；建好后点卡片上的「下载安装${APP_LABELS[appType]}」，再进入实例登录。` : '。'}
         </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>

@@ -508,7 +508,8 @@ function envList(inst: Instance): string[] {
 }
 
 // 确保微信镜像在本地存在；缺失则从 GHCR 拉取（首次新建实例时镜像通常还没拉过）。
-async function ensureImage(): Promise<void> {
+// instId：为哪个实例拉的——拉取的开始 / 结束也记进该实例的持久日志，用户在「实例日志」里就能看到卡在拉镜像（#129）。
+async function ensureImage(instId?: string): Promise<void> {
   await resolveInstanceImage(); // 版本兜底：若耦合的版本 tag 不可达则先回退 :latest
   try {
     await docker.getImage(WECHAT_IMAGE).inspect();
@@ -519,10 +520,12 @@ async function ensureImage(): Promise<void> {
   // 首次新建实例常卡在这一步（NAS 直连 docker.io 拉取超时，见 README）。这里前后都打日志：
   // 若诊断包里只见"开始拉取"而无"完成/失败"，即可定位为拉取卡死。
   appendPanelLog('INFO', `本地无实例镜像 ${WECHAT_IMAGE}，开始拉取（首次较慢；NAS 直连 docker.io 可能超时）…`);
+  if (instId) appendInstanceLog(instId, `本地没有实例镜像，开始拉取 ${WECHAT_IMAGE}（约 1~2GB，首次较慢）`);
   const t0 = Date.now();
   try {
     await pullImage();
     appendPanelLog('INFO', `实例镜像拉取完成 ${WECHAT_IMAGE}（耗时 ${Math.round((Date.now() - t0) / 1000)}s）`);
+    if (instId) appendInstanceLog(instId, `实例镜像拉取完成（耗时 ${Math.round((Date.now() - t0) / 1000)}s）`);
     return;
   } catch (e: any) {
     appendPanelLog('ERROR', `实例镜像拉取失败 ${WECHAT_IMAGE}（耗时 ${Math.round((Date.now() - t0) / 1000)}s）：${e?.message || e}`);
@@ -533,14 +536,96 @@ async function ensureImage(): Promise<void> {
       try {
         await docker.getImage(fb).inspect();
         appendPanelLog('WARN', `改用本地已有的 ${fb} 重建（注意：它可能是较旧的镜像；网络恢复后请重新「升级实例」拿到 ${WECHAT_IMAGE}）`);
+        if (instId) appendInstanceLog(instId, `拉取 ${WECHAT_IMAGE} 失败，改用本地已有的 ${fb}（可能较旧，网络恢复后可「升级实例」）`);
         WECHAT_IMAGE = fb;
         return;
       } catch {
         /* 本地也没有 :latest → 无可兜底，抛出原错误 */
       }
     }
-    throw e;
+    throw provisionError('pull', e, WECHAT_IMAGE);
   }
+}
+
+// ---------- 创建失败的人话（#129） ----------
+// 创建实例失败时，用户此前只看到原始 docker 报错，拉取卡住时更是什么都看不到（实例日志里只有「实例创建」+ 一个 404）。
+// 这里按失败环节 + 原始报错归类，说清「哪一步、为什么、怎么办」：summary 进卡片，advice 进卡片提示和实例日志，
+// raw 原样留在 message 和实例日志里供排查。message 仍以原始报错结尾，面板日志 / 重启失败提示等老调用方照常可用。
+export type ProvisionStage = 'pull' | 'volume' | 'create' | 'start';
+export class ProvisionError extends Error {
+  constructor(
+    readonly stage: ProvisionStage,
+    readonly summary: string,
+    readonly advice: string,
+    readonly raw: string,
+  ) {
+    super(`${summary}：${raw}`);
+  }
+}
+
+const STAGE_LABEL: Record<ProvisionStage, string> = {
+  pull: '拉取实例镜像失败',
+  volume: '准备数据目录失败',
+  create: '创建容器失败',
+  start: '启动容器失败',
+};
+
+function provisionError(stage: ProvisionStage, e: any, image = WECHAT_IMAGE): ProvisionError {
+  if (e instanceof ProvisionError) return e;
+  const raw = String(e?.message || e || '未知错误').trim();
+  const m = raw.toLowerCase();
+  const retry = '再点卡片上的「重试创建」';
+  let reason = '';
+  let advice = '';
+  if (/connect (econnrefused|enoent).*docker\.sock|econnrefused.*2375|socket hang up/.test(m)) {
+    reason = '面板连不上 Docker';
+    advice = `检查 docker.sock 是否挂进了面板容器（加固部署则看 socket-proxy 是否在运行），${retry}。`;
+  } else if (/no space left on device/.test(m)) {
+    reason = '宿主磁盘空间不足';
+    advice = `清理宿主磁盘（可先在「管理 → 系统」清掉残留的容器和数据卷），${retry}。`;
+  } else if (stage === 'pull') {
+    // NAS 界面里的「加速」一般只管用户在界面上手动拉的镜像，面板经 docker.sock 触发的拉取直连镜像源（见 README FAQ）
+    const pullTips =
+      `面板经 Docker 直连镜像源，NAS 界面里的「加速」一般管不到。任选其一后点「重试创建」：` +
+      `① 在 NAS 的 Docker 镜像页（或宿主 docker pull）手动拉取 ${image}，面板会直接复用；` +
+      `② 把 .env 的 WOC_IMAGE_PREFIX 换成能连上的源（如 ghcr.nju.edu.cn/gloridust），docker compose up -d 重建面板；` +
+      `③ 给 Docker 配镜像加速器（daemon.json 的 registry-mirrors）。`;
+    if (e?.stalled) {
+      reason = `${Math.round(PULL_STALL_MS / 60000)} 分钟没有任何下载进度，网络卡住了`;
+      advice = pullTips;
+    } else if (/toomanyrequests|rate limit/.test(m)) {
+      reason = '镜像源限流，拉取次数超限';
+      advice = `Docker Hub 对匿名拉取按出口 IP 限次。等一段时间再点「重试创建」，或把 .env 的 WOC_IMAGE_PREFIX 换成别的源（如 ghcr.io/gloridust、ghcr.nju.edu.cn/gloridust），docker compose up -d 重建面板。`;
+    } else if (/manifest unknown|not found|does not exist|pull access denied|denied|unauthorized|no matching manifest/.test(m)) {
+      reason = /no matching manifest/.test(m) ? '镜像源上没有适合本机 CPU 架构的版本' : '镜像源上找不到这个镜像，或需要登录';
+      advice =
+        `核对 .env 的 WOC_IMAGE_PREFIX / WOC_VERSION 有没有写错，或换一个源（docker.io/gloridust、ghcr.io/gloridust、ghcr.nju.edu.cn/gloridust），` +
+        `docker compose up -d 重建面板后点「重试创建」。`;
+    } else {
+      reason = '连不上镜像源：网络受限、被墙或代理有问题';
+      advice = pullTips;
+    }
+  } else if (stage === 'volume') {
+    advice = `检查 .env 里 WOC_DATA_ROOT 指向的宿主目录是否存在、可写，改正后 docker compose up -d 重建面板，${retry}。`;
+  } else if (/minimum memory limit/.test(m)) {
+    reason = 'WOC_INSTANCE_MEM_GB 设得太小';
+    advice = `把 .env 里的 WOC_INSTANCE_MEM_GB 调大（建议 3~4）或留空，docker compose up -d 重建面板后点「重试创建」。`;
+  } else if (/error gathering device information|no such file or directory/.test(m) && /\/dev\//.test(m)) {
+    reason = '指定的设备在宿主上不存在';
+    advice = `检查 .env 里的 WOC_VIDEO_DEVICES / WOC_DRI_DEVICES，改正或留空后 docker compose up -d 重建面板，${retry}。`;
+  } else if (/network .*not found/.test(m)) {
+    reason = '实例要接入的 Docker 网络不存在';
+    advice = `检查 .env 里的 WOC_DOCKER_NETWORK（留空即由面板自动处理），docker compose up -d 重建面板后点「重试创建」。`;
+  }
+  if (!advice) advice = '点卡片上的「重试创建」再试一次；仍然失败请在「管理 → 系统」导出诊断包，附在 issue 里反馈。';
+  const summary = reason ? `${STAGE_LABEL[stage]}（${reason}）` : STAGE_LABEL[stage];
+  return new ProvisionError(stage, summary, advice, raw);
+}
+
+// 给调用方（创建流程）统一取「环节 + 人话 + 原始报错」；非 ProvisionError（如 ensureNetwork 等意外）归为创建容器失败。
+export function describeProvisionError(e: any): { summary: string; advice: string; raw: string } {
+  const pe = e instanceof ProvisionError ? e : provisionError('create', e);
+  return { summary: pe.summary, advice: pe.advice, raw: pe.raw };
 }
 
 // 当前镜像引用对应的 :latest 形式；已是 latest / 无 tag 则返回 null（无可回退）。
@@ -670,7 +755,7 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
   // 也避免"离线 + 本地无 :latest"时连重启都失败。
   // 必须先确保目标镜像在本地、再删旧容器：此前先删后拉，升级时拉不到新镜像（面板刚更新、本地只有旧版本号的镜像、
   // 网络又不通）就会把旧容器删掉却建不出新的，实例直接没了；现在拉取失败时旧容器原样保留。
-  if (!imageOverride) await ensureImage();
+  if (!imageOverride) await ensureImage(inst.id);
   if (info) {
     try {
       // 删除前先把旧容器最后日志快照进持久日志，否则随容器删除就看不到"上次为何停/崩"。
@@ -680,7 +765,9 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
       /* 已被移走，正常 */
     }
   }
-  await ensureInstanceVolume(inst, imageOverride || WECHAT_IMAGE);
+  await ensureInstanceVolume(inst, imageOverride || WECHAT_IMAGE).catch((e) => {
+    throw provisionError('volume', e);
+  });
   // 摄像头设备（探测不到则为空数组 → 仅摄像头不可用，音频/麦克风照常）
   const vids = videoDevices();
   const dris = ENABLE_GPU ? driDevices() : [];
@@ -732,9 +819,13 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
   } else {
     (createOpts as any).MacAddress = mac;
   }
-  const container = await docker.createContainer(createOpts);
+  const container = await docker.createContainer(createOpts).catch((e) => {
+    throw provisionError('create', e);
+  });
   try {
-    await container.start();
+    await container.start().catch((e) => {
+      throw provisionError('start', e);
+    });
     appendInstanceLog(inst.id, '容器已启动');
     // 容器重建后恢复持久化的字体配置 / xsettingsd
     restoreFontFromVolume(inst).catch(() => {});
@@ -1332,50 +1423,103 @@ export async function wechatStatus(inst: Instance): Promise<WechatStatus> {
 
 // 拉取微信镜像（首次部署/更新镜像用）。
 // 并发合并：创建实例/单实例升级/一键升级可能同时触发拉取，同一时刻只跑一个（后来者共享结果；
-// 其 onProgress 不再接收进度，可接受——进度只影响创建向导的百分比显示）。
+// 其 onProgress 不再接收进度——要看进度用 imagePullProgress()，它对所有调用方都有效）。
 let pullInFlight: Promise<void> | null = null;
 export function pullImage(onProgress?: (line: any) => void): Promise<void> {
   if (pullInFlight) return pullInFlight;
   pullInFlight = doPullImage(onProgress).finally(() => {
     pullInFlight = null;
+    pullState = null;
     invalidateRemoteImageCache(); // 本地镜像可能已更新 → 远端新版检测缓存作废
   });
   return pullInFlight;
 }
 
+// 正在进行的拉取的进度（#129）：创建实例时卡片要能看出「正在拉镜像、拉到哪了」，否则几分钟的拉取看起来和卡死一样。
+// 按层累计 Downloading 事件的 current/total；某层的 total 要等它开始下载才知道，所以总量会随拉取推进变大。
+let pullState: { image: string; startedAt: number; layers: Map<string, { cur: number; total: number }> } | null = null;
+export function imagePullProgress(): { image: string; startedAt: number; downloadedMB: number; totalMB: number } | null {
+  if (!pullState) return null;
+  let cur = 0;
+  let total = 0;
+  for (const l of pullState.layers.values()) {
+    cur += l.cur;
+    total += l.total;
+  }
+  const mb = (b: number) => Math.round(b / 1048576);
+  return { image: pullState.image, startedAt: pullState.startedAt, downloadedMB: mb(cur), totalMB: mb(total) };
+}
+function trackPullEvent(ev: any): void {
+  if (!pullState || typeof ev?.id !== 'string') return;
+  const pd = ev.progressDetail || {};
+  const layer = pullState.layers.get(ev.id);
+  if (ev.status === 'Downloading' && Number(pd.total) > 0) {
+    pullState.layers.set(ev.id, { cur: Number(pd.current) || 0, total: Number(pd.total) });
+  } else if (layer && /^(Download complete|Verifying Checksum|Extracting|Pull complete)/.test(String(ev.status || ''))) {
+    layer.cur = layer.total;
+  }
+}
+
+// 无进度超时：NAS 直连 docker.io 常卡死，旧版会让"创建实例"请求无限 hang（issue #99）。N 分钟内没有任何进度就中止，
+// 让创建带清晰错误失败、用户可重试/删除。默认 5 分钟，WOC_PULL_STALL_MIN 可调（最少 2）。
+const PULL_STALL_MS = 1000 * 60 * Math.max(2, Number(process.env.WOC_PULL_STALL_MIN) || 5);
+
 async function doPullImage(onProgress?: (line: any) => void): Promise<void> {
-  // 无进度超时：NAS 直连 docker.io 常卡死（拉取流僵住、永不结束），旧版会让"创建实例"请求无限 hang，
-  // 前端一直转圈、还删不掉（issue #99）。这里只要 N 分钟内没有任何进度就中止拉取，让创建带清晰错误快速失败、
-  // 用户可重试/删除。默认 5 分钟，WOC_PULL_STALL_MIN 可调。
-  const STALL_MS = 1000 * 60 * Math.max(2, Number(process.env.WOC_PULL_STALL_MIN) || 5);
+  pullState = { image: WECHAT_IMAGE, startedAt: Date.now(), layers: new Map() };
   return await new Promise((resolve, reject) => {
-    docker.pull(WECHAT_IMAGE, (err: any, stream: NodeJS.ReadableStream) => {
-      if (err) return reject(err);
-      let done = false;
-      let timer: ReturnType<typeof setTimeout>;
-      const finish = (e: any) => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        e ? reject(e) : resolve();
-      };
-      const arm = () => {
-        clearTimeout(timer);
-        timer = setTimeout(() => {
-          try {
-            (stream as any).destroy?.();
-          } catch {
-            /* ignore */
-          }
-          finish(new Error(`拉取镜像 ${Math.round(STALL_MS / 60000)} 分钟无进度，判定网络卡死并中止（建议配置国内镜像源或预拉取，详见 README）`));
-        }, STALL_MS);
-      };
+    const ac = new AbortController();
+    let stream: any = null;
+    let done = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (e: any) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      e ? reject(e) : resolve();
+    };
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        // 断开这次 API 请求：守护进程随之取消这次拉取（也免得它和用户下一次「重试创建」叠在一起）
+        ac.abort();
+        try {
+          stream?.destroy?.();
+        } catch {
+          /* ignore */
+        }
+        finish(
+          Object.assign(new Error(`拉取镜像 ${Math.round(PULL_STALL_MS / 60000)} 分钟无进度，判定网络卡死并中止（建议配置国内镜像源或预拉取，详见 README）`), {
+            stalled: true,
+          }),
+        );
+      }, PULL_STALL_MS);
+    };
+    // 计时必须从发出请求就开始，而不是等 docker.pull 的回调：守护进程连上了镜像源、却迟迟拿不到镜像清单时，
+    // 它一个字节都不回，回调根本不会来（#129 用不应答的假仓库实测：停滞超时设 2 分钟，旧版挂了 8 分钟仍无任何报错，创建请求一直悬着）。
+    arm();
+    docker.pull(WECHAT_IMAGE, { abortSignal: ac.signal }, (err: any, s?: NodeJS.ReadableStream) => {
+      if (done) {
+        (s as any)?.destroy?.();
+        return;
+      }
+      if (err || !s) return finish(err || new Error('Docker 没有返回拉取进度'));
+      stream = s;
       arm();
+      // 只有「真的有进展」（某层的状态或已下载字节数变了）才重置超时，不能来一条事件就算：新版守护进程
+      // （containerd 镜像存储，Docker 29 起新装默认）下载僵住时仍每 0.1 秒重发一条字节数不变的 Downloading，
+      // 按旧判据停滞检测永远不会触发（#129 实测：Docker 29.5 上下载僵住 4 分钟、超时设 2 分钟，一直没报错）。
+      const lastByLayer = new Map<string, string>();
       docker.modem.followProgress(
-        stream,
+        s,
         (e: any) => finish(e),
         (ev: any) => {
-          arm(); // 每有进度就重置超时
+          const id = String(ev?.id ?? '');
+          const key = `${ev?.status ?? ''}|${ev?.progressDetail?.current ?? ''}`;
+          if (lastByLayer.get(id) !== key) {
+            lastByLayer.set(id, key);
+            arm();
+          }
+          trackPullEvent(ev);
           onProgress?.(ev);
         },
       );

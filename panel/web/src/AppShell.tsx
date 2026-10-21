@@ -39,7 +39,7 @@ function useInstancesLoader(): InstancesState {
   }, []);
   useEffect(() => {
     window.clearTimeout(timer.current);
-    if (instances.some((i) => BUSY.includes(i.wechat.phase))) timer.current = window.setTimeout(reload, 1500);
+    if (instances.some((i) => BUSY.includes(i.wechat.phase) || i.provision?.state === 'creating')) timer.current = window.setTimeout(reload, 1500);
     return () => window.clearTimeout(timer.current);
   }, [instances]);
   return { instances, loaded, reload };
@@ -47,6 +47,8 @@ function useInstancesLoader(): InstancesState {
 
 // 实例状态点（颜色 + 文案）
 export function statusOf(inst: InstanceWithStatus): { cls: string; text: string } {
+  if (inst.provision?.state === 'creating') return { cls: 'st-busy', text: '创建中' };
+  if (inst.provision?.state === 'failed') return { cls: 'st-off', text: '创建失败' };
   const offline = inst.runtime !== 'running';
   if (offline) return { cls: 'st-off', text: inst.runtime === 'missing' ? '未创建' : '已停止' };
   if (BUSY.includes(inst.wechat.phase)) return { cls: 'st-busy', text: '处理中' };
