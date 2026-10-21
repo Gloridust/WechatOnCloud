@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import Docker from 'dockerode';
 import { tarArchive, tarEntry, tarFileStream, tarSingleFile, openTarStream, scanArchive, sniffArchive } from './tar.js';
 import { instanceAppType, getDesktopDark, type Instance } from './store.js';
+import { describeHostCpu, describeHostMemPolicy, summarizeMinidump } from './crash-diag.js';
 
 // 实例镜像引用。版本耦合（架构守则 R1）：面板与实例镜像同一 release 同步出包、按同版本号
 // 互相验证——正式版面板把 :latest 改写为与自身相同的版本 tag（如 1.4.1），保证
@@ -1393,6 +1394,118 @@ function buildTarGz(entries: { name: string; content: string | Buffer }[]): Buff
   return zlib.gzipSync(tarArchive(entries.map((e) => tarEntry(e.name, Buffer.isBuffer(e.content) ? e.content : Buffer.from(e.content, 'utf8')))));
 }
 
+// ---------- 诊断包：内置浏览器崩溃定位（#166） ----------
+// 微信内置浏览器（WeChatAppEx，Chromium 内核）崩溃时 crashpad 把转储写进这里（completed/ pending/ new/ 下的 *.dmp）。
+// autostart 在实例启动时删掉 1 天前的，所以这里看到的是「本次启动以来 + 最近 1 天」的。
+const CRASH_DIRS = ['/config/.xwechat/crashinfo'];
+const CRASH_LIST_MAX = 20; // 列出最近的这么多份（时间/大小/子目录）
+const CRASH_PARSE_MAX = 5; // 其中最近的这么多份解析摘要
+const CRASH_READ_CAP = 16 * 1024 * 1024; // 每份最多读这么多字节（渲染进程转储通常几百 KB～几 MB），面板内存有界
+
+// 实例里的运行资源：/dev/shm 与 cgroup 限制（Chromium 共享内存/线程数/内存耗尽都会走主动崩溃），实例里 glibc 判定的
+// CPU 级别（微信实际看到的），微信与内置浏览器内核版本，正在跑的内置浏览器进程（按 --type 分组，只取类型与 RSS，不取命令行）。
+const RUNTIME_SCRIPT = String.raw`
+echo '[/dev/shm]'
+df -kP /dev/shm 2>/dev/null | awk 'NR==2{printf "容量 %.0f MiB · 已用 %.0f MiB · 剩余 %.0f MiB（%s）\n",$2/1024,$3/1024,$4/1024,$5}'
+echo "文件数: $(find /dev/shm -xdev -mindepth 1 2>/dev/null | wc -l)"
+echo
+echo '[cgroup 限制]'
+cg=/sys/fs/cgroup
+if [ -f $cg/cgroup.controllers ]; then
+  for f in memory.max memory.current memory.peak memory.swap.max pids.max pids.current; do [ -r $cg/$f ] && echo "$f = $(cat $cg/$f)"; done
+  for f in memory.events pids.events; do [ -r $cg/$f ] && echo "$f: $(tr '\n' ' ' < $cg/$f)"; done
+else
+  for f in memory/memory.limit_in_bytes memory/memory.usage_in_bytes memory/memory.max_usage_in_bytes memory/memory.failcnt pids/pids.max pids/pids.current; do [ -r $cg/$f ] && echo "$f = $(cat $cg/$f)"; done
+fi
+echo "ulimit: -v $(ulimit -v) · -n $(ulimit -n) · -u $(ulimit -u) · -s $(ulimit -s)"
+echo
+echo '[CPU 级别（实例里 glibc 判定）]'
+lv=$(for l in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-aarch64.so.1; do [ -x "$l" ] && "$l" --help 2>/dev/null | grep -E '^[[:space:]]+x86-64-v[0-9]'; done \
+  | sed -E 's/^[[:space:]]*(x86-64-v[0-9])[[:space:]]*\(supported.*/\1 支持/; t; s/^[[:space:]]*(x86-64-v[0-9]).*/\1 不支持/' | tr '\n' ' ')
+[ -n "$lv" ] && echo "$lv" || echo '（无 x86-64 级别信息：非 x86，或 glibc 过旧）'
+echo
+echo '[微信]'
+[ -f /config/wechat/.woc-version ] && echo "版本: $(cat /config/wechat/.woc-version)"
+x=/config/wechat/opt/wechat/RadiumWMPF/runtime/WeChatAppEx
+[ -f "$x" ] && echo "内置浏览器内核: $(head -c 67108864 "$x" | grep -a -o -m1 'Chrome/[0-9][0-9.]*' | head -n1)"
+echo '内置浏览器进程（WeChatAppEx，按 --type 分组）:'
+for p in /proc/[0-9]*; do
+  e=$(readlink "$p/exe" 2>/dev/null) || continue
+  case "$e" in */WeChatAppEx*) ;; *) continue ;; esac
+  t=$(tr '\0' '\n' < "$p/cmdline" 2>/dev/null | sed -n 's/^--type=//p' | head -n1)
+  [ -n "$t" ] || t=browser
+  echo "$t|$(awk '/^VmRSS/{print $2}' "$p/status" 2>/dev/null)|$e"
+done | awk -F'|' '{c++; n[$1]++; r[$1]+=$2; x[$3]=1} END {if (!c) print "  （未运行）"; for (k in n) printf "  %s × %d · RSS 合计 %d MiB\n", k, n[k], r[k]/1024; for (e in x) print "  可执行文件: " e}'
+true
+`;
+
+async function describeInstanceRuntime(inst: Instance): Promise<string> {
+  // 以 abc（应用的运行用户）执行：读别人进程的 /proc/<pid>/exe 要同 uid 或 CAP_SYS_PTRACE，容器里的 root 默认没有后者
+  const out = (await execCapture(inst, ['bash', '-c', RUNTIME_SCRIPT])).trimEnd();
+  return out.replace(/wxid_[A-Za-z0-9_-]+/g, 'wxid_***'); // 兜底：路径里万一带微信号，一律打码
+}
+
+// 读实例里一个文件的前 max 字节（复用 streamRegularFile：exec cat、自己拆帧）。读够即断开 cat，面板内存不随文件变大。
+async function readInstanceFileHead(inst: Instance, absPath: string, max: number): Promise<{ buf: Buffer; size: number }> {
+  const { size, stream } = await streamRegularFile(inst, absPath);
+  const parts: Buffer[] = [];
+  let got = 0;
+  await new Promise<void>((resolve, reject) => {
+    stream.on('data', (b: Buffer) => {
+      if (got >= max) return;
+      const take = b.subarray(0, max - got);
+      parts.push(take);
+      got += take.length;
+      if (got >= max) {
+        (stream as any).destroy?.();
+        resolve();
+      }
+    });
+    stream.on('end', resolve);
+    stream.on('close', resolve);
+    stream.on('error', reject);
+  });
+  return { buf: Buffer.concat(parts), size };
+}
+
+// 崩溃转储：数量/大小/时间 + 最近几份的摘要（信号、崩溃模块+偏移、崩溃处指令字节；解析见 crash-diag.ts）。
+// ⚠️ 绝不把转储本体放进诊断包：里面有崩溃进程的内存，可能含聊天内容；诊断包会被公开贴到 GitHub。
+async function describeCrashDumps(inst: Instance): Promise<string> {
+  const script = String.raw`now=$(date +%s); find "$@" -type f -printf '%T@\t%s\t%p\n' 2>/dev/null | sort -rn | awk -F'\t' -v now="$now" -v max=${CRASH_LIST_MAX} '
+    { n++; b += $2; if ($3 ~ /\.dmp$/) { d++; db += $2; if (now - $1 < 86400) d24++; if (d <= max) printf "D\t%d\t%s\t%s\n", $1, $2, $3 } }
+    END { printf "T\t%d\t%d\t%d\t%d\t%d\n", n, b, d, db, d24 }'`;
+  const raw = await execCapture(inst, ['bash', '-c', script, 'bash', ...CRASH_DIRS], 'root');
+  const mib = (n: number) => (n < 1048576 ? `${Math.ceil(n / 1024)} KiB` : `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} MiB`);
+  const dumps: { mtime: number; size: number; path: string }[] = [];
+  let total = [0, 0, 0, 0, 0];
+  for (const line of raw.split('\n')) {
+    const f = line.split('\t');
+    if (f[0] === 'T') total = f.slice(1).map((v) => Number(v) || 0);
+    else if (f[0] === 'D' && f.length >= 4) dumps.push({ mtime: Number(f[1]) || 0, size: Number(f[2]) || 0, path: f.slice(3).join('\t') });
+  }
+  const [nFiles, nBytes, nDumps, dumpBytes, d24] = total;
+  if (!nFiles) return '（没有崩溃转储：内置浏览器未崩溃过，或转储已被实例启动时的 1 天清理删掉——复现一次崩溃后马上导出）';
+  let s = `共 ${nFiles} 个文件 / ${mib(nBytes)}；其中转储(.dmp) ${nDumps} 个 / ${mib(dumpBytes)}，最近 24 小时内 ${d24} 个\n`;
+  s += '（只给摘要，不含转储本体与任何内存内容；崩溃处指令字节只在地址落在已加载模块里时给出，那是公开二进制本身的字节）\n';
+  for (let i = 0; i < dumps.length; i++) {
+    const d = dumps[i];
+    const dir = CRASH_DIRS.find((x) => d.path.startsWith(x + '/'));
+    const rel = dir ? d.path.slice(dir.length + 1) : d.path.split('/').pop() || '';
+    // 文件名是 crashpad 的随机报告 id，只留前 8 位便于对照
+    const shown = rel.replace(/([0-9a-f]{8})[0-9a-f-]{20,}(\.dmp)$/i, '$1…$2');
+    s += `[${i + 1}] ${new Date(d.mtime * 1000).toISOString().replace('.000Z', 'Z')} 写入 · ${mib(d.size)} · ${shown}\n`;
+    if (i >= CRASH_PARSE_MAX) continue;
+    try {
+      const { buf, size } = await readInstanceFileHead(inst, d.path, CRASH_READ_CAP);
+      for (const l of summarizeMinidump(buf, size > buf.length)) s += `    ${l}\n`;
+    } catch (e: any) {
+      s += `    解析失败：${e?.message || e}\n`;
+    }
+  }
+  if (nDumps > dumps.length) s += `……另有 ${nDumps - dumps.length} 份更早的转储未列出\n`;
+  return s.trimEnd();
+}
+
 // 汇总诊断包：系统信息 + 面板全局日志 + 每个实例（容器状态 + 持久日志 + 实时日志）+ 全部 woc-* 容器清单。
 // 日志按 sinceMs 时间裁剪。给排查"首个实例创建卡死 / 打开实例黑屏不可用 / 升级失败"等问题用。
 export async function buildDiagnostics(instances: Instance[], sinceMs: number, meta: Record<string, string>): Promise<Buffer> {
@@ -1407,12 +1520,14 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
       `时间范围: 最近 ${meta.range || '24h'}`,
       '',
       '内容：',
-      '  system.txt        系统/Docker/镜像信息',
+      '  system.txt        系统/Docker/镜像信息 + 宿主 CPU 型号与指令集 + 内核内存策略',
       '  panel.log         面板全局运维日志（创建/删除/升级/启停/镜像拉取/错误）',
       '  containers.txt    所有 woc-* 容器清单（含残留/未登记）',
-      '  instances/<id>.log 每个实例：容器状态 + 持久日志 + 应用安装状态/日志 + 桌面服务（nginx/KasmVNC）+ 实时容器日志',
+      '  instances/<id>.log 每个实例：容器状态与实际运行参数 + 持久日志 + 应用安装状态/日志 + 桌面服务（nginx/KasmVNC）',
+      '                    + 运行资源（/dev/shm、cgroup 限制、微信与内置浏览器版本）+ 崩溃转储摘要 + 实时容器日志',
       '',
       '把本压缩包发给维护者即可协助排查（不含密码/密钥等敏感信息）。',
+      '崩溃转储只给摘要（信号、崩溃模块与偏移、崩溃处指令字节），不含转储文件本身，也不含任何内存/聊天内容。',
     ].join('\n'),
   });
 
@@ -1438,6 +1553,15 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
   } catch (e: any) {
     sys += `Docker info: 获取失败 ${e?.message || e}\n`;
   }
+  // 宿主 CPU 与内核内存策略（#166：内置浏览器崩溃页只给「SIGILL」，要靠这里判断是不是指令集/虚拟机/内存记账问题）。
+  // /proc/cpuinfo、/proc/sys/vm、/proc/meminfo 不随容器隔离，面板读到的就是实例所在宿主的。
+  sys += '\n宿主 CPU（/proc/cpuinfo）:\n';
+  try {
+    sys += describeHostCpu(readFileSync('/proc/cpuinfo', 'utf8'));
+  } catch (e: any) {
+    sys += `读取失败 ${e?.message || e}\n`;
+  }
+  sys += describeHostMemPolicy();
   try {
     const img: any = await docker.getImage(WECHAT_IMAGE).inspect();
     sys += `\n实例镜像 ${WECHAT_IMAGE}: ${String(img.Id).slice(0, 19)} · 创建 ${img.Created}\n`;
@@ -1476,7 +1600,16 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
           /* stats 偶发不可用，忽略 */
         }
       }
-      c += `镜像: ${String(info.Image).slice(0, 19)} · 健康: ${s.Health?.Status ?? 'n/a'}\n\n`;
+      c += `镜像: ${String(info.Image).slice(0, 19)} · 健康: ${s.Health?.Status ?? 'n/a'}\n`;
+      // 容器【实际】的运行参数（不是面板配置）：在面板之外手动 docker run / 被 NAS 的 Docker 界面改过的容器，
+      // shm 可能是 docker 默认的 64MB、安全选项/设备也不同——Chromium 内核在这些差异下会崩（#166）。
+      const hc = info.HostConfig || {};
+      const gib = (n: number) => (n >= 1073741824 ? `${(n / 1073741824).toFixed(1)}GiB` : `${Math.round(n / 1048576)}MiB`);
+      c += `运行参数: shm=${hc.ShmSize ? gib(hc.ShmSize) : '默认(64MiB)'} · 安全选项=${(hc.SecurityOpt || []).join(',') || '默认'}`;
+      c += ` · AppArmor=${info.AppArmorProfile || '无'} · 特权=${hc.Privileged ? '是' : '否'} · IPC=${hc.IpcMode || '?'}`;
+      c += ` · 内存上限=${hc.Memory ? gib(hc.Memory) : '不限'} · pids上限=${hc.PidsLimit && hc.PidsLimit > 0 ? hc.PidsLimit : '不限'}\n`;
+      const devs = (hc.Devices || []).map((d: any) => d.PathOnHost).filter(Boolean);
+      c += `设备: ${devs.join(', ') || '无'}${hc.CapAdd?.length ? ` · CapAdd=${hc.CapAdd.join(',')}` : ''}\n\n`;
     } catch (e: any) {
       c += `===== 容器状态 =====\n无法读取（容器可能未创建/已删除）：${e?.message || e}\n\n`;
     }
@@ -1507,6 +1640,16 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
       c += `===== 桌面服务（nginx / KasmVNC） =====\n${desk}\n\n`;
     } catch (e: any) {
       c += `===== 桌面服务（nginx / KasmVNC） =====\n获取失败（容器可能未运行）：${e?.message || e}\n\n`;
+    }
+    try {
+      c += `===== 运行资源（/dev/shm、cgroup 限制、微信版本、内置浏览器进程） =====\n${await describeInstanceRuntime(inst)}\n\n`;
+    } catch (e: any) {
+      c += `===== 运行资源 =====\n获取失败（容器可能未运行）：${e?.message || e}\n\n`;
+    }
+    try {
+      c += `===== 崩溃转储（${CRASH_DIRS.join(' ')}） =====\n${await describeCrashDumps(inst)}\n\n`;
+    } catch (e: any) {
+      c += `===== 崩溃转储 =====\n获取失败（容器可能未运行）：${e?.message || e}\n\n`;
     }
     try {
       c += `===== 本次容器日志（实时 tail 300） =====\n${(await instanceLogs(inst, 300)).trimEnd() || '（无）'}\n`;
