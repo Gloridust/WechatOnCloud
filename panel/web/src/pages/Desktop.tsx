@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, appProfile } from '../api';
+import { api, appProfile, fmtUploadSize } from '../api';
+import { browserImageCodec, fitPasteImage, pasteImageWithFallback } from '../pasteImage';
 import { useUI } from '../ui';
 import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
@@ -177,13 +178,21 @@ function installSeamlessIme(
 // 本机截图 / 图片直接粘进应用（issue #91，多人反馈）。
 // 背景：noVNC 在 keydown 里 preventDefault，浏览器的粘贴动作连同 paste 事件都被压掉，本机的图片永远到不了容器。
 // 做法：抢在 noVNC 之前截下 Ctrl/Cmd+V（只 stopImmediatePropagation，不 preventDefault），让浏览器照常派发
-// 带剪贴板数据的 paste 事件——它不依赖异步剪贴板 API，内网 http 访问下同样可用。实测 paste 在按键后同一任务内
-// 到达（约 4ms），早于 setTimeout(0)，所以在定时器里决定走哪条路：
+// 带剪贴板数据的 paste 事件——它不依赖异步剪贴板 API，内网 http 访问下同样可用。等这次按键引起的 paste 到了再决定：
 //   - 本机剪贴板有图片、且它比容器剪贴板「新」→ 上传写入容器 X 剪贴板并在容器里按 Ctrl+V（onImage）
 //   - 其余情况 → 在容器里按一次 Ctrl+V（onPlainPaste），粘贴的仍是容器剪贴板，与以前完全一致
 //     （例如在微信里复制一条消息再粘到别处——这条最常用的路径不能被改变）
 // 不能把截下的按键「合成事件」还给 noVNC：实测按键松开得快时，重放时修饰键已抬起，远端只收到一个 v。
 // 改由服务端 xdotool 按 Ctrl+V（先松开它自己按住的修饰键，见 docker.ts xdoKey），与用户按多久无关。
+//
+// 一次按键只粘一次（#159「粘贴本机图片会出现两张」）。此前有两处会多粘：
+//   - 按住稍久触发的自动重复（e.repeat）没截、原样交给了 noVNC：macOS 上 KasmVNC 把 Cmd+V 翻译成 Ctrl+V，
+//     每次重复都在应用里再粘一次容器剪贴板（图片还没传完时是上一张图，传完了是同一张）；Windows / Linux 上服务端
+//     按 Ctrl+V 前已松开 Ctrl，重复就成了一串「v」打进输入框。实测按住 0.6 秒：Mac 上粘出 3 张图，Linux 上多出 vvvv。
+//   - 此前在 setTimeout(0) 里决定，前提是 paste 一定在按键的同一任务里到达。Chrome 如此，但菜单驱动粘贴的浏览器
+//     （Safari 的 Cmd+V 要绕一圈 UI 进程）会晚到：定时器先按「没有 paste」粘了容器剪贴板，晚到的 paste 又带着本机
+//     图片再粘一次。现在 paste 一到就当场决定；最多等 PASTE_EVENT_WAIT_MS，等不到才粘容器剪贴板，此后晚到的 paste
+//     只拦下、不再粘。
 //
 // 「谁更新」：本机剪贴板里可能躺着很久以前的截图，而用户刚在微信里复制了一张图——此时应粘容器的。
 // 回到页面（focus）视为可能刚在外面复制/截图 → 本机为新；在桌面里 Ctrl/Cmd+C、X 或右键（微信里复制）→ 容器为新。
@@ -192,6 +201,10 @@ function installSeamlessIme(
 //
 // 文字同理（onLocalText）：本机剪贴板的文字比容器的新（在别处复制后回来直接 Ctrl+V，或局域网 http 下浏览器
 // 根本不同步剪贴板），就把本机文字贴进去；否则按原样在容器里 Ctrl+V，应用内复制粘贴保留应用自己的格式。
+// 等 paste 的上限：Chrome 的 paste 与按键同一任务到达，根本用不到；它只兜「这次按键不会有 paste」（如焦点不在
+// 可编辑处时部分浏览器不派发）和慢浏览器，太长会让这类情况每次粘贴都慢半拍。
+const PASTE_EVENT_WAIT_MS = 400;
+const LATE_PASTE_MS = 2000; // 一次按键做出决定之后，这么久之内到达、又没有按键在等的 paste 视为回声
 function installPasteBridge(
   win: Window,
   doc: Document,
@@ -202,8 +215,9 @@ function installPasteBridge(
     onLocalText: (text: string, localIsFresh: boolean) => boolean;
   },
 ): () => void {
-  type Pending = { handled: boolean; text: string };
-  let pending: Pending | null = null;
+  type Pending = { timer: number };
+  let pending: Pending | null = null; // 已截下、还在等 paste 的那次按键
+  let settledAt = -Infinity; // 上一次按键做出决定的时刻：其后 LATE_PASTE_MS 内到达的 paste 是它的回声
   let localIsFresh = true;
   let lastLocalImage = ''; // 上次在 paste 里见到的本机图片签名
   const isKey = (e: KeyboardEvent, code: string, key: string) =>
@@ -215,37 +229,63 @@ function installPasteBridge(
       localIsFresh = false; // 在应用里复制/剪切 → 容器剪贴板更新（按键照常交给 noVNC）
       return;
     }
-    if (e.repeat || !isKey(e, 'KeyV', 'v')) return;
+    if (!isKey(e, 'KeyV', 'v')) return;
     e.stopImmediatePropagation();
-    const p: Pending = { handled: false, text: '' };
+    // 按住不放的自动重复：截下、什么都不做（见上）。还要 preventDefault：不拦的话浏览器每次重复都执行一次「粘贴」、
+    // 派发 paste（实测按住 0.8 秒来了 4 个），按得够久就会被当成新的粘贴；此前它们落到 noVNC 手里，是 noVNC 拦的
+    if (e.repeat) {
+      e.preventDefault();
+      return;
+    }
+    // 上一次还没等到 paste 又按了一次：上一次按「没有 paste」粘容器剪贴板，按几次就粘几次
+    if (pending) settle(handlers.onPlainPaste);
+    const p: Pending = {
+      timer: win.setTimeout(() => {
+        if (pending === p) settle(handlers.onPlainPaste);
+      }, PASTE_EVENT_WAIT_MS),
+    };
     pending = p;
-    win.setTimeout(() => {
-      if (pending === p) pending = null;
-      if (p.handled) return;
-      if (p.text && handlers.onLocalText(p.text, localIsFresh)) return;
-      handlers.onPlainPaste();
-    }, 0);
+  };
+  // 这次按键有了结论：清掉等待、记下时刻，再执行
+  const settle = (act: () => void) => {
+    if (pending) win.clearTimeout(pending.timer);
+    pending = null;
+    settledAt = Date.now();
+    act();
   };
 
   const onPaste = (e: ClipboardEvent) => {
+    const fromKey = pending !== null;
     // 由我们截下的 Ctrl/Cmd+V 引起的粘贴：一律阻止浏览器默认插入，粘什么只由我们决定。
     // 否则无感模式下焦点在 KasmVNC 的输入框（noVNC_keyboardinput），浏览器会把本机剪贴板文字原样插进去，
     // KasmVNC 再把它当键入发给远端——既改变了粘贴语义，还会把本机剪贴板里的敏感内容打进应用（实测发生过）。
-    if (pending) e.preventDefault();
+    // 等不到 paste 已按容器剪贴板粘过的那次按键，它晚到的 paste（回声）同样拦下，且不再粘第二次。
+    const echo = !fromKey && Date.now() - settledAt < LATE_PASTE_MS;
+    if (fromKey || echo) e.preventDefault();
+    if (echo) return;
     const item = Array.from(e.clipboardData?.items || []).find((i) => i.kind === 'file' && i.type.startsWith('image/'));
     const file = item?.getAsFile();
     if (!file) {
-      if (pending) pending.text = e.clipboardData?.getData('text/plain') || ''; // 交给定时器判断本机 / 容器谁新
+      if (!fromKey) return; // 不是截下的按键引起的（如浏览器菜单里的粘贴）：照旧不管
+      const text = e.clipboardData?.getData('text/plain') || '';
+      // 判断本机 / 容器谁新：本机的新就贴本机文字，否则粘容器剪贴板
+      settle(() => {
+        if (!(text && handlers.onLocalText(text, localIsFresh))) handlers.onPlainPaste();
+      });
       return;
     }
     const sig = `${file.type}:${file.size}`;
     const isNewImage = sig !== lastLocalImage;
     lastLocalImage = sig;
-    if (!localIsFresh && !isNewImage) return; // 同一张旧图、之后在应用里复制过 → 让定时器粘容器剪贴板
+    if (!localIsFresh && !isNewImage) {
+      // 同一张旧图、之后在应用里复制过 → 粘容器剪贴板
+      if (fromKey) settle(handlers.onPlainPaste);
+      return;
+    }
     localIsFresh = true;
     e.preventDefault();
-    if (pending) pending.handled = true;
-    handlers.onImage(file);
+    if (fromKey) settle(() => handlers.onImage(file));
+    else handlers.onImage(file);
   };
 
   const onFocus = () => {
@@ -826,15 +866,24 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     if (!win || !doc) return;
     return installPasteBridge(win, doc, window, {
       onImage: async (file) => {
-        if (pastingImage.current) return;
+        if (pastingImage.current) {
+          toast('上一张图片还在粘贴，请稍候', 'info');
+          return;
+        }
         pastingImage.current = true;
-        toast('正在粘贴本机图片…', 'ok');
         try {
-          await api.pasteImage(id, file);
+          // 先传原图，旧实例 / 反代拒收大图时再压缩重试一次（#165，原因与策略见 pasteImage.ts）
+          toast('正在粘贴本机图片…', 'ok');
+          await pasteImageWithFallback(
+            file,
+            (b) => api.pasteImage(id, b),
+            async (b) => (await fitPasteImage(b, browserImageCodec)).blob,
+            () => toast(`图片较大（${fmtUploadSize(file.size)}），正在压缩后重试…`, 'ok'),
+          );
         } catch (e: any) {
           toast(e?.message || '粘贴图片失败：请确认实例已「升级实例」', 'error');
         } finally {
-          pastingImage.current = false;
+          pastingImage.current = false; // 任何失败都要放开，否则之后的粘贴全被当成「上一张还在粘」吞掉
         }
       },
       // 粘贴容器剪贴板：失败时静默（与以前按键直通 noVNC 一样，不额外打扰）

@@ -78,6 +78,22 @@ ENV LANG=zh_CN.UTF-8 \
 COPY woc-www-patch.sh woc-ime.pl /woc/
 RUN chmod 755 /woc/woc-www-patch.sh && chmod 644 /woc/woc-ime.pl && /woc/woc-www-patch.sh
 
+# KasmVNC 不再去取 image/png 剪贴板（#165「大于 1M 的图片粘贴卡死」、#159「QQ Ctrl+V 黑屏、重启才恢复」）。
+# Xvnc 在 CLIPBOARD 一换主人就按 DLP_ClipTypes（默认 text/html,image/png）去取内容、准备同步给浏览器，
+# 但超过 ~1MB 的数据要走 INCR 分段，它从不把 INCR 收完。面板用 xclip 把粘贴的图片放进剪贴板，xclip 一次只服务一个
+# INCR 请求者、且不超时，于是卡死在 Xvnc 身上，此后谁来读剪贴板都没有应答：应用按 Ctrl+V 跟着挂住（Chromium 内核的
+# 浏览器实例 / QQ 页面无响应，且要重启应用才恢复），换了新内容旧 xclip 也不退出、越积越多。
+# 实测（KasmVNC 1.3.3，有无 VNC 客户端连着都一样）：1,040,000 字节的 PNG 正常、1,060,000 字节必卡；
+# 去掉 image/png 后 3MB 的 PNG 立刻可读；SendCutText=0 或 DLP_ClipSendMax 限额都无效（照样先去取）；
+# 这几个参数只能在 Xvnc 启动时给（运行中 vncconfig -set 被拒），所以改 base 镜像的启动脚本。
+# 代价：KasmVNC 自带的「图片剪贴板同步」不再处理 PNG（应用里复制的图片不再自动进 https 访问时的本机剪贴板）；
+# 本机图片粘进应用走面板的粘贴桥（Desktop.tsx installPasteBridge），不受影响；文字剪贴板同步照旧。
+# 旧镜像上面板会先把图片压到 1MB 以内（web/src/pasteImage.ts），这里是从根上不让它再卡。
+# 启动脚本来自滚动的 base 镜像：改完必须能 grep 到，否则构建直接失败，免得悄悄失效。
+RUN f=/etc/s6-overlay/s6-rc.d/svc-kasmvnc/run; \
+    grep -q -- '-DLP_ClipTypes' "$f" || sed -i 's|/usr/local/bin/Xvnc \$DISPLAY \\|/usr/local/bin/Xvnc $DISPLAY -DLP_ClipTypes text/html \\|' "$f"; \
+    grep -q -- '/usr/local/bin/Xvnc \$DISPLAY -DLP_ClipTypes text/html \\' "$f"
+
 # 微信下载/解压控制脚本（运行时由面板经 docker exec 触发，状态写入数据卷 /config/.woc-state）
 COPY wechat-ctl.sh /woc/wechat-ctl.sh
 RUN chmod 755 /woc/wechat-ctl.sh
