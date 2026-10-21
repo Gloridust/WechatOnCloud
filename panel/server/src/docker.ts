@@ -1758,8 +1758,16 @@ export async function snapshotContainerLog(inst: Instance, reason: string): Prom
 // Ctrl+V，这时用户往往还按着 Ctrl：xdotool 按完后用它自己的虚拟键盘（XTEST）把 Ctrl 按回去，而用户松手是从 VNC 键盘
 // 来的，XTEST 这边的 Ctrl 就一直按着。下一次 xdotool 再按 Ctrl 被当成重复按键吞掉，应用收到的是光秃秃的 v——
 // 实测粘完图片接着打中文，发出去的是「v」。先 keyup 一遍既能清掉这种残留（包括旧版本留下的），又不会再按回去。
-const XDO_RELEASE_MODS = 'xdotool keyup Control_L Control_R Shift_L Shift_R Alt_L Alt_R Meta_L Meta_R Super_L Super_R ISO_Level3_Shift';
-const xdoKey = (key: string) => `${XDO_RELEASE_MODS}\nxdotool key ${key}`;
+// 松开这一步必须带 --delay 0（#155）：xdotool 每发一个键默认要 sleep 12ms（--delay 的默认值），11 个修饰键逐个
+// 松开就是白等 ~130ms——实测这一行 159ms，1.5.1 起每次打字、回车、退格都因此多等 ~160ms，无感输入的队列又是串行的，
+// 「你好」+ 空格 + 回车一串要多等 ~440ms。松开没按着的键，X server 直接丢弃、应用一个事件都收不到（实测），没有
+// 需要等的；真按着的残留照样被松开。真正的按键（key）保持默认节奏，与一直以来的一样。
+// 松开与按键串在同一个 xdotool 进程里（xdotool 支持命令串联），省一次进程启动。
+// 不改成「只松开组合键里的修饰键 / 一段时间内只松一次」：带 --delay 0 后全松一遍只多 ~2.5ms，还不如判断时间窗要跑的
+// date + stat（~2.7ms）贵；只松组合里的修饰键，残留的 Ctrl 会混进回车、退格（Chromium 里实测 Ctrl+退格删掉一整个词、
+// 回车不换行）；时间窗内又出现的残留也清不掉（实测照样出「v」）。
+const XDO_RELEASE_MODS = 'Control_L Control_R Shift_L Shift_R Alt_L Alt_R Meta_L Meta_R Super_L Super_R ISO_Level3_Shift';
+const xdoKey = (key: string) => `xdotool keyup --delay 0 ${XDO_RELEASE_MODS} key ${key}`;
 
 const X_PRELUDE = [
   'set -e',
@@ -1816,8 +1824,10 @@ function cancelClipRestore(id: string): boolean {
   clipTimers.delete(id);
   return true;
 }
+// 打字 / 单键 / 归还这几条每打一个词都要跑，用 sh（实例里是 dash）而不是 bash：脚本全是 POSIX，dash 启动更轻。
+// 开发机上实测差别 ≤1ms，但有用户在自己的机器上测得 bash -c true 73ms、sh -c true 36ms（#155）；行为不变，就用 sh。
 async function restoreClipboard(inst: Instance): Promise<void> {
-  await execCapture(inst, ['bash', '-c', [...X_PRELUDE, CLIP_RESTORE].join('\n')]).catch(() => {});
+  await execCapture(inst, ['sh', '-c', [...X_PRELUDE, CLIP_RESTORE].join('\n')]).catch(() => {});
 }
 function scheduleClipRestore(inst: Instance): void {
   cancelClipRestore(inst.id);
@@ -1845,7 +1855,7 @@ export async function typeInInstance(inst: Instance, text: string): Promise<void
   await withClipLock(inst.id, async () => {
     cancelClipRestore(inst.id);
     try {
-      await execCapture(inst, ['bash', '-c', cmd]);
+      await execCapture(inst, ['sh', '-c', cmd]);
     } finally {
       scheduleClipRestore(inst);
     }
@@ -1915,13 +1925,13 @@ export async function keyInInstance(inst: Instance, key: string): Promise<void> 
     xdoKey(key),
   ].join('\n');
   if (!/^ctrl\+v$/i.test(key)) {
-    await execCapture(inst, ['bash', '-c', cmd]);
+    await execCapture(inst, ['sh', '-c', cmd]);
     return;
   }
   // 粘贴：打字借用的剪贴板若还没归还，先归还再按，免得贴出刚打的字
   await withClipLock(inst.id, async () => {
     if (cancelClipRestore(inst.id)) await restoreClipboard(inst);
-    await execCapture(inst, ['bash', '-c', cmd]);
+    await execCapture(inst, ['sh', '-c', cmd]);
   });
 }
 
