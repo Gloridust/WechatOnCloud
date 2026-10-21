@@ -1888,15 +1888,39 @@ const PASTE_IMAGE_TYPES: Record<string, string> = {
 // xclip 就此卡住，应用按 Ctrl+V 读剪贴板跟着卡：Chromium 内核的应用（浏览器实例、QQ）页面无响应，且之后每次粘贴都卡、
 // 要重启应用才恢复；换了新内容旧 xclip 也不退出。有无 VNC 客户端连着都一样。实测 1,040,000 字节正常、1,060,000 字节
 // 必卡；同样 3MB 的 image/jpeg、image/gif 不卡（Xvnc 不取）。新实例镜像启动 Xvnc 时去掉了 image/png（docker/Dockerfile），
-// 从根上不再卡；旧实例（没「升级实例」）靠这里：PNG 必须小于 PASTE_IMAGE_PNG_MAX（前端先压缩，见 web/src/pasteImage.ts，
-// 这里兜底拒收），其它类型照旧。
+// 从根上不再卡，这类实例放行原图；旧实例（没「升级实例」）PNG 必须小于 PASTE_IMAGE_PNG_MAX——服务端拒收并回原因码，
+// 前端据此压缩后重试（见 web/src/pasteImage.ts）。其它类型照旧。
 export const PASTE_IMAGE_PNG_MAX = 1_000_000;
 export const PASTE_IMAGE_PNG_TOO_BIG =
   'PNG 图片超过 1MB：放进容器剪贴板会让应用卡死（KasmVNC 取剪贴板的缺陷）。请刷新面板页面后重试（新版会自动压缩），或改用「文件」发送';
-export async function pasteImageInInstance(inst: Instance, mime: string, content: Buffer): Promise<void> {
+
+// 该实例的 KasmVNC 是否已不再去取 image/png 剪贴板（即大 PNG 不会卡死）。直接看正在跑的 Xvnc 的启动参数，而不是猜镜像版本：
+// 自构建镜像、未来换了启动脚本的 base 镜像都能如实判断。按「容器 id + 启动时间」缓存——升级实例 / 重启都会换掉它们。
+// 判断不了（容器没起、Xvnc 不在、exec 失败）一律按「没修复」处理：最坏只是多压缩一次，绝不会因此卡死应用。
+const largePngSafeCache = new Map<string, boolean>();
+export async function instanceAcceptsLargePng(inst: Instance): Promise<boolean> {
+  try {
+    const info: any = await docker.getContainer(inst.containerName).inspect();
+    const key = `${info.Id}@${info.State?.StartedAt}`;
+    const hit = largePngSafeCache.get(key);
+    if (hit !== undefined) return hit;
+    const out = await execCapture(inst, ['sh', '-c', 'p=$(pgrep -x Xvnc | head -1); [ -n "$p" ] && tr "\\0" " " < /proc/$p/cmdline']);
+    const m = out.match(/-DLP_ClipTypes\s+(\S+)/);
+    const safe = !!m && !m[1].split(',').includes('image/png');
+    if (out.trim()) {
+      if (largePngSafeCache.size > 200) largePngSafeCache.clear();
+      largePngSafeCache.set(key, safe); // 只缓存拿到了 Xvnc 参数的结果，免得把「Xvnc 还没起来」当成定论
+    }
+    return safe;
+  } catch {
+    return false;
+  }
+}
+
+export async function pasteImageInInstance(inst: Instance, mime: string, content: Buffer, allowLargePng = false): Promise<void> {
   const ext = PASTE_IMAGE_TYPES[mime];
   if (!ext) throw new Error('不支持的图片类型');
-  if (mime === 'image/png' && content.length > PASTE_IMAGE_PNG_MAX) throw new Error(PASTE_IMAGE_PNG_TOO_BIG);
+  if (mime === 'image/png' && content.length > PASTE_IMAGE_PNG_MAX && !allowLargePng) throw new Error(PASTE_IMAGE_PNG_TOO_BIG);
   const name = `woc-paste-${Date.now()}.${ext}`;
   await withClipLock(inst.id, async () => {
     cancelClipRestore(inst.id); // 有意换成这张图，之前打字借用的剪贴板不再归还

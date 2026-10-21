@@ -237,6 +237,16 @@ async function req<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
   return data as T;
 }
 
+// 粘贴图片失败时带上「为什么失败」，前端据此决定要不要压缩后重试（见 pasteImage.ts 的 pasteImageWithFallback）
+export interface PasteError extends Error {
+  status?: number; // HTTP 状态码（面板或反代）
+  code?: string; // 面板给的原因码：png_too_big / clipboard_stuck
+  kind?: 'network' | 'timeout';
+}
+function pasteError(message: string, extra: Partial<PasteError>): PasteError {
+  return Object.assign(new Error(message), extra);
+}
+
 export const api = {
   me: () => req<{ user: PanelUser }>('/api/auth/me'),
   login: (username: string, password: string) =>
@@ -365,15 +375,16 @@ export const api = {
       });
     } catch (e: any) {
       if (ctl.signal.aborted) {
-        throw new Error(`粘贴图片超时（${Math.round(ms / 1000)} 秒没传完）：网络太慢或反向代理卡住了上传，可改用「文件」发送`);
+        throw pasteError(`粘贴图片超时（${Math.round(ms / 1000)} 秒没传完）：网络太慢或反向代理卡住了上传，可改用「文件」发送`, { kind: 'timeout' });
       }
       if (/重新验证/.test(e?.message || '')) throw e; // apiFetch：反代身份网关要重新认证，页面正在重载
-      throw new Error('粘贴图片失败：连接中断（网络断开，或反向代理限制了上传大小 / 时长）');
+      // 反代按大小拒收时，有的会在浏览器还在上传时直接断开连接，前端看到的是网络错误而不是 413
+      throw pasteError('粘贴图片失败：连接中断（网络断开，或反向代理限制了上传大小 / 时长）', { kind: 'network' });
     } finally {
       clearTimeout(timer);
     }
     const data: any = await res.json().catch(() => null);
-    if (!res.ok) throw new Error(data?.error || pasteImageHttpError(res.status, file.size));
+    if (!res.ok) throw pasteError(data?.error || pasteImageHttpError(res.status, file.size), { status: res.status, code: data?.code });
     if (!data?.ok) throw new Error('粘贴结果未知（收到的不是面板的响应），请刷新页面后重试');
     return data;
   },

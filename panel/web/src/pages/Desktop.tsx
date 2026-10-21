@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, appProfile, fmtUploadSize } from '../api';
-import { browserImageCodec, fitPasteImage, pasteImageNeedsFit } from '../pasteImage';
+import { browserImageCodec, fitPasteImage, pasteImageWithFallback } from '../pasteImage';
 import { useUI } from '../ui';
 import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
@@ -872,15 +872,14 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
         }
         pastingImage.current = true;
         try {
-          // 超过 1MB 先压缩（#165，原因见 pasteImage.ts）：大 PNG 会卡死容器剪贴板、让应用无响应，反代也会 413
-          let blob: Blob = file;
-          if (pasteImageNeedsFit(file)) {
-            toast(`图片较大（${fmtUploadSize(file.size)}），正在压缩后粘贴…`, 'ok');
-            blob = (await fitPasteImage(file, browserImageCodec)).blob;
-          } else {
-            toast('正在粘贴本机图片…', 'ok');
-          }
-          await api.pasteImage(id, blob);
+          // 先传原图，旧实例 / 反代拒收大图时再压缩重试一次（#165，原因与策略见 pasteImage.ts）
+          toast('正在粘贴本机图片…', 'ok');
+          await pasteImageWithFallback(
+            file,
+            (b) => api.pasteImage(id, b),
+            async (b) => (await fitPasteImage(b, browserImageCodec)).blob,
+            () => toast(`图片较大（${fmtUploadSize(file.size)}），正在压缩后重试…`, 'ok'),
+          );
         } catch (e: any) {
           toast(e?.message || '粘贴图片失败：请确认实例已「升级实例」', 'error');
         } finally {

@@ -75,6 +75,7 @@ import {
   keyInInstance,
   pasteImageInInstance,
   PASTE_IMAGE_PNG_MAX,
+  instanceAcceptsLargePng,
   PASTE_IMAGE_PNG_TOO_BIG,
   pasteTextInInstance,
   listOrphanVolumes,
@@ -1063,17 +1064,22 @@ app.post('/api/instances/:id/paste-image', async (req, reply) => {
   const holder = claimControl(u, id);
   if (holder) return reply.code(409).send(controlBusy(holder));
   const mime = String((req.query as any)?.type || '').toLowerCase();
-  // PNG 超过 1MB 会卡死容器剪贴板（见 docker.ts PASTE_IMAGE_PNG_MAX）。新前端先压缩，这里兜旧页面缓存 / 直接调接口：
-  // 照声明长度当场拒收，不必把整张图收进内存
+  // PNG 超过 1MB 会卡死【旧】实例的容器剪贴板（见 docker.ts PASTE_IMAGE_PNG_MAX）。已修复的实例（新镜像）放行原图；
+  // 旧实例照声明长度当场拒收（不必把整张图收进内存），并回 code=png_too_big，前端据此压缩后重试
   const isPng = mime === 'image/png';
-  const limit = isPng ? PASTE_IMAGE_PNG_MAX : 64 * MiB;
+  const largeOk = isPng && (await instanceAcceptsLargePng(inst));
+  const limit = isPng && !largeOk ? PASTE_IMAGE_PNG_MAX : 64 * MiB;
   try {
     const body = await readBody(req, limit);
     if (!body.length) return reply.code(400).send({ error: '空图片' });
-    await pasteImageInInstance(inst, mime, body);
+    await pasteImageInInstance(inst, mime, body, largeOk);
     return { ok: true };
   } catch (e: any) {
-    if (isPng && Number(e?.statusCode) === 413) return reply.code(413).send({ error: PASTE_IMAGE_PNG_TOO_BIG });
+    if (isPng && !largeOk && (Number(e?.statusCode) === 413 || e?.message === PASTE_IMAGE_PNG_TOO_BIG)) {
+      return reply.code(413).send({ error: PASTE_IMAGE_PNG_TOO_BIG, code: 'png_too_big' });
+    }
+    // 粘贴前确认剪贴板读不出这张图（仍会卡住）：同样让前端压缩重试
+    if (/容器剪贴板没有响应/.test(e?.message || '')) return reply.code(503).send({ error: e.message, code: 'clipboard_stuck' });
     return sendUploadError(reply, e, '粘贴图片失败');
   }
 });
