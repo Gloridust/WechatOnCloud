@@ -1881,9 +1881,22 @@ const PASTE_IMAGE_TYPES: Record<string, string> = {
   'image/webp': 'webp',
   'image/bmp': 'bmp',
 };
+//
+// ⚠️ 大于约 1MB 的 PNG 会卡死容器剪贴板（#165，#159 的 QQ 黑屏同源）：xclip 单次最多直接交出
+// XExtendedMaxRequestSize/4 ≈ 1,048,575 字节，更大的走 INCR 分段，INCR 进行中不理会任何别的请求、也不超时。KasmVNC
+// 的 Xvnc 在剪贴板一变就按 DLP_ClipTypes（默认 text/html,image/png）来取内容准备同步给浏览器，却从不把 INCR 收完——
+// xclip 就此卡住，应用按 Ctrl+V 读剪贴板跟着卡：Chromium 内核的应用（浏览器实例、QQ）页面无响应，且之后每次粘贴都卡、
+// 要重启应用才恢复；换了新内容旧 xclip 也不退出。有无 VNC 客户端连着都一样。实测 1,040,000 字节正常、1,060,000 字节
+// 必卡；同样 3MB 的 image/jpeg、image/gif 不卡（Xvnc 不取）。新实例镜像启动 Xvnc 时去掉了 image/png（docker/Dockerfile），
+// 从根上不再卡；旧实例（没「升级实例」）靠这里：PNG 必须小于 PASTE_IMAGE_PNG_MAX（前端先压缩，见 web/src/pasteImage.ts，
+// 这里兜底拒收），其它类型照旧。
+export const PASTE_IMAGE_PNG_MAX = 1_000_000;
+export const PASTE_IMAGE_PNG_TOO_BIG =
+  'PNG 图片超过 1MB：放进容器剪贴板会让应用卡死（KasmVNC 取剪贴板的缺陷）。请刷新面板页面后重试（新版会自动压缩），或改用「文件」发送';
 export async function pasteImageInInstance(inst: Instance, mime: string, content: Buffer): Promise<void> {
   const ext = PASTE_IMAGE_TYPES[mime];
   if (!ext) throw new Error('不支持的图片类型');
+  if (mime === 'image/png' && content.length > PASTE_IMAGE_PNG_MAX) throw new Error(PASTE_IMAGE_PNG_TOO_BIG);
   const name = `woc-paste-${Date.now()}.${ext}`;
   await withClipLock(inst.id, async () => {
     cancelClipRestore(inst.id); // 有意换成这张图，之前打字借用的剪贴板不再归还
@@ -1892,8 +1905,25 @@ export async function pasteImageInInstance(inst: Instance, mime: string, content
       ...X_PRELUDE,
       CLIP_DISCARD,
       "find /tmp -maxdepth 1 -name 'woc-paste-*' -mmin +10 -delete 2>/dev/null || true",
+      // 先清掉还活着的 xclip 持有者：正常情况下它们一失去选区就退出，但卡在 INCR 里的（见上，旧版本留下的）永远不退、
+      // 各自攥着整张图；这里本来就要换成新内容，清掉没有损失
+      "pkill -f '^xclip .*-i /tmp/' 2>/dev/null || true",
       // 同 typeInInstance：xclip 常驻后台持有选区，必须重定向 fd，否则 docker exec 要等它退出（~2s）
       `xclip -selection clipboard -t ${mime} -i /tmp/${name} >/dev/null 2>&1`,
+      // 按 Ctrl+V 之前确认剪贴板读得出这张图：万一仍卡住（别的 X 服务器上限、别的配置），这时按下去应用会跟着卡死，
+      // 不如放弃这次粘贴、清掉卡住的 xclip，明确报错。xclip 后台化时选区请求可能还没发出去，读不到就稍等重试；
+      // 读取超时（rc=124）才是卡住
+      'n=0',
+      'while :; do',
+      '  tg=$(timeout 2 xclip -o -selection clipboard -t TARGETS 2>/dev/null) && rc=0 || rc=$?',
+      `  if printf '%s\\n' "$tg" | grep -qxF '${mime}'; then break; fi`,
+      '  n=$((n + 1))',
+      '  if [ "$rc" = 124 ] || [ "$n" -ge 20 ]; then',
+      `    pkill -f '^xclip .*-i /tmp/${name}' 2>/dev/null || true`,
+      "    echo '容器剪贴板没有响应，已放弃这次粘贴（图片可能太大，请改用「文件」发送）' >&2; exit 3",
+      '  fi',
+      '  sleep 0.05',
+      'done',
       xdoKey('ctrl+v'),
     ].join('\n');
     await execCapture(inst, ['bash', '-c', cmd]);

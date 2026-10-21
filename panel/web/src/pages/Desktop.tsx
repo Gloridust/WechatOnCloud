@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, appProfile } from '../api';
+import { api, appProfile, fmtUploadSize } from '../api';
+import { browserImageCodec, fitPasteImage, pasteImageNeedsFit } from '../pasteImage';
 import { useUI } from '../ui';
 import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
@@ -826,15 +827,25 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     if (!win || !doc) return;
     return installPasteBridge(win, doc, window, {
       onImage: async (file) => {
-        if (pastingImage.current) return;
+        if (pastingImage.current) {
+          toast('上一张图片还在粘贴，请稍候', 'info');
+          return;
+        }
         pastingImage.current = true;
-        toast('正在粘贴本机图片…', 'ok');
         try {
-          await api.pasteImage(id, file);
+          // 超过 1MB 先压缩（#165，原因见 pasteImage.ts）：大 PNG 会卡死容器剪贴板、让应用无响应，反代也会 413
+          let blob: Blob = file;
+          if (pasteImageNeedsFit(file)) {
+            toast(`图片较大（${fmtUploadSize(file.size)}），正在压缩后粘贴…`, 'ok');
+            blob = (await fitPasteImage(file, browserImageCodec)).blob;
+          } else {
+            toast('正在粘贴本机图片…', 'ok');
+          }
+          await api.pasteImage(id, blob);
         } catch (e: any) {
           toast(e?.message || '粘贴图片失败：请确认实例已「升级实例」', 'error');
         } finally {
-          pastingImage.current = false;
+          pastingImage.current = false; // 任何失败都要放开，否则之后的粘贴全被当成「上一张还在粘」吞掉
         }
       },
       // 粘贴容器剪贴板：失败时静默（与以前按键直通 noVNC 一样，不额外打扰）

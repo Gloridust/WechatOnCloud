@@ -74,6 +74,8 @@ import {
   typeInInstance,
   keyInInstance,
   pasteImageInInstance,
+  PASTE_IMAGE_PNG_MAX,
+  PASTE_IMAGE_PNG_TOO_BIG,
   pasteTextInInstance,
   listOrphanVolumes,
   removeVolume,
@@ -1061,12 +1063,17 @@ app.post('/api/instances/:id/paste-image', async (req, reply) => {
   const holder = claimControl(u, id);
   if (holder) return reply.code(409).send(controlBusy(holder));
   const mime = String((req.query as any)?.type || '').toLowerCase();
+  // PNG 超过 1MB 会卡死容器剪贴板（见 docker.ts PASTE_IMAGE_PNG_MAX）。新前端先压缩，这里兜旧页面缓存 / 直接调接口：
+  // 照声明长度当场拒收，不必把整张图收进内存
+  const isPng = mime === 'image/png';
+  const limit = isPng ? PASTE_IMAGE_PNG_MAX : 64 * MiB;
   try {
-    const body = await readBody(req, 64 * MiB);
+    const body = await readBody(req, limit);
     if (!body.length) return reply.code(400).send({ error: '空图片' });
     await pasteImageInInstance(inst, mime, body);
     return { ok: true };
   } catch (e: any) {
+    if (isPng && Number(e?.statusCode) === 413) return reply.code(413).send({ error: PASTE_IMAGE_PNG_TOO_BIG });
     return sendUploadError(reply, e, '粘贴图片失败');
   }
 });

@@ -145,6 +145,20 @@ function uploadHttpError(status: number): string {
   return `上传失败（HTTP ${status}）`;
 }
 
+// 粘贴图片的超时：30 秒起步，再按 32KB/s（约 256kbps 的慢上行）给足传输时间。压缩后的图不到 1MB，约一分钟；
+// 原样上传的大 GIF 相应放宽。不设超时的话，网络卡住时请求一直挂着，界面停在「正在粘贴」。
+export function pasteImageTimeoutMs(size: number): number {
+  return 30_000 + Math.ceil(size / 32_768) * 1000;
+}
+// 面板自己的错误都带 JSON（走不到这里）；没有 JSON 的 413 / 502 / 504 是反向代理回的
+export function pasteImageHttpError(status: number, size: number): string {
+  if (status === 413) {
+    return `图片（${fmtUploadSize(size)}）被反向代理拒收（HTTP 413）：反代限制了上传大小，nginx 默认只放行 1MB，请把 client_max_body_size 调大（如 50m）`;
+  }
+  if (status === 502 || status === 504) return `粘贴图片失败（HTTP ${status}）：反向代理超时，或面板正在重启`;
+  return `粘贴图片失败（HTTP ${status}）`;
+}
+
 // 原始二进制上传（File 直传 application/octet-stream），带上传进度（fetch 拿不到上传进度，这里用 XHR）
 async function rawUpload(url: string, file: Blob, onProgress?: UploadProgress): Promise<any> {
   // 先发个普通请求探路：登录已失效、或反代身份网关要重新认证（apiFetch 会整页重载去认证）时，在这里就拦下，
@@ -333,16 +347,35 @@ export const api = {
     assertUploadSize(file, UPLOAD_LIMITS.transfer);
     return rawUpload(`/api/instances/${id}/upload?name=${encodeURIComponent(file.name)}`, file, onProgress);
   },
-  // 本机剪贴板图片 → 容器 X 剪贴板 → Ctrl+V（issue #91）
+  // 本机剪贴板图片 → 容器 X 剪贴板 → Ctrl+V（issue #91）。调用方先用 fitPasteImage 把图压到 1MB 以内（#165）。
+  // 每条失败路径都要落到一个能看懂、能照着做的错误上，且有超时：此前反代回 413 时只报「粘贴图片失败」，
+  // 网络卡住时请求可以一直挂着。
   pasteImage: async (id: string, file: Blob) => {
-    const res = await apiFetch(`/api/instances/${id}/paste-image?type=${encodeURIComponent(file.type)}`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/octet-stream' },
-      body: file,
-    });
-    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error || '粘贴图片失败');
-    return res.json();
+    const ctl = new AbortController();
+    const ms = pasteImageTimeoutMs(file.size);
+    const timer = setTimeout(() => ctl.abort(), ms);
+    let res: Response;
+    try {
+      res = await apiFetch(`/api/instances/${id}/paste-image?type=${encodeURIComponent(file.type)}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: file,
+        signal: ctl.signal,
+      });
+    } catch (e: any) {
+      if (ctl.signal.aborted) {
+        throw new Error(`粘贴图片超时（${Math.round(ms / 1000)} 秒没传完）：网络太慢或反向代理卡住了上传，可改用「文件」发送`);
+      }
+      if (/重新验证/.test(e?.message || '')) throw e; // apiFetch：反代身份网关要重新认证，页面正在重载
+      throw new Error('粘贴图片失败：连接中断（网络断开，或反向代理限制了上传大小 / 时长）');
+    } finally {
+      clearTimeout(timer);
+    }
+    const data: any = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || pasteImageHttpError(res.status, file.size));
+    if (!data?.ok) throw new Error('粘贴结果未知（收到的不是面板的响应），请刷新页面后重试');
+    return data;
   },
   downloadFileUrl: (id: string, name: string) => `/api/instances/${id}/download?name=${encodeURIComponent(name)}`,
   deleteFile: (id: string, name: string) => req(`/api/instances/${id}/files?name=${encodeURIComponent(name)}`, { method: 'DELETE' }),
