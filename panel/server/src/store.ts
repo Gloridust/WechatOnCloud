@@ -58,6 +58,12 @@ export interface Instance {
   // hard：内存超此值时，无论是否有人在会话都重启（防止 OOM 拖垮宿主）。
   memSoftLimitMB?: number;
   memHardLimitMB?: number;
+  // 容器还没建成功时的原因（#129）：创建/重试创建失败时写入，建成后清除。有值时面板启动不再自动重试
+  // （重试多半又要拉镜像，会把面板开始监听拖上好几分钟），卡片显示「创建失败」等管理员点重试。
+  // 创建开始时先写一个「未完成」占位：面板在创建途中重启时，重启后能看出这次创建没完成，而不是一个无解释的「未创建」。
+  createError?: string; // 哪一步、为什么（人话）
+  createErrorHint?: string; // 怎么办
+  createErrorAt?: string;
 }
 
 // 面板级全局设置（持久化进 accounts.json）。
@@ -390,6 +396,23 @@ export function setInstanceIcon(id: string, icon: string | null) {
   }
   persist();
   return publicInstance(inst);
+}
+
+// 记下 / 清除「容器没建成」的原因（见 Instance.createError）。实例已被删掉时静默忽略（后台创建与删除可能前后脚）。
+export function setInstanceCreateError(id: string, err: { summary: string; advice?: string } | null) {
+  const inst = findInstance(id);
+  if (!inst) return;
+  if (err) {
+    inst.createError = err.summary.slice(0, 500);
+    inst.createErrorHint = (err.advice || '').slice(0, 1000) || undefined;
+    inst.createErrorAt = new Date().toISOString();
+  } else {
+    if (inst.createError === undefined) return;
+    delete inst.createError;
+    delete inst.createErrorHint;
+    delete inst.createErrorAt;
+  }
+  persist();
 }
 
 export function removeInstance(id: string) {

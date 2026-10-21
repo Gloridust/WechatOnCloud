@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, appProfile } from '../api';
+import { api, appProfile, provisionProgressText } from '../api';
 import { useUI } from '../ui';
 import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
@@ -1347,8 +1347,9 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const start = async () => {
     setStarting(true);
     try {
-      await api.instanceStart(id);
-      toast('实例已启动', 'ok');
+      const r = await api.instanceStart(id);
+      // 容器不存在时服务端转为后台重新创建（可能要拉镜像）：本页每 3s 刷新状态，建好后自动切换
+      toast(r?.started ? '已开始创建容器…' : '实例已启动', r?.started ? 'info' : 'ok');
       await reload();
     } catch (e: any) {
       toast(e.message || '启动失败', 'error');
@@ -1446,13 +1447,26 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             </button>
           </div>
         </div>
+      ) : inst.provision?.state === 'creating' ? (
+        <div className="iv-stage iv-center">
+          <div className="iv-notice">
+            <div className="spinner" />
+            <div className="iv-notice-title">实例创建中…</div>
+            <div className="iv-notice-sub">{provisionProgressText(inst.provision)} ——完成后自动刷新，无需手动操作</div>
+          </div>
+        </div>
       ) : offline ? (
         <div className="iv-stage iv-center">
           <div className="iv-notice">
-            <div className="iv-notice-title">{inst.runtime === 'missing' ? '容器尚未创建' : '实例已停止'}</div>
+            <div className="iv-notice-title">
+              {inst.provision?.state === 'failed' ? '实例创建失败' : inst.runtime === 'missing' ? '容器尚未创建' : '实例已停止'}
+            </div>
+            {/* 创建失败（#129）：说清哪一步、为什么、怎么办（原因与建议只下发给管理员） */}
+            {inst.provision?.error && <div className="iv-notice-sub iv-notice-error">{inst.provision.error}</div>}
+            {inst.provision?.hint && <div className="inst-hint iv-notice-hint">{inst.provision.hint}</div>}
             {isAdmin ? (
               <button className="btn btn-primary iv-notice-btn" disabled={starting} onClick={start}>
-                {starting ? '启动中…' : inst.runtime === 'missing' ? '创建并启动' : '启动实例'}
+                {starting ? '启动中…' : inst.provision?.state === 'failed' ? '重试创建' : inst.runtime === 'missing' ? '创建并启动' : '启动实例'}
               </button>
             ) : (
               <div className="iv-notice-sub">请联系管理员启动该实例</div>

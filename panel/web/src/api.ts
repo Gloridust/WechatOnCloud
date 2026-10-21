@@ -69,6 +69,29 @@ export interface InstanceWithStatus extends PanelInstance {
   runtime: RuntimeState;
   wechat: WechatStatus;
   imageVersion?: string | null; // 实例镜像版本（CI 发布版如 "1.4.0"；自构建为镜像短 id；容器缺失为 null）
+  provision?: ProvisionInfo; // 容器还没建成时才有（#129）
+}
+
+// 实例容器的创建状态（#129）。creating：后台创建中，step=pulling 在拉实例镜像（downloadedMB/totalMB 为已知层的累计，
+// 总量随拉取推进变大）、container 在建容器；failed：创建失败，error（哪一步、为什么）/ hint（怎么办）只下发给管理员。
+export interface ProvisionInfo {
+  state: 'creating' | 'failed';
+  since?: number;
+  step?: 'pulling' | 'container';
+  downloadedMB?: number;
+  totalMB?: number;
+  at?: string;
+  error?: string;
+  hint?: string;
+}
+const fmtMB = (mb: number) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`);
+// 创建中的一句话进度，卡片 / 主页 / 桌面页共用
+export function provisionProgressText(p: ProvisionInfo): string {
+  if (p.step !== 'pulling') return '正在创建容器…';
+  const got = p.downloadedMB || 0;
+  const total = p.totalMB || 0;
+  if (!got) return '正在拉取实例镜像（首次约 1~2GB，连接镜像源中…）';
+  return `正在拉取实例镜像 · 已下载 ${fmtMB(got)}${total > got ? ` / ${fmtMB(total)}` : ''}`;
 }
 
 export interface VolEntry {
@@ -265,7 +288,7 @@ export const api = {
   // 微信实例
   listInstances: () => req<{ instances: InstanceWithStatus[] }>('/api/instances'),
   createInstance: (name: string, allowedUserIds: string[] = [], reuseVolume?: string, appType: AppType = 'wechat') =>
-    req<{ instance: PanelInstance }>('/api/admin/instances', {
+    req<{ instance: PanelInstance; started?: boolean }>('/api/admin/instances', {
       method: 'POST',
       body: JSON.stringify({ name, allowedUserIds, reuseVolume: reuseVolume || undefined, appType }),
     }),
@@ -303,7 +326,8 @@ export const api = {
   },
   instanceWechatInstall: (id: string) => req(`/api/admin/instances/${id}/wechat/install`, { method: 'POST' }),
   instanceWechatUpdate: (id: string) => req(`/api/admin/instances/${id}/wechat/update`, { method: 'POST' }),
-  instanceStart: (id: string) => req(`/api/admin/instances/${id}/start`, { method: 'POST' }),
+  // started=true：容器不存在，已转为后台重新创建（进度看 provision），不是「已启动」
+  instanceStart: (id: string) => req<{ ok: boolean; started?: boolean }>(`/api/admin/instances/${id}/start`, { method: 'POST' }),
   instanceStop: (id: string) => req(`/api/admin/instances/${id}/stop`, { method: 'POST' }),
   instanceRestart: (id: string) => req(`/api/admin/instances/${id}/restart`, { method: 'POST' }),
   // 单实例升级：异步（后端登记后立即返回），轮询 upgradeStatus().upgradingIds 直到该 id 移出。

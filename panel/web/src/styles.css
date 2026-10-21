@@ -1042,6 +1042,20 @@ button {
   color: var(--muted);
   min-height: 18px;
 }
+/* 创建失败（#129）：原因用危险色，「怎么办」放进淡红底的提示块（无边框，靠底色区分） */
+.inst-sub.is-error {
+  color: var(--danger);
+}
+.inst-hint {
+  margin-top: 8px;
+  padding: 9px 11px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+  background: rgba(var(--danger-rgb) / 0.08);
+  border-radius: 12px;
+  overflow-wrap: anywhere; /* 建议里有很长的镜像名，别把卡片撑宽 */
+}
 .inst-actions {
   display: flex;
   gap: 8px;
@@ -2145,6 +2159,15 @@ button {
 .iv-notice-btn {
   padding: 0 22px;
   height: 44px;
+}
+.iv-notice-error {
+  color: var(--danger);
+  max-width: 460px;
+}
+.iv-notice-hint {
+  max-width: 460px;
+  margin-top: 0;
+  text-align: left;
 }
 
 /* —— 移动端：侧栏变抽屉 —— */

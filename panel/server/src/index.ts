@@ -31,6 +31,7 @@ import {
   renameInstance,
   setInstanceIcon,
   setInstanceUsers,
+  setInstanceCreateError,
   publicInstance,
   getDesktopDark,
   setDesktopDark,
@@ -58,6 +59,8 @@ import {
   pruneOldWocImages,
   remoteInstanceImageNewer,
   resolveInstanceImage,
+  describeProvisionError,
+  imagePullProgress,
   removeInstance as removeInstanceContainer,
   instanceRuntime,
   instanceUptimeSec,
@@ -490,18 +493,64 @@ app.get('/api/instances', async (req, reply) => {
   if (!u) return;
   const visible = userInstances(u);
   const out = await Promise.all(
-    visible.map(async (pub) => {
-      const inst = findInstance(pub.id)!;
+    visible.map(async (inst) => {
       const [runtime, wx, imageVersion] = await Promise.all([
         instanceRuntime(inst),
         wechatStatus(inst),
         instanceImageVersion(inst), // 实例镜像版本（CI label；自构建为短 id）——让用户能自查"到底跑的哪版"
       ]);
-      return { ...pub, runtime, wechat: wx, imageVersion };
+      // 只下发 publicInstance：此前直接展开整条记录，连 kasm 凭据（store 里注明「永不下发前端」）和创建失败的原始报错也带给了浏览器
+      const provision = provisionView(inst, runtime, u.role === 'admin');
+      return { ...publicInstance(inst), runtime, wechat: wx, imageVersion, ...(provision ? { provision } : {}) };
     }),
   );
   return { instances: out };
 });
+
+// ---------- 创建实例（后台进行，#129） ----------
+// 创建要先确保实例镜像在本地：没有就拉（1~2GB，受限网络下几分钟，卡住时要等到停滞超时）。此前创建接口同步等全程：
+// 反代 ~60s 就掐断，前端报个莫名其妙的错；期间卡片只显示「未创建」，实例日志只有「实例创建」加一个 404，
+// 失败原因只进了面板全局日志，用户无从下手（#129）。现在按 R4：登记后立即返回，后台建容器；
+// 卡片经 provision 字段显示「创建中（拉取镜像 已下载 N MB）」，失败则显示原因、怎么办和「重试创建」，原因同时写进该实例的持久日志。
+const provisioning = new Map<string, number>(); // 实例 id → 本次创建开始时间
+const PENDING_CREATE = {
+  summary: '上次创建没有完成（创建途中面板重启了）',
+  advice: '点卡片上的「重试创建」即可，数据不受影响。',
+};
+function startProvision(inst: Instance, what: '创建' | '重试创建'): void {
+  if (provisioning.has(inst.id)) return; // 已在创建中：重复点击不再叠一次
+  provisioning.set(inst.id, Date.now());
+  // 先落一个「未完成」占位：面板若在创建途中重启，重启后卡片能说清这次创建没完成，启动时也不会自动重拉镜像拖住面板
+  setInstanceCreateError(inst.id, PENDING_CREATE);
+  appendInstanceLog(inst.id, `开始${what}容器（本地没有实例镜像时会先拉取，首次可能要几分钟）`);
+  void (async () => {
+    try {
+      await runInstance(inst);
+      setInstanceCreateError(inst.id, null);
+      appendPanelLog('INFO', `${what}实例「${inst.name}」(id=${inst.id}) 成功`);
+    } catch (e: any) {
+      const d = describeProvisionError(e);
+      setInstanceCreateError(inst.id, d);
+      appendInstanceLog(inst.id, `${what}失败：${d.summary}\n  怎么办：${d.advice}\n  原始错误：${d.raw}`);
+      appendPanelLog('ERROR', `${what}实例「${inst.name}」(id=${inst.id}) 失败：${d.summary}：${d.raw}`);
+    } finally {
+      provisioning.delete(inst.id);
+    }
+  })();
+}
+function provisionView(inst: Instance, runtime: string, admin: boolean) {
+  const since = provisioning.get(inst.id);
+  if (since) {
+    const pull = imagePullProgress(); // 拉取是全局的一份：创建期间有拉取在跑，就是这次创建在等它
+    return pull
+      ? { state: 'creating' as const, since, step: 'pulling' as const, downloadedMB: pull.downloadedMB, totalMB: pull.totalMB }
+      : { state: 'creating' as const, since, step: 'container' as const };
+  }
+  // 容器其实在（比如创建途中面板重启、但容器已经建好）就不算失败
+  if (!inst.createError || runtime !== 'missing') return null;
+  // 原因里可能带镜像源地址、宿主路径等部署细节：只给管理员看，子账号只知道「创建失败、请联系管理员」
+  return { state: 'failed' as const, at: inst.createErrorAt, ...(admin ? { error: inst.createError, hint: inst.createErrorHint } : {}) };
+}
 
 // 用户自助「卡死自愈」：当客户端检测到 VNC 多次干净重连仍连不上（多半是实例 KasmVNC 的 ws 接收器卡死——
 // nginx 仍能serve 静态页让 noVNC 显示"正在连接"，但新 ws 永远 accept 不了，刷新/重启面板都无效、只能重启容器），
@@ -569,15 +618,9 @@ app.post('/api/admin/instances', async (req, reply) => {
     `创建实例「${inst.name}」(${type}, id=${inst.id}) by ${admin.username}${reuseVolumeName ? ` · 复用卷 ${reuseVolumeName}` : ''} → 开始创建容器（镜像缺失会自动拉取，首次较慢）`,
   );
   appendInstanceLog(inst.id, `实例创建（${type}）by ${admin.username}`);
-  try {
-    await runInstance(inst);
-  } catch (e: any) {
-    removeInstanceRecord(inst.id); // 容器起不来则回滚登记
-    appendPanelLog('ERROR', `创建实例「${inst.name}」(id=${inst.id}) 失败：${e?.message || e}`);
-    return reply.code(500).send({ error: '创建容器失败：' + (e?.message || e) });
-  }
-  appendPanelLog('INFO', `创建实例「${inst.name}」(id=${inst.id}) 成功`);
-  return { instance: publicInstance(inst) };
+  // 不再同步等容器建好、失败也不再回滚登记（#129）：后台创建，失败时卡片显示原因 + 重试，见 startProvision
+  startProvision(inst, '创建');
+  return { instance: publicInstance(inst), started: true };
 });
 
 // 列出"未被任何实例引用的 woc-data-* 数据卷"。删除实例时默认保留卷（聊天记录），但 panel 里
@@ -713,6 +756,10 @@ app.delete('/api/admin/instances/:id', async (req, reply) => {
   const purge = (req.query as any)?.purge === '1' || (req.query as any)?.purge === 'true';
   const inst = findInstance(id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  // 后台创建还在跑时删掉登记，它稍后照样会建出一个没人管的容器：等创建结束（成功或失败）再删
+  if (provisioning.has(id)) {
+    return reply.code(409).send({ error: '实例正在创建，请等它结束后再删除（拉取卡住时几分钟内会自动判定失败）' });
+  }
   appendPanelLog('INFO', `删除实例「${inst.name}」(id=${id})${purge ? ' · 同时清除数据卷' : ' · 保留数据卷'}`);
   await removeInstanceContainer(inst, purge);
   removeInstanceRecord(id);
@@ -747,6 +794,13 @@ app.post('/api/admin/instances/:id/start', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   const inst = findInstance((req.params as any).id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  // 容器不存在（创建失败后点「重试创建」/ 容器被手动删了）= 重新创建，可能要拉镜像：和新建一样后台进行、立即返回
+  if (provisioning.has(inst.id)) return { ok: true, started: true }; // 已在创建中：重复点击不再叠一次
+  if ((await instanceRuntime(inst)) === 'missing') {
+    appendPanelLog('INFO', `重新创建实例「${inst.name}」(id=${inst.id}) 的容器`);
+    startProvision(inst, '重试创建');
+    return { ok: true, started: true };
+  }
   try {
     await ensureRunning(inst);
     appendPanelLog('INFO', `启动实例「${inst.name}」(id=${inst.id})`);
@@ -1882,8 +1936,19 @@ await resolveInstanceImage().catch(() => {});
 // 探测面板网络 + 重启后把已登记实例的容器拉起来
 await ensureNetwork().catch(() => {});
 for (const pub of listInstances()) {
+  const inst = findInstance(pub.id)!;
+  // 上次创建没成功的实例不在这里自动重试：重试多半又要拉镜像，会把面板开始监听拖上好几分钟（期间整个面板打不开）。
+  // 卡片会显示「创建失败」，等管理员点重试；容器其实已经建好了（创建途中面板重启）就清掉标记照常拉起。
+  if (inst.createError) {
+    if ((await instanceRuntime(inst)) === 'missing') {
+      appendPanelLog('WARN', `实例「${inst.name}」(id=${inst.id}) 上次创建没成功（${inst.createError}），启动时不自动重试，等管理员在卡片上点「重试创建」`);
+      if (inst.createError === PENDING_CREATE.summary) appendInstanceLog(inst.id, `${PENDING_CREATE.summary}，等管理员点「重试创建」`);
+      continue;
+    }
+    setInstanceCreateError(inst.id, null);
+  }
   try {
-    await ensureRunning(findInstance(pub.id)!);
+    await ensureRunning(inst);
   } catch (e: any) {
     app.log.warn(`[instance] 启动实例 ${pub.id} 失败: ${e?.message || e}`);
   }
