@@ -942,6 +942,145 @@ button {
   color: var(--danger);
 }
 
+/* ── 剪贴板历史（#138）：布局仿文件列表——左内容预览、右侧操作按钮 ── */
+.clip-hist-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 12px;
+  box-shadow: inset 0 1px  0 rgba(var(--shadow) / 0.08);
+  font-size: 14px;
+  font-weight: 700;
+  flex-wrap: nowrap;
+}
+.clip-hist-head > span:first-child {
+  flex: none;
+}
+.clip-hist-count {
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(var(--green-rgb) / 0.14);
+  color: var(--wx-green-dark);
+  font-size: 11px;
+  font-weight: 600;
+}
+.clip-hist-tools {
+  display: flex;
+  align-items: center;
+  flex: none;
+  flex-wrap: nowrap; /* 与标题、数量同处一行：手机窄屏也靠字号压缩而非换行 */
+  gap: 2px;
+  font-weight: 400;
+}
+.clip-hist-tools .btn-text {
+  font-size: 11px;
+  padding: 4px 7px;
+  border-radius: 8px;
+}
+.clip-rec-off {
+  color: var(--danger);
+}
+.clip-search {
+  width: 100%;
+  height: 34px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 10px;
+  background: var(--trough, #edeef1);
+  color: var(--text, #1a1d24);
+  font-size: 13px;
+  font-family: inherit;
+  box-shadow: inset 0 1px 3px rgba(51, 66, 102, 0.16);
+  outline: none;
+  box-sizing: border-box;
+}
+.clip-search:focus {
+  box-shadow: inset 0 1px 3px rgba(51, 66, 102, 0.16), 0 0 0 2px rgba(7, 193, 96, 0.35);
+}
+.clip-search::placeholder {
+  color: var(--muted);
+}
+.clip-hist-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+}
+.clip-hist-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  box-shadow: inset 0 -1px 0 rgba(var(--shadow) / 0.08);
+}
+.clip-hist-item:last-child {
+  box-shadow: none;
+}
+.clip-hist-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 2px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+.clip-hist-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+  color: var(--text);
+  font-size: 14px;
+}
+.clip-hist-time {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.clip-hist-copy {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: none; /* 默认只里绿色图标，无底框；悬停/按压才浮现背景（与 ✕ 删除钮一致） */
+  color: var(--wx-green-dark);
+  cursor: pointer;
+  transition: background 0.18s;
+}
+.clip-hist-copy:hover {
+  background: rgba(var(--green-rgb) / 0.12);
+}
+.clip-hist-copy:active {
+  background: rgba(var(--green-rgb) / 0.22);
+}
+.clip-hist-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(var(--danger-rgb) / 0.12);
+  color: var(--danger);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.clip-hist-item.sens .clip-hist-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
 /* ── loading ───────────────────────────────────────────── */
 .spinner {
   width: 32px;
