@@ -147,6 +147,15 @@ RUN f=/etc/s6-overlay/s6-rc.d/svc-kasmvnc/run; \
     grep -q -- '-NeverShared \\' "$f"; \
     ! grep -q -- '-AlwaysShared' "$f"
 
+# Openbox 默认把所有窗口强制最大化。微信小程序窗口（WeChatAppEx 进程，无 WM_CLASS）被拉成整屏后，
+# 小程序按 rpx 随窗口宽度等比放大，元件变得巨大（用电脑浏览器连也像手机缩放）。
+# 追加一条规则：无 class 的 normal 窗口不最大化，让小程序按自己的默认手机尺寸开窗；
+# 主窗口 class=wechat 等仍保持最大化。断言规则已写入，否则构建失败。
+RUN set -eux; \
+    f=/etc/xdg/openbox/rc.xml; \
+    sed -i 's#<application class="\*"><maximized>yes</maximized></application>#&<application class="" type="normal"><maximized>no</maximized></application>#' "$f"; \
+    grep -q 'application class="" type="normal"' "$f"
+
 # 微信下载/解压控制脚本（运行时由面板经 docker exec 触发，状态写入数据卷 /config/.woc-state）
 COPY wechat-ctl.sh /woc/wechat-ctl.sh
 RUN chmod 755 /woc/wechat-ctl.sh
