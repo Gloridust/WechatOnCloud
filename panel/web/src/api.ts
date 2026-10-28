@@ -240,6 +240,11 @@ async function waitVolumeJob(id: string, job: string, onStage?: (stage: string) 
   }
 }
 
+// 本页面的「查看者」标识，每次整页加载生成一个。同一实例同一时间只在一处显示：面板据此认出被别处接管的页面，
+// 挡住它的自动重连和输入（见服务端「单连接」）。用 getRandomValues 而不是 randomUUID：后者只在 HTTPS 下有。
+export const VIEWER_ID = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join('');
+const viewerHeader = { 'x-woc-viewer': VIEWER_ID };
+
 async function req<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
   // 仅在有 body 时声明 JSON content-type：否则 Fastify 对「空 body + application/json」会报 400
   const headers = opts.body ? { 'content-type': 'application/json', ...opts.headers } : opts.headers;
@@ -266,6 +271,12 @@ export interface PasteError extends Error {
   code?: string; // 面板给的原因码：png_too_big / clipboard_stuck
   kind?: 'network' | 'timeout';
 }
+// 本页面被别处打开的页面接管了（见 controlStatus）
+export interface Superseded {
+  by: string; // 「用户名（设备）」
+  at: number;
+}
+
 function pasteError(message: string, extra: Partial<PasteError>): PasteError {
   return Object.assign(new Error(message), extra);
 }
@@ -393,7 +404,7 @@ export const api = {
       res = await apiFetch(`/api/instances/${id}/paste-image?type=${encodeURIComponent(file.type)}`, {
         method: 'POST',
         credentials: 'same-origin',
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', ...viewerHeader },
         body: file,
         signal: ctl.signal,
       });
@@ -447,14 +458,20 @@ export const api = {
     await waitVolumeJob(id, job, onStage);
   },
 
-  // 多端协作：操作控制权
-  controlStatus: (id: string) => req<{ free: boolean; mine: boolean; holder: string | null }>(`/api/instances/${id}/control`),
-  controlBeat: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/beat`, { method: 'POST' }),
-  controlTake: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/take`, { method: 'POST' }),
-  typeInInstance: (id: string, text: string) => req(`/api/instances/${id}/type`, { method: 'POST', body: JSON.stringify({ text }) }),
+  // 操作控制权；superseded 非空 = 本页面已被别处打开的页面接管（同一实例同一时间只在一处显示）
+  controlStatus: (id: string) =>
+    req<{ free: boolean; mine: boolean; holder: string | null; superseded?: Superseded | null }>(`/api/instances/${id}/control`, {
+      headers: viewerHeader,
+    }),
+  controlBeat: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/beat`, { method: 'POST', headers: viewerHeader }),
+  controlTake: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/take`, { method: 'POST', headers: viewerHeader }),
+  typeInInstance: (id: string, text: string) =>
+    req(`/api/instances/${id}/type`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ text }) }),
   // 本机剪贴板文字粘进应用（粘贴桥判断本机比容器新时用；贴完留在容器剪贴板）
-  pasteText: (id: string, text: string) => req(`/api/instances/${id}/paste-text`, { method: 'POST', body: JSON.stringify({ text }) }),
-  keyInInstance: (id: string, key: string) => req(`/api/instances/${id}/key`, { method: 'POST', body: JSON.stringify({ key }) }),
+  pasteText: (id: string, text: string) =>
+    req(`/api/instances/${id}/paste-text`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ text }) }),
+  keyInInstance: (id: string, key: string) =>
+    req(`/api/instances/${id}/key`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ key }) }),
 
   // 桌面壁纸
   listBackgrounds: (id: string) => req<{ backgrounds: string[] }>(`/api/admin/instances/${id}/backgrounds`),

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, appProfile, fmtUploadSize, provisionProgressText } from '../api';
+import { api, appProfile, fmtUploadSize, provisionProgressText, VIEWER_ID, type Superseded } from '../api';
 import { browserImageCodec, fitPasteImage, pasteImageWithFallback } from '../pasteImage';
 import { useUI } from '../ui';
 import { useAuth } from '../auth';
@@ -8,9 +8,10 @@ import { useInstances } from '../AppShell';
 import { VncAudio } from '../vncAudio';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
+// ws 地址带上本页的查看者标识（noVNC 先解码 path 再拼进地址），面板据此做「同一实例只在一处显示」，转发前会去掉。
 function desktopUrl(id: string) {
   return (
-    `/desktop/${id}/vnc/index.html?autoconnect=1&path=desktop/${id}/websockify&resize=remote` +
+    `/desktop/${id}/vnc/index.html?autoconnect=1&path=desktop/${id}/websockify%3Fwoc_viewer%3D${VIEWER_ID}&resize=remote` +
     '&reconnect=true&reconnect_delay=2000&clipboard_up=true&clipboard_down=true&clipboard_seamless=true'
   );
 }
@@ -639,6 +640,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const uploadBusy = useRef(false);
   const [starting, setStarting] = useState(false);
   const [control, setControl] = useState<{ free: boolean; mine: boolean; holder: string | null } | null>(null);
+  // 本页面已被别处打开的页面接管（同一实例同一时间只在一处显示）：不再显示桌面，等用户点「在这里继续使用」
+  const [superseded, setSuperseded] = useState<Superseded | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'bg' | 'font'>('bg');
   const [bgList, setBgList] = useState<string[]>([]);
@@ -684,6 +687,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     setClipText('');
     setImeText('');
     setProbing(true);
+    setSuperseded(null); // 被接管是按实例算的：换到别的实例先照常连，回来时轮询会再次发现
     recovering.current = false;
   }, [id]);
 
@@ -794,6 +798,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
         const r = await api.controlStatus(id);
         if (!alive) return;
         setControl(r);
+        const sup = r.superseded;
+        if (sup) setSuperseded((prev) => prev ?? sup); // 只认第一次，免得每次轮询都重渲染
         if (!r.free && !r.mine) frameRef.current?.blur(); // 只读：移开键盘焦点
       } catch {
         /* ignore */
@@ -806,6 +812,10 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       window.clearInterval(t);
     };
   }, [showVnc, id]);
+
+  useEffect(() => {
+    if (superseded && id) api.clientLog(id, `本页面已被「${superseded.by}」接管，停止显示桌面`);
+  }, [superseded, id]);
 
   // 续约控制权，节流 2.5s。桌面画面里的真实操作、底部输入条里打字都算（输入条不经过画面，此前不续约，
   // 连着打一会儿字控制权就被别人拿走）。空闲不操作则超时自动释放。
@@ -821,7 +831,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       /* ignore */
     }
   }, [id]);
-  const readOnly = !!control && !control.free && !control.mine; // 别人在操作：只读
+  const readOnly = !!superseded || (!!control && !control.free && !control.mine); // 别人在操作 / 已被别处接管：只读
 
   // 用户在 VNC 内真实操作（鼠标/键盘/滚轮）时续约控制权（同源 iframe 可监听）。
   // 只读用户的操作已被遮罩拦截/失焦，不会误续约。
@@ -937,6 +947,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   // 仅当本实例处于焦点（标签页可见且窗口聚焦）时出声/收音，失焦立即断开，避免多实例多端串音。
   useEffect(() => {
     if (!showVnc || !id || !soundOn) return; // 声音默认关：未开则完全不连音频桥（回到 1.1.7 无音频的连接行为）
+    if (superseded) return; // 已被别处接管：声音和麦克风跟着桌面一起交出去
     const audio = new VncAudio(id, micOn);
     audioRef.current = audio;
     audio.connect().catch(() => {}); // 加载 socket.io 失败：本次无声，再开一次「声音」会重新加载
@@ -962,7 +973,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       audioRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showVnc, id, soundOn]);
+  }, [showVnc, id, soundOn, superseded]);
 
   // 让「点桌面画面」也能解挂起音频出声：浏览器自动播放策略会挂起 AudioContext，需用户手势恢复；但音频桥
   // 的手势监听绑在父窗口上，而用户点的是同源 iframe 内的桌面，事件不冒泡到父窗口 → 故"点画面没用、得重开声音
@@ -992,9 +1003,17 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   // （旧 ws 已死，重载后干净重连；与 setMode/restartInstance 同理，不会引发新旧 ws 并存卡死 Xvnc）。
   // 与本会话曾撤掉的"激进自动重连"本质不同：那是连接态一抖就重连导致 churn；这里只在【确认致命崩溃】
   // 时重载一次，且 5min 内限 4 次、超限转手动恢复浮层，绝不死循环。
-  const recoverFromFatal = (msg: string) => {
+  const recoverFromFatal = async (msg: string) => {
     if (recovering.current || !id) return;
     recovering.current = true;
+    // 被别处接管后连接被断开，旧客户端可能随即报致命错误：这时整页重载会换个新查看者把对方踢掉、两边互踢，
+    // 所以先问一下面板，被接管了就只盖上「在这里继续使用」
+    const sup = await api.controlStatus(id).then((r) => r.superseded, () => null);
+    if (sup) {
+      setSuperseded(sup);
+      recovering.current = false;
+      return;
+    }
     if (allowAutoRecover(id)) {
       api.clientLog(id, `KasmVNC 致命错误，自动重连：${msg}`);
       toast('桌面连接异常，正在自动重连…', 'error');
@@ -1568,15 +1587,17 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               旧元素被删时 ws 未必干净关闭 → 实例服务端残留半开连接 → 回到该实例再开新 ws 时新旧并存把 Xvnc 卡死
               （刷新都救不了、要重启容器）。无 key 时切实例只改 src，浏览器会“导航”iframe：旧文档 unload 干净关闭旧 ws，
               再加载新实例。重连仍走整页重载（见 setMode / 重新连接 / restartInstance）。 */}
+          {/* 被别处接管后改成空白页：卸掉 noVNC，停掉它的自动重连（同样只改 src、不加 key） */}
           <iframe
             ref={frameRef}
             className="iv-frame"
-            src={desktopUrl(id)}
+            src={superseded ? 'about:blank' : desktopUrl(id)}
             title={`${appLabel} · 实例桌面`}
             allow="clipboard-read; clipboard-write; microphone; camera; autoplay"
             onLoad={() => {
               setFrameLoaded(true);
               setFrameGen((g) => g + 1); // iframe 页内换文档时也要重挂监听（见 frameGen 定义处）
+              if (superseded) return;
               if (id) api.clientLog(id, 'iframe 已加载（noVNC 页面就绪，开始连 VNC）');
               setTimeout(() => {
                 focusFrame(); // 加载完把键盘焦点交给 VNC
@@ -1641,7 +1662,25 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             </div>
           )}
 
-          {control && !control.free && !control.mine && (
+          {superseded && (
+            <div className="iv-lock">
+              <div className="iv-lock-card">
+                <div className="iv-lock-title">已在别处打开</div>
+                <div className="iv-lock-sub">
+                  「{superseded.by}」打开了这个实例。为保证桌面稳定，同一实例同一时间只在一处显示。
+                </div>
+                <button
+                  className="btn btn-primary iv-notice-btn"
+                  onClick={() => window.location.reload()}
+                  title="整页重载、在这里重新连接（另一处会被切到这个提示）"
+                >
+                  在这里继续使用
+                </button>
+              </div>
+            </div>
+          )}
+
+          {!superseded && control && !control.free && !control.mine && (
             <div className="iv-lock">
               <div className="iv-lock-card">
                 <div className="iv-lock-title">「{control.holder}」正在操作</div>
@@ -1830,7 +1869,9 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                     }
                   }}
                   placeholder={
-                    readOnly
+                    superseded
+                      ? '这个实例已在别处打开；要在这里用，请点桌面上的「在这里继续使用」'
+                      : readOnly
                       ? `「${control?.holder}」正在操作，你当前为只读；要操作请点桌面上的「申请控制」`
                       : autoEnter
                         ? '中文输入这里 → 回车直接发送到应用（先点好应用的输入框）。Shift+回车换行。'

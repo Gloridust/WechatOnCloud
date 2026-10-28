@@ -2206,7 +2206,8 @@ export async function instanceAcceptsLargePng(inst: Instance): Promise<boolean> 
     const key = `${info.Id}@${info.State?.StartedAt}`;
     const hit = largePngSafeCache.get(key);
     if (hit !== undefined) return hit;
-    const out = await execCapture(inst, ['sh', '-c', 'p=$(pgrep -x Xvnc | head -1); [ -n "$p" ] && tr "\\0" " " < /proc/$p/cmdline']);
+    // 进程名：新镜像经 /usr/local/bin/Xvnc 软链启动 1.5.x 的 Xkasmvnc，仍叫 Xvnc；两个名字都认，免得换启动方式后失灵
+    const out = await execCapture(inst, ['sh', '-c', 'p=$(pgrep -x "Xvnc|Xkasmvnc" | head -1); [ -n "$p" ] && tr "\\0" " " < /proc/$p/cmdline']);
     const m = out.match(/-DLP_ClipTypes\s+(\S+)/);
     const safe = !!m && !m[1].split(',').includes('image/png');
     if (out.trim()) {
