@@ -767,6 +767,8 @@ app.delete('/api/admin/instances/:id', async (req, reply) => {
   await removeInstanceContainer(inst, purge);
   removeInstanceRecord(id);
   controlHolders.delete(id);
+  currentViewers.delete(id);
+  supersededViewers.delete(id);
   return { ok: true };
 });
 
@@ -1044,6 +1046,8 @@ app.post('/api/instances/:id/control/beat', async (req, reply) => {
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const sup = supersededBy(id, viewerOf(req));
+  if (sup) return reply.code(409).send(supersededBusy(sup));
   const now = Date.now();
   const h = controlHolders.get(id);
   if (!h || now - h.at > CONTROL_TTL || h.userId === u.id) {
@@ -1059,9 +1063,11 @@ app.get('/api/instances/:id/control', async (req, reply) => {
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  // 顺带告诉前端：这个页面是否已被别处打开的页面接管（见下方「单连接」）
+  const superseded = supersededBy(id, viewerOf(req));
   const h = controlHolders.get(id);
-  if (!h || Date.now() - h.at > CONTROL_TTL) return { free: true, mine: false, holder: null };
-  return { free: false, mine: h.userId === u.id, holder: h.username };
+  if (!h || Date.now() - h.at > CONTROL_TTL) return { free: true, mine: false, holder: null, superseded };
+  return { free: false, mine: h.userId === u.id, holder: h.username, superseded };
 });
 
 // 主动接管（"申请控制"）：强制把操作权抢过来。
@@ -1070,18 +1076,82 @@ app.post('/api/instances/:id/control/take', async (req, reply) => {
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const sup = supersededBy(id, viewerOf(req));
+  if (sup) return reply.code(409).send(supersededBusy(sup));
   controlHolders.set(id, { userId: u.id, username: u.username, at: Date.now() });
   return { mine: true, holder: u.username };
 });
+
+// ---------- 单连接：同一实例同一时间只在一处显示（新打开的接管） ----------
+// KasmVNC 的编码缓存（EncCache）只在 ≥2 条连接同时在线时启用，而它会泄漏内存（kasmtech/KasmVNC#371：两条连接、
+// 画面滚动 1 分钟 88→260 MiB；修复截至 1.5.2 还没进正式版）；历史上「新旧两条 ws 并存把 Xvnc 卡死」也出在多连接。
+// 故每个实例同一时间只保留一条桌面连接：实例镜像里 Xvnc 带 -NeverShared（新连接一到就断开旧的），面板这里再按
+// 「查看者」（每次整页加载生成的 VIEWER_ID，随 ws 地址和输入请求带上）把被接管的页面挡在外面——否则它的 noVNC
+// 2 秒后自动重连，又把新页面踢掉，两边无限互踢。被接管的页面经控制权轮询得知后盖上「在这里继续使用」，点了才整页
+// 重载、换个新查看者抢回来，绝不自动抢。面板这层对旧实例镜像（Xvnc 还是 -AlwaysShared）同样生效：接管时直接断开旧连接。
+type Viewer = { id: string; userId: string; username: string; sockets: Set<Socket> };
+type Superseded = { by: string; at: number };
+const currentViewers = new Map<string, Viewer>(); // 实例 id → 当前显示桌面的页面
+const supersededViewers = new Map<string, Map<string, Superseded>>(); // 实例 id → 被接管的页面 → 被谁、何时接管
+const VIEWER_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+const SUPERSEDED_KEEP = 32; // 每个实例最多记这么多被接管的页面；忘掉最旧的也只是让它能再连一次、把人踢一次
+
+function viewerOf(req: FastifyRequest): string | null {
+  const v = req.headers['x-woc-viewer'] ?? (req.query as any)?.v;
+  const s = Array.isArray(v) ? v[0] : v;
+  return typeof s === 'string' && VIEWER_ID_RE.test(s) ? s : null;
+}
+function supersededBy(instId: string, viewer: string | null): Superseded | null {
+  return (viewer && supersededViewers.get(instId)?.get(viewer)) || null;
+}
+const supersededBusy = (s: Superseded) => ({
+  error: `「${s.by}」已在别处打开这个实例，这个页面不能再操作；要在这里用，请点「在这里继续使用」`,
+  code: 'superseded',
+});
+
+// 只用来在提示里说清是哪台设备，不做任何判断
+function deviceLabel(ua: string | undefined): string {
+  const s = ua || '';
+  const os = /iPhone/.test(s) ? 'iPhone' : /iPad/.test(s) ? 'iPad' : /Android/.test(s) ? 'Android'
+    : /Macintosh|Mac OS X/.test(s) ? 'Mac' : /Windows/.test(s) ? 'Windows' : /Linux/.test(s) ? 'Linux' : '';
+  const br = /Edg\//.test(s) ? 'Edge' : /Firefox\//.test(s) ? 'Firefox' : /Chrome\//.test(s) ? 'Chrome' : /Safari\//.test(s) ? 'Safari' : '';
+  return [os, br].filter(Boolean).join(' · ') || '另一台设备';
+}
+
+// 新的桌面连接（已过鉴权）：换了页面就把之前那个页面记为「被接管」并断开它的连接；同一页面断线重连照常放行。
+function attachViewer(instId: string, viewer: string, u: User, device: string, socket: Socket): void {
+  let cur = currentViewers.get(instId);
+  if (!cur || cur.id !== viewer) {
+    if (cur) {
+      let m = supersededViewers.get(instId);
+      if (!m) supersededViewers.set(instId, (m = new Map()));
+      m.set(cur.id, { by: `${u.username}（${device}）`, at: Date.now() });
+      if (m.size > SUPERSEDED_KEEP) m.delete(m.keys().next().value!);
+      for (const s of cur.sockets) s.destroy();
+      appendInstanceLog(instId, `[vnc] ${u.username}（${device}）打开了桌面，接管了 ${cur.username} 的页面（同一实例同一时间只在一处显示）`);
+    }
+    cur = { id: viewer, userId: u.id, username: u.username, sockets: new Set() };
+    currentViewers.set(instId, cur);
+    // 操作权跟着显示走：否则新页面要等旧页面的心跳过期（CONTROL_TTL）才能操作
+    controlHolders.set(instId, { userId: u.id, username: u.username, at: Date.now() });
+  }
+  const c = cur;
+  c.sockets.add(socket);
+  socket.once('close', () => c.sockets.delete(socket));
+}
 
 // 输入类接口（/type、/key、/paste-text、/paste-image）同样受控制权约束：此前只在前端盖只读遮罩，只读的一方
 // 仍能用底部输入条、功能键、粘贴把字送进去，和正在操作的人打架。别人持有（TTL 内）就拒绝；否则视同一次操作，
 // 认领 / 续约——转发输入条打字不经过桌面画面，此前不续约，连着打一会儿字控制权就被别人拿走了。
 // 这是协作上的防打架，不是用户之间的安全边界（有访问权限的人本就能直接操作桌面）。
-function claimControl(u: User, id: string): string | null {
+// 已被别处接管的页面（见「单连接」）一律拒绝：同一账号在两处打开时控制权同属一人，挡不住它。
+// 返回拒绝的响应体，null = 可以操作。
+function claimControl(u: User, id: string, req: FastifyRequest): object | null {
+  const sup = supersededBy(id, viewerOf(req));
+  if (sup) return supersededBusy(sup);
   const now = Date.now();
   const h = controlHolders.get(id);
-  if (h && h.userId !== u.id && now - h.at <= CONTROL_TTL) return h.username;
+  if (h && h.userId !== u.id && now - h.at <= CONTROL_TTL) return controlBusy(h.username);
   controlHolders.set(id, { userId: u.id, username: u.username, at: now });
   return null;
 }
@@ -1095,8 +1165,8 @@ app.post('/api/instances/:id/type', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const { text } = (req.body as any) ?? {};
   if (!text || typeof text !== 'string' || text.length > 500) return reply.code(400).send({ error: '文字为空或过长' });
-  const holder = claimControl(u, id);
-  if (holder) return reply.code(409).send(controlBusy(holder));
+  const busy = claimControl(u, id, req);
+  if (busy) return reply.code(409).send(busy);
   try {
     await typeInInstance(findInstance(id)!, text);
     return { ok: true };
@@ -1115,8 +1185,8 @@ app.post('/api/instances/:id/paste-image', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const inst = findInstance(id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
-  const holder = claimControl(u, id);
-  if (holder) return reply.code(409).send(controlBusy(holder));
+  const busy = claimControl(u, id, req);
+  if (busy) return reply.code(409).send(busy);
   const mime = String((req.query as any)?.type || '').toLowerCase();
   // PNG 超过 1MB 会卡死【旧】实例的容器剪贴板（见 docker.ts PASTE_IMAGE_PNG_MAX）。已修复的实例（新镜像）放行原图；
   // 旧实例照声明长度当场拒收（不必把整张图收进内存），并回 code=png_too_big，前端据此压缩后重试
@@ -1147,8 +1217,8 @@ app.post('/api/instances/:id/paste-text', { bodyLimit: 2 * 1024 * 1024 }, async 
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const { text } = (req.body as any) ?? {};
   if (!text || typeof text !== 'string' || text.length > 200_000) return reply.code(400).send({ error: '文字为空或过长' });
-  const holder = claimControl(u, id);
-  if (holder) return reply.code(409).send(controlBusy(holder));
+  const busy = claimControl(u, id, req);
+  if (busy) return reply.code(409).send(busy);
   try {
     await pasteTextInInstance(findInstance(id)!, text);
     return { ok: true };
@@ -1164,8 +1234,8 @@ app.post('/api/instances/:id/key', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const { key } = (req.body as any) ?? {};
   if (!key || typeof key !== 'string') return reply.code(400).send({ error: '按键名为空' });
-  const holder = claimControl(u, id);
-  if (holder) return reply.code(409).send(controlBusy(holder));
+  const busy = claimControl(u, id, req);
+  if (busy) return reply.code(409).send(busy);
   try {
     await keyInInstance(findInstance(id)!, key);
     return { ok: true };
@@ -1730,9 +1800,13 @@ proxy.on('proxyReqWs', (proxyReq, req, socket) => {
   // 卡死时这条不会出现（接收器停止 accept），即可定位"卡在面板→实例之间还是实例内部"。
   const instId = (req as any)._wocInstId;
   if (instId) {
-    proxyReq.on('upgrade', () => {
+    proxyReq.on('upgrade', (_res, proxySocket: Socket) => {
       trackActiveVncSocket(instId, req.socket as Socket);
       appendInstanceLog(instId, '[vnc] 上游已接受(101) · 桌面连接建立');
+      // 客户端这侧一断，上游这侧跟着断。http-proxy 只在客户端「正常结束 / 出错」时才关上游，客户端套接字被
+      // destroy（keepalive 判死、单连接接管时面板主动断开）时上游原样留着——实例里的 Xvnc 照旧当它在线：
+      // 旧镜像（-AlwaysShared）上就是两条连接并存，正是要避免的泄漏 / 卡死条件
+      (req.socket as Socket).once('close', () => proxySocket.destroy());
     });
     // 只盯 VNC 连接本身（/websockify）；音频桥等其它 ws 不计
     if ((req.url || '').startsWith('/websockify')) {
@@ -1920,6 +1994,24 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) =>
     return;
   }
   const inst = findInstance(parsed.id)!;
+  // 桌面连接（/websockify）带着页面的查看者标识（woc_viewer，见「单连接」）：取出来、从转发地址里去掉。
+  // 已被别处接管的页面（它的 noVNC 在自动重连）直接拒绝，免得把正在用的那一处踢掉；音频桥等其它 ws 不参与。
+  let viewer: string | null = null;
+  const isVnc = parsed.rest.startsWith('/websockify');
+  if (isVnc) {
+    const q = new URL(parsed.rest, 'http://x');
+    const v = q.searchParams.get('woc_viewer');
+    q.searchParams.delete('woc_viewer');
+    parsed.rest = q.pathname + q.search;
+    viewer = v && VIEWER_ID_RE.test(v) ? v : null;
+    if (supersededBy(inst.id, viewer)) {
+      if (!wsRejectThrottled(inst.id, 'superseded')) {
+        appendInstanceLog(inst.id, '[vnc] 已被别处接管的页面在自动重连，已拒绝（该页面会提示「在这里继续使用」）');
+      }
+      socket.end('HTTP/1.1 409 Conflict\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      return;
+    }
+  }
   req.url = parsed.rest;
   (req as any)._wocAuth = basicAuth(inst);
   (req as any)._wocInstId = inst.id;
@@ -1927,6 +2019,8 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) =>
   // 与实例容器内 KasmVNC 的 "got client connection" 按时间对齐，即可看出卡在哪一段。
   const ip = (req.socket && req.socket.remoteAddress) || '?';
   const uname = (u as any).username || '?';
+  // 没带标识的（面板升级前打开、还没刷新的旧页面）每条连接当一个新页面：能接管，但挡不住它重连
+  if (isVnc) attachViewer(inst.id, viewer || `anon-${randomUUID()}`, u, deviceLabel(req.headers['user-agent']), socket);
   appendInstanceLog(inst.id, `[vnc] 连接尝试 user=${uname} ip=${ip}`);
   // 客户端侧 TCP keepalive（与上游侧成对，见 proxy.on('open')）：及时回收断网客户端留下的半开死连接
   try {
