@@ -2488,14 +2488,19 @@ body {
 select.input {
   appearance: none;
   padding-right: 40px;
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
-    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
-  background-position:
-    calc(100% - 22px) 50%,
-    calc(100% - 16px) 50%;
-  background-size: 6px 6px;
+  /* 与全站 IcChevronDown 同一笔触的 ⌄ */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2365656b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-position: calc(100% - 14px) 50%;
+  background-size: 18px 18px;
   background-repeat: no-repeat;
+}
+:root[data-theme='dark'] select.input {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2398989f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme='auto'] select.input {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2398989f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  }
 }
 
 /* —— 状态胶囊 —— */
@@ -2556,7 +2561,7 @@ select.input {
   justify-content: center;
   width: 16px;
   height: 16px;
-  border-radius: 50%;
+  border-radius: 5px; /* 多选用方形勾选框，不用单选圆 */
   box-shadow: inset 0 0 0 1.5px var(--control-line);
 }
 .chip-toggle.on {
@@ -2753,6 +2758,16 @@ select.input {
   }
 }
 
+/* —— 只给读屏的文字 —— */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* —— 名字（纯文本，一行，过长省略） —— */
 .gname {
   display: block;
@@ -2912,7 +2927,7 @@ select.input {
 .entry-hint {
   font-size: 12px;
   line-height: 1.45;
-  color: var(--text);
+  color: var(--muted);
   overflow-wrap: anywhere;
 }
 .entry-act {
@@ -3070,6 +3085,27 @@ select.input {
 .upgrade-banner {
   padding: 14px 16px;
 }
+/* 默认密码提示的操作：与行内按钮一致的灰色胶囊 */
+.warn-banner .warn-cta {
+  flex: none;
+  height: 34px;
+  padding: 0 16px;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--trough);
+}
+@media (max-width: 520px) {
+  .warn-banner {
+    flex-wrap: wrap;
+  }
+  .warn-banner .warn-text {
+    flex: 1 1 calc(100% - 52px);
+  }
+  .warn-banner .warn-cta {
+    margin-left: 50px;
+    height: 44px;
+  }
+}
 .warn-banner:hover {
   background: color-mix(in srgb, var(--surface) 96%, var(--text));
 }
@@ -3181,6 +3217,95 @@ select.input {
   border-radius: 12px;
 }
 
+/* —— 设置式分组（诊断、关于）：白色圆角分组里一行一项，左标签右值 / 控件 —— */
+.group {
+  background: var(--surface);
+  border-radius: var(--r-group);
+  box-shadow: var(--lift);
+  margin: 0 0 8px;
+}
+.g-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 52px;
+  width: 100%;
+  padding: 10px 16px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+  text-decoration: none;
+}
+.g-row + .g-row::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 16px;
+  right: 0;
+  height: 1px;
+  background: var(--separator);
+}
+.g-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.g-label small {
+  font-size: 12px;
+  color: var(--muted);
+}
+.g-value {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.g-link {
+  cursor: pointer;
+}
+.g-link .g-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+.g-link .ic {
+  color: var(--muted);
+}
+.g-link:hover {
+  background: var(--base);
+}
+.g-row:first-child {
+  border-radius: var(--r-group) var(--r-group) 0 0;
+}
+.g-row:last-child {
+  border-radius: 0 0 var(--r-group) var(--r-group);
+}
+.g-link:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.group-foot {
+  margin: 0 16px 8px;
+  max-width: 64ch;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+/* 分段控件放在行内（时间范围）：不占外边距、略小 */
+.seg-tabs.seg-inline {
+  margin: 0;
+  width: auto;
+}
+.seg-inline .seg-tab {
+  flex: none;
+  padding: 5px 12px;
+  font-size: 13px;
+}
+
 /* —— 主页底部计数 —— */
 .sheet-foot {
   margin: 4px 8px 8px;
@@ -3210,7 +3335,7 @@ select.input {
   width: 60px;
   height: 60px;
   border-radius: 16px;
-  box-shadow: 0 6px 16px rgba(var(--green-rgb) / 0.28);
+  box-shadow: none;
 }
 .login-foot {
   max-width: 340px;

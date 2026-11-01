@@ -108,29 +108,38 @@ function DiagnosticsSection() {
       <div className="section-row" style={{ marginTop: 22 }}>
         <span className="section-title">诊断与日志</span>
       </div>
-      <div className="settings-block">
-        <p className="s-desc">打包系统/Docker 信息 + 面板全局日志 + 各实例容器状态与日志 + 容器清单，用于排查部署、创建卡死、黑屏不可用、升级失败等问题。</p>
-        <div className="s-field">
-          <span className="field-label">时间范围</span>
-          <div className="chip-row">
+      <div className="group">
+        <div className="g-row">
+          <span className="g-label">时间范围</span>
+          <div className="seg-tabs seg-inline" role="radiogroup" aria-label="时间范围">
             {DIAG_RANGE_OPTIONS.map((r) => (
-              <button key={r.key} className={'chip chip-toggle' + (range === r.key ? ' on' : '')} onClick={() => setRange(r.key)}>
+              <button
+                key={r.key}
+                role="radio"
+                aria-checked={range === r.key}
+                className={'seg-tab' + (range === r.key ? ' active' : '')}
+                onClick={() => setRange(r.key)}
+              >
                 {r.label}
               </button>
             ))}
           </div>
         </div>
-        <div className="settings-actions">
-          <button className="btn btn-primary s-btn" onClick={exportBundle}>
-            导出诊断包
+        <div className="g-row">
+          <span className="g-label">
+            诊断包
+            <small>系统 / Docker 信息、面板日志、各实例容器状态与日志（.tar.gz）</small>
+          </span>
+          <button className="btn btn-primary entry-btn" onClick={exportBundle}>
+            导出
           </button>
-          <a className="btn-text btn-text-icon" href={api.panelLogUrl(range)} target="_blank" rel="noreferrer">
-            查看面板日志
-            <IcChevronRight size={14} />
-          </a>
         </div>
-        <p className="s-foot">导出当前选定范围内的日志（.tar.gz）。超过一年的日志自动清理；诊断包不含密码 / 密钥等敏感信息。</p>
+        <a className="g-row g-link" href={api.panelLogUrl(range)} target="_blank" rel="noreferrer">
+          <span className="g-label">查看面板日志</span>
+          <IcChevronRight size={16} />
+        </a>
       </div>
+      <p className="group-foot">用于排查部署、创建卡死、黑屏、升级失败等问题。超过一年的日志自动清理；诊断包不含密码 / 密钥等敏感信息。</p>
     </>
   );
 }
@@ -195,71 +204,66 @@ function AboutSection({ isAdmin }: { isAdmin: boolean }) {
     }
   };
 
+  const updateNote = !info?.hasUpdate
+    ? ''
+    : !isAdmin
+      ? '面板有新版本，请联系管理员更新。'
+      : info.isDev
+        ? '当前为开发版（本地 / 自构建）。「升级到正式版」会拉取最新正式发布镜像并重建面板，数据与登录保留，约十几秒内会短暂重启，完成后自动刷新。'
+        : '「一键更新面板」会拉取新镜像并重建面板，数据与登录保留，约十几秒内会短暂重启，完成后自动刷新。';
   return (
     <>
       <div className="section-row" style={{ marginTop: 22 }}>
         <span className="section-title">关于</span>
       </div>
-      <div className="settings-block">
-        <div className="s-title-row">
-          <span className="s-app">云微 · WechatOnCloud</span>
+      <div className="group">
+        <div className="g-row">
+          <span className="g-label">云微 · WechatOnCloud</span>
           {info?.isDev ? <span className="tag">开发版</span> : info?.hasUpdate ? <span className="tag tag-warn">有新版</span> : null}
         </div>
-        <p className="s-line">
-          当前版本 <b>{info?.current ?? '…'}</b>
-          {info?.latest && !info.error && (info.isDev || info.hasUpdate) && (
+        <div className="g-row">
+          <span className="g-label">当前版本</span>
+          <span className="g-value">{info?.current ?? '…'}</span>
+        </div>
+        {info?.latest && !info.error && (
+          <div className="g-row">
+            <span className="g-label">最新{info.isDev ? '发布' : '版本'}</span>
+            <span className="g-value">{info.hasUpdate || info.isDev ? info.latest : `${info.latest}（已是最新）`}</span>
+          </div>
+        )}
+        {info?.hasUpdate && isAdmin && (
+          <div className="g-row">
+            <span className="g-label">面板更新</span>
+            <button className="btn btn-primary entry-btn" disabled={updating} onClick={selfUpdate}>
+              {updating ? '更新中…' : info.isDev ? '升级到正式版' : '一键更新面板'}
+            </button>
+          </div>
+        )}
+        {isAdmin && (
+          <button className="g-row g-link" disabled={checking || updating} onClick={check}>
+            <span className="g-label">{checking ? '检查中…' : '检查更新'}</span>
+            <span className="g-value">{info ? (info.checkedAt ? `上次 ${fmtDate(info.checkedAt)}` : '尚未检查') : ''}</span>
+          </button>
+        )}
+        <a className="g-row g-link" href={info?.hasUpdate ? RELEASES_URL + '/latest' : RELEASES_URL} target="_blank" rel="noreferrer">
+          <span className="g-label">{info?.hasUpdate ? '查看新版说明' : '发布日志'}</span>
+          <IcChevronRight size={16} />
+        </a>
+      </div>
+      {(updateNote || (isAdmin && (outdatedInst > 0 || remoteNewer)) || info?.error || info?.source) && (
+        <p className="group-foot">
+          {updateNote}
+          {isAdmin && (outdatedInst > 0 || remoteNewer) && (
             <>
-              {' · '}最新{info.isDev ? '发布' : ''} <b>{info.latest}</b>
+              {' '}
+              {outdatedInst > 0 ? `另有 ${outdatedInst} 个实例的镜像可升级。` : '实例镜像检测到新版本。'}
+              更新面板不会自动升级实例（二者是不同镜像），请在「实例」页用「全部升级」。
             </>
           )}
-          {info && !info.isDev && !info.hasUpdate && info.latest && !info.error && <>{' · '}已是最新</>}
+          {info?.source && ` 来源 ${info.source}。`}
+          {info?.error && ` 检查失败：${info.error}`}
         </p>
-        {info?.hasUpdate && (
-          <div className="ver-hint">
-            {!isAdmin
-              ? '面板有新版本，请联系管理员更新。'
-              : info.isDev
-                ? '当前为开发版（本地 / 自构建）。点「升级到正式版」即可拉取最新正式发布镜像并重建面板（数据/登录保留，约十几秒、期间会短暂重启，完成后自动刷新）。'
-                : '点「一键更新面板」即可自动拉新镜像并重建面板（数据/登录保留，约十几秒、期间会短暂重启，完成后自动刷新）。各实例镜像可在「管理 → 升级」单独更新。'}
-          </div>
-        )}
-        {isAdmin && (outdatedInst > 0 || remoteNewer) && (
-          <div className="ver-hint">
-            <IcAlert size={16} className="ver-hint-ic" />
-            {outdatedInst > 0 ? <>另有 <b>{outdatedInst}</b> 个实例的镜像可升级。</> : <>实例镜像检测到新版本。</>}
-            <b>更新面板不会自动升级实例</b>（二者是不同镜像）——请到「管理」用「一键升级全部实例」。
-          </div>
-        )}
-        <div className="settings-actions">
-          {info?.hasUpdate && isAdmin && (
-            <button className="btn btn-primary s-btn" disabled={updating} onClick={selfUpdate}>
-              {updating ? '更新中…请稍候' : info.isDev ? '升级到正式版' : '一键更新面板'}
-            </button>
-          )}
-          {info?.hasUpdate && (
-            <a className="btn-text btn-text-icon" href={RELEASES_URL + '/latest'} target="_blank" rel="noreferrer">
-              查看新版
-            <IcChevronRight size={14} />
-            </a>
-          )}
-          {isAdmin && (
-            <button className="btn-text" disabled={checking || updating} onClick={check}>
-              {checking ? '检查中…' : '检查更新'}
-            </button>
-          )}
-          <a className="btn-text btn-text-icon" href={RELEASES_URL} target="_blank" rel="noreferrer">
-            发布日志
-            <IcChevronRight size={14} />
-          </a>
-        </div>
-        {info && (
-          <p className="s-foot">
-            {info.checkedAt ? `上次检查 ${fmtDate(info.checkedAt)}` : '尚未检查'}
-            {info.source && ` · 来源 ${info.source}`}
-            {info.error && ` · ${info.error}`}
-          </p>
-        )}
-      </div>
+      )}
     </>
   );
 }
@@ -737,7 +741,9 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                         </div>
                       </div>
                       <div className="entry-state">
-                        <span className="tag tag-off">{c.status || 'unknown'}</span>
+                        <span className="tag tag-muted" title={`容器状态：${c.status || 'unknown'}`}>
+                          残留
+                        </span>
                       </div>
                       <div className="entry-act">
                         <button className="btn btn-danger-outline entry-btn" onClick={() => removeOrphanCont(c)}>
@@ -1349,7 +1355,7 @@ function InstanceAdminCard({
   else if (wx.phase === 'error') sub = wx.message || '操作失败，可重试';
   else if (offline) sub = inst.runtime === 'missing' ? '容器尚未创建' : '容器已停止';
   else if (installed) sub = wx.version ? `版本 ${wx.version}` : '已就绪';
-  else sub = `${profile.label}尚未安装`;
+  else sub = '还没安装';
 
   const isImgRelease = !!inst.imageVersion && /^\d+\.\d+\.\d+$/.test(inst.imageVersion);
   const menuItems: RowMenuItem[] = [

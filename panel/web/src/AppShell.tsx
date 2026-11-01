@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from './auth';
 import { useUI, PasswordInput } from './ui';
-import { api, appProfile, type InstanceWithStatus } from './api';
+import { api, appProfile, provisionProgressText, type InstanceWithStatus } from './api';
 import { InstanceIcon } from './AppIcon';
 import { IcShield, IcChevronRight } from './icons';
 import { GridName, StateWord, PenMark } from './parts';
@@ -201,13 +201,13 @@ function Sidebar({ collapsed, onToggleCollapsed }: { collapsed: boolean; onToggl
           const on = loc.pathname === `/i/${inst.id}`;
           const st = statusOf(inst);
           return (
-            <button key={inst.id} className={'sb-item sb-inst' + (on ? ' on' : '')} onClick={() => go(`/i/${inst.id}`)} title={inst.name}>
+            <button key={inst.id} className={'sb-item sb-inst' + (on ? ' on' : '')} onClick={() => go(`/i/${inst.id}`)} title={`${inst.name} · ${st.text}`}>
               <span className="sb-avatar">
                 <InstanceIcon icon={inst.icon} appType={inst.appType} size={34} radius={10} />
                 <span className={'sb-dot ' + st.cls} />
               </span>
               {!collapsed && <span className="sb-label">{inst.name}</span>}
-              {!collapsed && <span className={'sb-stxt ' + st.cls}>{st.text}</span>}
+              <span className="sr-only">{st.text}</span>
             </button>
           );
         })}
@@ -336,7 +336,6 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
   const nav = useNavigate();
   const isAdmin = user?.role === 'admin';
   const online = instances.filter((i) => statusOf(i).cls === 'st-on').length;
-  const attention = instances.filter((i) => ['st-off', 'st-warn', 'st-fail'].includes(statusOf(i).cls)).length;
 
   return (
     <div className="ws-page">
@@ -370,10 +369,7 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
               <b>你还在使用默认密码</b>
               <span>这个面板登录着你的微信，任何知道默认密码的人都能进来。</span>
             </span>
-            <span className="warn-cta">
-              立即修改
-              <IcChevronRight size={16} />
-            </span>
+            <span className="btn warn-cta">立即修改</span>
           </button>
         )}
 
@@ -403,14 +399,6 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
           </ul>
         )}
 
-        {loaded && instances.length > 0 && (
-          <div className="sheet-foot">
-            <span>共 {instances.length} 个实例</span>
-            <span>
-              在线 {online} · 需要处理 {attention}
-            </span>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -427,7 +415,8 @@ function HomeEntry({ no, inst, isAdmin }: { no: number; inst: InstanceWithStatus
   const prof = appProfile(inst.appType);
   const failed = inst.provision?.state === 'failed';
   const open = () => nav(`/i/${inst.id}`);
-  const meta = inst.wechat.installed ? `${prof.label} ${inst.wechat.version || ''}`.trim() : prof.label;
+  const wx = inst.wechat;
+  const installing = ['downloading', 'extracting', 'installing'].includes(wx.phase);
 
   const run = async (fn: () => Promise<unknown>, ok: string) => {
     setBusy(true);
@@ -442,37 +431,49 @@ function HomeEntry({ no, inst, isAdmin }: { no: number; inst: InstanceWithStatus
     }
   };
 
-  let note = '';
+  // 一行副标题（「应用 · 当前情况」），与示意图一致；第三行只留给失败原因。
+  let detail = '';
+  let failNote = '';
   let action: JSX.Element | null = null;
   if (st.cls === 'st-on') {
+    detail = wx.version ? `版本 ${wx.version}` : '';
     action = (
       <button className="btn btn-primary entry-btn" onClick={open}>
         进入
       </button>
     );
   } else if (st.cls === 'st-busy') {
-    note = inst.provision?.state === 'creating' ? '正在创建，完成后自动就绪' : '正在处理，完成后自动就绪';
+    detail =
+      inst.provision?.state === 'creating'
+        ? provisionProgressText(inst.provision)
+        : installing
+          ? `${wx.message || '正在下载'}${wx.percent >= 0 ? ` ${wx.percent}%` : ''}`
+          : '正在处理';
     action = (
       <button className="btn entry-btn" onClick={open}>
         查看进度
       </button>
     );
   } else if (st.cls === 'st-warn') {
-    note = `${prof.label}还没装好`;
+    detail = isAdmin ? '还没安装' : '还没安装，请联系管理员';
     action = isAdmin ? (
       <button className="btn btn-primary entry-btn" disabled={busy} onClick={() => run(() => api.instanceWechatInstall(inst.id), `已开始下载${prof.label}`)}>
         下载安装
       </button>
     ) : null;
-    if (!isAdmin) note += '，请联系管理员安装';
-  } else {
-    // 失败：红字写原因；停止 / 未创建：灰字写下一步（不是错误，不用红色）
-    if (failed) note = (inst.provision?.error || '创建失败') + (isAdmin ? '' : '，请联系管理员');
-    else if (isAdmin) note = inst.runtime === 'missing' ? '容器还没创建，点「启动」会自动创建' : '点「启动」继续使用';
-    else note = '已停止，请联系管理员启动';
+  } else if (failed) {
+    failNote = (inst.provision?.error || '创建失败') + (isAdmin ? '' : '，请联系管理员');
     action = isAdmin ? (
-      <button className="btn btn-primary entry-btn" disabled={busy} onClick={() => run(() => api.instanceStart(inst.id), failed ? '已重新开始创建' : '已启动')}>
-        {busy ? '处理中…' : failed ? '重试创建' : '启动'}
+      <button className="btn btn-primary entry-btn" disabled={busy} onClick={() => run(() => api.instanceStart(inst.id), '已重新开始创建')}>
+        {busy ? '处理中…' : '重试创建'}
+      </button>
+    ) : null;
+  } else {
+    // 停止 / 未创建不是错误：灰字，不用红色
+    detail = isAdmin ? (inst.runtime === 'missing' ? '还没创建' : '') : '请联系管理员启动';
+    action = isAdmin ? (
+      <button className="btn btn-primary entry-btn" disabled={busy} onClick={() => run(() => api.instanceStart(inst.id), '已启动')}>
+        {busy ? '处理中…' : '启动'}
       </button>
     ) : null;
   }
@@ -489,9 +490,14 @@ function HomeEntry({ no, inst, isAdmin }: { no: number; inst: InstanceWithStatus
             <GridName name={inst.name} className="entry-name" />
           </button>
           <div className="entry-meta">
-            <span>{meta}</span>
+            <span>{detail ? `${prof.label} · ${detail}` : prof.label}</span>
           </div>
-          {note && <span className={'entry-note' + (failed ? ' is-fail' : '')}>{note}</span>}
+          {installing && wx.percent >= 0 && (
+            <div className="wx-progress entry-progress">
+              <div className="wx-progress-bar" style={{ width: `${wx.percent}%` }} />
+            </div>
+          )}
+          {failNote && <span className="entry-note is-fail">{failNote}</span>}
           {/* 管理员看到「怎么办」，重试不再是盲点 */}
           {failed && isAdmin && inst.provision?.hint && <span className="entry-hint">{inst.provision.hint}</span>}
         </div>
