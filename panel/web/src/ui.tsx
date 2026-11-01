@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 
 // ── Toast ───────────────────────────────────────────────
 type ToastKind = 'ok' | 'error' | 'info';
@@ -40,6 +40,21 @@ export function UIProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  // Esc 关闭最上层弹窗：所有弹窗都是「点遮罩即关闭」，这里统一把 Esc 映射成点最上层遮罩，不必每个弹窗各写一遍
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      const masks = document.querySelectorAll<HTMLElement>('.modal-mask');
+      const top = masks[masks.length - 1];
+      if (top) {
+        e.preventDefault();
+        top.click();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
+
   const close = (v: boolean) => {
     confirmState?.resolve(v);
     setConfirmState(null);
@@ -57,7 +72,7 @@ export function UIProvider({ children }: { children: ReactNode }) {
       </div>
       {confirmState && (
         <div className="modal-mask" onClick={() => close(false)}>
-          <div className="card modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 340 }}>
+          <div className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 340 }}>
             <h2>{confirmState.title}</h2>
             {confirmState.body && <div className="muted" style={{ fontSize: 14, lineHeight: 1.5 }}>{confirmState.body}</div>}
             <div className="modal-actions">
@@ -100,6 +115,7 @@ export function PasswordInput({
         className="input"
         type={show ? 'text' : 'password'}
         placeholder={placeholder}
+        aria-label={placeholder}
         autoComplete={autoComplete}
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -107,8 +123,8 @@ export function PasswordInput({
       <button
         type="button"
         className="pw-toggle"
-        tabIndex={-1}
         aria-label={show ? '隐藏密码' : '显示密码'}
+        aria-pressed={show}
         onClick={() => setShow((s) => !s)}
       >
         {show ? (

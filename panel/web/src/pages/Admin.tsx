@@ -5,6 +5,7 @@ import { api, APP_LABELS, appProfile, fmtUploadSize, provisionProgressText, type
 import { InstanceIcon, ICON_CHOICES } from '../AppIcon';
 import { useUI, PasswordInput } from '../ui';
 import { useAuth } from '../auth';
+import { IcPlus, IcChevronRight, IcAlert, IcMonitor, IcUsers, IcCheck } from '../icons';
 
 const BUSY_PHASES = ['downloading', 'extracting', 'installing'];
 
@@ -69,7 +70,7 @@ const TrashIcon = svgIcon(
 );
 
 // 友好空状态：圆形图标 + 标题 + 说明 + 可选引导按钮（沿用首页 .empty-state 样式）
-function EmptyState({ icon, title, sub, action }: { icon: string; title: string; sub?: string; action?: JSX.Element }) {
+function EmptyState({ icon, title, sub, action }: { icon: JSX.Element; title: string; sub?: string; action?: JSX.Element }) {
   return (
     <div className="empty-state">
       <div className="empty-blob">{icon}</div>
@@ -122,8 +123,9 @@ function DiagnosticsSection() {
           <button className="btn btn-primary s-btn" onClick={exportBundle}>
             导出诊断包
           </button>
-          <a className="btn-text" href={api.panelLogUrl(range)} target="_blank" rel="noreferrer">
-            查看面板日志 ›
+          <a className="btn-text btn-text-icon" href={api.panelLogUrl(range)} target="_blank" rel="noreferrer">
+            查看面板日志
+            <IcChevronRight size={14} />
           </a>
         </div>
         <p className="s-foot">导出当前选定范围内的日志（.tar.gz）。超过一年的日志自动清理；诊断包不含密码 / 密钥等敏感信息。</p>
@@ -222,7 +224,8 @@ function AboutSection({ isAdmin }: { isAdmin: boolean }) {
         )}
         {isAdmin && (outdatedInst > 0 || remoteNewer) && (
           <div className="ver-hint">
-            ⚠️ {outdatedInst > 0 ? <>另有 <b>{outdatedInst}</b> 个实例的镜像可升级。</> : <>实例镜像检测到新版本。</>}
+            <IcAlert size={16} className="ver-hint-ic" />
+            {outdatedInst > 0 ? <>另有 <b>{outdatedInst}</b> 个实例的镜像可升级。</> : <>实例镜像检测到新版本。</>}
             <b>更新面板不会自动升级实例</b>（二者是不同镜像）——请到「管理」用「一键升级全部实例」。
           </div>
         )}
@@ -233,8 +236,9 @@ function AboutSection({ isAdmin }: { isAdmin: boolean }) {
             </button>
           )}
           {info?.hasUpdate && (
-            <a className="btn-text" href={RELEASES_URL + '/latest'} target="_blank" rel="noreferrer">
-              查看新版 ›
+            <a className="btn-text btn-text-icon" href={RELEASES_URL + '/latest'} target="_blank" rel="noreferrer">
+              查看新版
+            <IcChevronRight size={14} />
             </a>
           )}
           {isAdmin && (
@@ -242,8 +246,9 @@ function AboutSection({ isAdmin }: { isAdmin: boolean }) {
               {checking ? '检查中…' : '检查更新'}
             </button>
           )}
-          <a className="btn-text" href={RELEASES_URL} target="_blank" rel="noreferrer">
-            发布日志 ›
+          <a className="btn-text btn-text-icon" href={RELEASES_URL} target="_blank" rel="noreferrer">
+            发布日志
+            <IcChevronRight size={14} />
           </a>
         </div>
         {info && (
@@ -553,7 +558,7 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
         <span className="ws-title">{isAdmin ? '管理' : '设置'}</span>
       </header>
 
-      <main className="content">
+      <div className="content">
         {err && <div className="error">{err}</div>}
 
         {/* 三 Tab 信息架构：实例（日常） / 用户（账号权限） / 系统（维护+诊断+关于）。
@@ -585,35 +590,36 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
           <>
             <div className="section-row">
               <span className="section-title">实例</span>
-              <button className="btn-text" onClick={() => setCreatingInst(true)}>
-                + 新建实例
+              <button className="btn-text btn-text-icon" onClick={() => setCreatingInst(true)}>
+                <IcPlus size={16} />
+                新建实例
               </button>
             </div>
             {!!(upg?.outdatedCount || upg?.remoteNewer) && instances.length > 0 && (
               <div className="upgrade-banner">
-                <span>
-                  {upg.outdatedCount ? (
-                    <>
-                      有 <b>{upg.outdatedCount}</b> 个实例的镜像可升级到最新版。
-                    </>
-                  ) : (
-                    <>检测到实例镜像有新版本可拉取。</>
-                  )}
-                  <span className="muted small">（更新面板不会自动升级实例，二者是不同镜像）</span>
+                <span className="upgrade-banner-ic">
+                  <IcAlert size={18} />
+                </span>
+                <span className="upgrade-banner-text">
+                  <b>
+                    {upg.outdatedCount ? `有 ${upg.outdatedCount} 个实例的镜像可升级` : '实例镜像有新版本可拉取'}
+                  </b>
+                  <span>更新面板不会顺带升级实例，二者是不同镜像。升级会保留聊天记录。</span>
                 </span>
                 <button className="btn btn-primary s-btn" disabled={upgradingAll} onClick={upgradeAll}>
-                  {upgradingAll ? `升级中 ${upgProgress || '…'}` : '一键升级全部实例'}
+                  {upgradingAll ? `升级中 ${upgProgress || '…'}` : '全部升级'}
                 </button>
               </div>
             )}
             {instances.length === 0 ? (
               <EmptyState
-                icon="🖥️"
+                icon={<IcMonitor size={44} />}
                 title="还没有实例"
                 sub="新建一个实例（微信 / Chromium 浏览器），进入后即可在浏览器里使用"
                 action={
                   <button className="btn btn-primary" onClick={() => setCreatingInst(true)}>
-                    ＋ 新建实例
+                    <IcPlus size={18} />
+                    新建实例
                   </button>
                 }
               />
@@ -650,18 +656,20 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
           <>
             <div className="section-row">
               <span className="section-title">子账号</span>
-              <button className="btn-text" onClick={() => setCreatingUser(true)}>
-                + 新建子账号
+              <button className="btn-text btn-text-icon" onClick={() => setCreatingUser(true)}>
+                <IcPlus size={16} />
+                新建子账号
               </button>
             </div>
             {subs.length === 0 ? (
               <EmptyState
-                icon="👥"
+                icon={<IcUsers size={44} />}
                 title="还没有子账号"
                 sub="子账号是登录这套面板的身份，可按账号分配能访问哪些实例"
                 action={
                   <button className="btn btn-primary" onClick={() => setCreatingUser(true)}>
-                    ＋ 新建子账号
+                    <IcPlus size={18} />
+                    新建子账号
                   </button>
                 }
               />
@@ -713,17 +721,17 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
               <>
                 <div className="section-row">
                   <span className="section-title">残留容器</span>
-                  <span className="muted small">不属于任何登记实例（多为创建失败遗留）；它们占着数据卷名，需先清理它们才能删除同名数据卷。</span>
                 </div>
+                <p className="section-desc">不属于任何登记实例，多为创建失败遗留。它们占着数据卷名，先删掉它们才能删除同名数据卷。</p>
                 <div className="inst-grid">
                   {orphanConts.map((c) => (
                     <div key={c.id} className="inst-card">
                       <div className="inst-head">
-                        <span className="inst-name" style={{ fontFamily: 'monospace', fontSize: 13 }}>{c.name}</span>
+                        <span className="inst-name mono">{c.name}</span>
                         <span className="tag tag-off">{c.status || 'unknown'}</span>
                       </div>
                       {c.volumeName && (
-                        <div className="inst-sub" style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                        <div className="inst-sub mono">
                           占用卷：{c.volumeName}
                         </div>
                       )}
@@ -741,13 +749,13 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
               <>
                 <div className="section-row" style={{ marginTop: 22 }}>
                   <span className="section-title">未使用的数据卷</span>
-                  <span className="muted small">删除实例时未勾选「彻底清除」会保留下来；可在新建实例时复用以继承聊天记录。</span>
                 </div>
+                <p className="section-desc">删除实例时没勾选「同时永久删除聊天记录」就会留下来。新建实例时可以复用，继承原来的聊天记录。</p>
                 <div className="inst-grid">
                   {orphanVols.map((v) => (
                     <div key={v.name} className="inst-card">
                       <div className="inst-head">
-                        <span className="inst-name" style={{ fontFamily: 'monospace', fontSize: 13 }}>{v.name}</span>
+                        <span className="inst-name mono">{v.name}</span>
                       </div>
                       <div className="inst-sub">
                         {v.createdAt ? `创建于 ${v.createdAt.slice(0, 10)}` : '创建时间未知'}
@@ -794,7 +802,7 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
 
         {isAdmin && tab === 'system' && <DiagnosticsSection />}
         {(!isAdmin || tab === 'system') && <AboutSection isAdmin={isAdmin} />}
-      </main>
+      </div>
 
       {creatingUser && (
         <CreateUser
@@ -927,7 +935,7 @@ function RenameInstance({ inst, onClose, onDone }: { inst: InstanceWithStatus; o
   };
   return (
     <div className="modal-mask" onClick={onClose}>
-      <form className="card modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+      <form className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <h2>重命名实例</h2>
         <input className="input" placeholder="实例名称" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
         {err && <div className="error">{err}</div>}
@@ -963,7 +971,7 @@ function RenameUser({ user, onClose, onDone }: { user: PanelUser; onClose: () =>
   };
   return (
     <div className="modal-mask" onClick={onClose}>
-      <form className="card modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+      <form className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <h2>修改用户名</h2>
         <input className="input" placeholder="新用户名（3-20 位字母/数字/下划线）" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
         <div className="muted small" style={{ marginTop: 6 }}>改的是登录用户名；改后保持登录，下次用新用户名登录。</div>
@@ -1006,7 +1014,7 @@ function ResetPassword({ user, onClose, onDone }: { user: PanelUser; onClose: ()
   };
   return (
     <div className="modal-mask" onClick={onClose}>
-      <form className="card modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+      <form className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <h2>重置「{user.username}」的密码</h2>
         <PasswordInput placeholder="新密码（至少 6 位）" autoComplete="new-password" value={pw} onChange={setPw} />
         <PasswordInput placeholder="再次输入新密码" autoComplete="new-password" value={confirm} onChange={setConfirm} />
@@ -1130,8 +1138,8 @@ function InstanceSecurity({ inst, onClose, onDone }: { inst: InstanceWithStatus;
 
   return (
     <div className="modal-mask" onClick={onClose}>
-      <form className="card modal" onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ maxWidth: 460 }}>
-        <h2>安全 · {inst.name}</h2>
+      <form className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ maxWidth: 460 }}>
+        <h2>内存安全阈值 · {inst.name}</h2>
         {!loaded ? (
           <div className="muted small" style={{ padding: '14px 0' }}>读取中…</div>
         ) : !data ? (
@@ -1234,18 +1242,24 @@ function DeleteInstance({ inst, onClose, onDone }: { inst: InstanceWithStatus; o
   };
   return (
     <div className="modal-mask" onClick={onClose}>
-      <div className="card modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 360 }}>
+      <div className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 360 }}>
         <h2>删除实例「{inst.name}」？</h2>
         <div className="muted" style={{ fontSize: 14, lineHeight: 1.5 }}>
           容器会被移除。默认保留聊天记录（数据卷），之后可重建同名实例恢复。
         </div>
-        <label className={'purge-opt' + (purge ? ' on' : '')} onClick={() => setPurge((v) => !v)}>
-          <span className="purge-check">{purge ? '✓' : ''}</span>
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={purge}
+          className={'purge-opt' + (purge ? ' on' : '')}
+          onClick={() => setPurge((v) => !v)}
+        >
+          <span className="purge-check">{purge && <IcCheck size={14} />}</span>
           <span>
             同时永久删除聊天记录（数据卷）
             <span className="muted small" style={{ display: 'block' }}>不可恢复，请谨慎勾选</span>
           </span>
-        </label>
+        </button>
         {err && <div className="error">{err}</div>}
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>
@@ -1313,8 +1327,15 @@ function InstanceAdminCard({
     const onDocDown = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpen(false);
+    };
     document.addEventListener('mousedown', onDocDown);
-    return () => document.removeEventListener('mousedown', onDocDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocDown);
+      document.removeEventListener('keydown', onKey);
+    };
   }, [menuOpen]);
 
   const profile = appProfile(inst.appType);
@@ -1381,90 +1402,84 @@ function InstanceAdminCard({
 
       {/* 进行中（升级/重启/停止/下载）时隐藏所有操作，避免重复点击 */}
       {!working && (
-        <>
-          <div className="inst-actions">
-            {offline ? (
-              <button className="btn btn-primary inst-act-wide" onClick={onStart}>
-                {createFailed ? '重试创建' : inst.runtime === 'missing' ? '创建并启动' : '启动实例'}
-              </button>
-            ) : !installed && profile.needsInstall ? (
-              // 容器建好但应用还没装：主按钮直接是「下载安装」。此前是一个灰掉的「进入实例」、安装入口藏在「管理」菜单里，
-              // 用户以为实例没建好（#129 下「同问」的用户最后是在「管理」里找到了下载安装）
-              <button className="btn btn-primary inst-act-wide" onClick={() => onTrigger(inst, 'install')}>
-                {wx.phase === 'error' ? '重新下载安装' : `下载安装${profile.label}`}
-              </button>
-            ) : (
-              <button className="btn btn-primary inst-act-wide" disabled={!installed} onClick={onEnter} title={installed ? '' : '需先下载安装' + profile.label}>
-                进入实例
-              </button>
-            )}
-          </div>
-
-          <div className="inst-menu-wrap" ref={menuRef}>
-            <button className={'inst-menu-toggle' + (menuOpen ? ' open' : '')} onClick={() => setMenuOpen((v) => !v)}>
-              <span>管理</span>
-              <span className="inst-menu-caret">{CaretIcon}</span>
+        <div className="inst-actions" ref={menuRef}>
+          {offline ? (
+            <button className="btn btn-primary inst-act-wide" onClick={onStart}>
+              {createFailed ? '重试创建' : inst.runtime === 'missing' ? '创建并启动' : '启动实例'}
             </button>
+          ) : !installed && profile.needsInstall ? (
+            // 容器建好但应用还没装：主按钮直接是「下载安装」。此前是一个灰掉的「进入实例」、安装入口藏在「管理」菜单里，
+            // 用户以为实例没建好（#129 下「同问」的用户最后是在「管理」里找到了下载安装）
+            <button className="btn btn-primary inst-act-wide" onClick={() => onTrigger(inst, 'install')}>
+              {wx.phase === 'error' ? '重新下载安装' : `下载安装${profile.label}`}
+            </button>
+          ) : (
+            <button className="btn btn-primary inst-act-wide" disabled={!installed} onClick={onEnter} title={installed ? '' : '需先下载安装' + profile.label}>
+              进入实例
+            </button>
+          )}
 
-            {menuOpen && (
-              <div className="inst-menu" onClick={() => setMenuOpen(false)}>
-              <div className="inst-menu-group">
-                <div className="inst-menu-label">运维</div>
-                <div className="inst-menu-items">
-                  {!offline && profile.needsInstall && (
-                    <button className="btn-text" onClick={() => onTrigger(inst, installed ? 'update' : 'install')}>
-                      {installed ? profile.updateLabel : '下载安装'}
-                    </button>
-                  )}
-                  <button className="btn-text" onClick={onUpgrade} title="拉取最新镜像并重建（保留聊天记录）">
-                    升级实例
-                  </button>
-                  {!offline && (
-                    <button className="btn-text" onClick={onRestart}>
-                      重启
-                    </button>
-                  )}
-                  {!offline && (
-                    <button className="btn-text" onClick={onStop}>
-                      停止
-                    </button>
-                  )}
-                </div>
-              </div>
-              <div className="inst-menu-group">
-                <div className="inst-menu-label">设置</div>
-                <div className="inst-menu-items">
-                  <button className="btn-text" onClick={onRename}>
-                    重命名
-                  </button>
-                  <button className="btn-text" onClick={onAssign}>
-                    分配账户
-                  </button>
-                  <button className="btn-text" onClick={() => window.open(api.instanceLogsUrl(inst.id), '_blank')} title="查看实例日志（含历史：重启原因 + 上一容器日志快照，跨重启保留）">
-                    日志
-                  </button>
-                  <button className="btn-text" onClick={onSecurity} title="内存阈值自愈">
-                    安全
-                  </button>
-                  <button className="btn-text" onClick={onIcon} title="设置实例图标：内置图标 / 上传图片裁剪">
-                    图标
-                  </button>
-                  <button className="btn-text" onClick={onVolume} title="数据卷：备份/恢复、上传 PC 微信数据、文件管理">
-                    数据卷
-                  </button>
-                </div>
-              </div>
-              <div className="inst-menu-group inst-menu-danger">
-                <div className="inst-menu-items">
-                  <button className="btn-text danger" onClick={onDelete}>
-                    删除实例
-                  </button>
-                </div>
-              </div>
+          {/* 「管理」与主按钮同排：次要动作收进悬浮菜单，按 运维 / 设置 / 危险 分组，一行一项便于扫读 */}
+          <button
+            className={'btn inst-menu-toggle' + (menuOpen ? ' open' : '')}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+          >
+            管理
+            <span className="inst-menu-caret">{CaretIcon}</span>
+          </button>
+
+          {menuOpen && (
+            <div className="inst-menu" role="menu" onClick={() => setMenuOpen(false)}>
+              <div className="inst-menu-label">运维</div>
+              {!offline && profile.needsInstall && (
+                <button role="menuitem" className="inst-menu-item" onClick={() => onTrigger(inst, installed ? 'update' : 'install')}>
+                  {installed ? profile.updateLabel : '下载安装'}
+                </button>
+              )}
+              <button role="menuitem" className="inst-menu-item" onClick={onUpgrade} title="拉取最新镜像并重建（保留聊天记录）">
+                升级实例
+                {outdated && <span className="tag tag-warn">可升级</span>}
+              </button>
+              {!offline && (
+                <button role="menuitem" className="inst-menu-item" onClick={onRestart}>
+                  重启
+                </button>
+              )}
+              {!offline && (
+                <button role="menuitem" className="inst-menu-item" onClick={onStop}>
+                  停止
+                </button>
+              )}
+              <button role="menuitem" className="inst-menu-item" onClick={() => window.open(api.instanceLogsUrl(inst.id), '_blank')} title="查看实例日志（含历史：重启原因 + 上一容器日志快照，跨重启保留）">
+                日志
+              </button>
+
+              <div className="inst-menu-label">设置</div>
+              <button role="menuitem" className="inst-menu-item" onClick={onRename}>
+                重命名
+              </button>
+              <button role="menuitem" className="inst-menu-item" onClick={onAssign}>
+                分配账户
+              </button>
+              <button role="menuitem" className="inst-menu-item" onClick={onIcon} title="设置实例图标：内置图标 / 上传图片裁剪">
+                图标
+              </button>
+              <button role="menuitem" className="inst-menu-item" onClick={onSecurity} title="内存阈值自愈">
+                内存安全阈值
+              </button>
+              <button role="menuitem" className="inst-menu-item" onClick={onVolume} title="数据卷：备份/恢复、上传 PC 微信数据、文件管理">
+                数据卷
+              </button>
+
+              <div className="inst-menu-sep" />
+              <button role="menuitem" className="inst-menu-item danger" onClick={onDelete}>
+                删除实例
+              </button>
             </div>
-            )}
-          </div>
-        </>
+          )}
+        </div>
       )}
     </div>
   );
@@ -1537,7 +1552,7 @@ function InstanceIconEditor({ inst, onClose, onDone }: { inst: InstanceWithStatu
 
   return (
     <div className="modal-mask" onClick={onClose}>
-      <div className="card modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 460 }}>
+      <div className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 460 }}>
         <h2>图标 · {inst.name}</h2>
         {cropSrc ? (
           <>
@@ -1729,7 +1744,7 @@ function VolumeManager({ inst, onClose, onChanged }: { inst: InstanceWithStatus;
 
   return (
     <div className="modal-mask" onClick={onClose}>
-      <div className="card modal vol-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="card modal vol-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <h2>数据卷 · {inst.name}</h2>
 
         {/* 整卷备份 / 恢复（运行/停止均可用） */}
@@ -1932,7 +1947,7 @@ function CreateUser({ instances, onClose, onDone }: { instances: InstanceWithSta
 
   return (
     <div className="modal-mask" onClick={onClose}>
-      <form className="card modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+      <form className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <h2>新建子账号</h2>
         <input
           className="input"
@@ -2014,7 +2029,7 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
 
   return (
     <div className="modal-mask" onClick={onClose}>
-      <form className="card modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+      <form className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <h2>新建实例</h2>
         <div className="field-label">应用类型</div>
         <div className="app-picker">
@@ -2032,7 +2047,10 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
             </button>
           ))}
         </div>
-        <input className="input" placeholder="实例名称（留空自动命名）" maxLength={30} value={name} onChange={(e) => setName(e.target.value)} />
+        <label className="field-label" htmlFor="ci-name">
+          实例名称
+        </label>
+        <input id="ci-name" className="input" placeholder="留空自动命名" maxLength={30} value={name} onChange={(e) => setName(e.target.value)} />
         {appType === 'chromium' && (
           <div className="muted small">Chromium 浏览器随镜像就绪，创建后直接「进入实例」即可（无需下载安装）。</div>
         )}
@@ -2048,8 +2066,10 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
         />
         {orphans.length > 0 && (
           <>
-            <div className="field-label" style={{ marginTop: 12 }}>数据卷（可选）</div>
-            <select className="input" value={reuse} onChange={(e) => setReuse(e.target.value)}>
+            <label className="field-label" htmlFor="ci-volume" style={{ marginTop: 12 }}>
+              数据卷（可选）
+            </label>
+            <select id="ci-volume" className="input" value={reuse} onChange={(e) => setReuse(e.target.value)}>
               <option value="">新建空卷（全新登录）</option>
               {orphans.map((v) => (
                 <option key={v.name} value={v.name}>
@@ -2059,7 +2079,7 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
               ))}
             </select>
             <div className="muted small" style={{ marginTop: 4 }}>
-              复用旧卷需**用原微信号扫码登录**才能解密历史消息；用别的号登录将看不到旧记录。
+              复用旧卷需<b>用原微信号扫码登录</b>才能解密历史消息；用别的号登录将看不到旧记录。
             </div>
           </>
         )}
@@ -2111,7 +2131,7 @@ function AssignUsers({
 
   return (
     <div className="modal-mask" onClick={onClose}>
-      <div className="card modal" onClick={(e) => e.stopPropagation()}>
+      <div className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <h2>「{inst.name}」可访问账户</h2>
         <ChipMultiSelect
           options={subs.map((u) => ({ id: u.id, label: u.username }))}
@@ -2163,7 +2183,7 @@ function AssignInstances({
 
   return (
     <div className="modal-mask" onClick={onClose}>
-      <div className="card modal" onClick={(e) => e.stopPropagation()}>
+      <div className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <h2>{user.username} 可访问实例</h2>
         <ChipMultiSelect
           options={instances.map((i) => ({ id: i.id, label: i.name }))}

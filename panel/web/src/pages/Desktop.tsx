@@ -5,6 +5,7 @@ import { browserImageCodec, fitPasteImage, pasteImageWithFallback } from '../pas
 import { useUI } from '../ui';
 import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
+import { IcFolder, IcKeyboard, IcClipboard, IcVolume, IcVolumeOff, IcMic, IcImage, IcRestart, IcUpload, IcDownload, IcClose, IcCheck } from '../icons';
 import { VncAudio } from '../vncAudio';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
@@ -1440,14 +1441,16 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           //（此前 390px 宽时「桌面」「重启」完全在屏幕外点不到，标题也被压成 0 宽）
           <div className="ws-actions">
             <button
-              className="ws-action"
+              className={'ws-action' + (showFiles ? ' on' : '')}
               title="文件传输"
+              aria-pressed={showFiles}
               onClick={() => {
                 setShowFiles((v) => !v);
                 if (!showFiles) refreshFiles();
               }}
             >
-              {uploading ? `文件 ${uploadPct}` : '文件'}
+              <IcFolder />
+              <span>{uploading ? `文件 ${uploadPct}` : '文件'}</span>
             </button>
             <button
               className={'ws-action' + (inputMode === 'seamless' ? ' on' : '')}
@@ -1458,21 +1461,26 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               }
               onClick={() => setMode(inputMode === 'seamless' ? 'forward' : 'seamless')}
             >
-              输入：{inputMode === 'seamless' ? '无感' : '转发'}
+              <IcKeyboard />
+              <span>输入：{inputMode === 'seamless' ? '无感' : '转发'}</span>
             </button>
             <button
-              className="ws-action"
+              className={'ws-action' + (showClip ? ' on' : '')}
               title="把文本发送到容器剪贴板（局域网 http 下也可用）"
+              aria-pressed={showClip}
               onClick={() => setShowClip((v) => !v)}
             >
-              剪贴板
+              <IcClipboard />
+              <span>剪贴板</span>
             </button>
             <button
               className={'ws-action' + (soundOn ? ' on' : '')}
               title={soundOn ? '声音已开：已连接实例音频。点击关闭（关闭可减少一条到实例的连接，更稳）' : '声音已关：默认不连音频桥（连接更稳）。点此开启以听到实例声音'}
+              aria-pressed={soundOn}
               onClick={toggleSound}
             >
-              声音：{soundOn ? '开' : '关'}
+              {soundOn ? <IcVolume /> : <IcVolumeOff />}
+              <span>声音：{soundOn ? '开' : '关'}</span>
             </button>
             {soundOn && (
               <button
@@ -1482,18 +1490,24 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                     ? '麦克风已开：占用本机麦克风（AirPods 等可能被切到低音质通话模式）。点击关闭'
                     : '麦克风已关：不占用麦克风，AirPods 保持高音质输出。需要语音/通话时点此开启'
                 }
+                aria-pressed={micOn}
                 onClick={toggleMic}
               >
-                麦克风：{micOn ? '开' : '关'}
+                <IcMic />
+                <span>麦克风：{micOn ? '开' : '关'}</span>
               </button>
             )}
             {isAdmin && (
               <>
-                <button className={'ws-action' + (showSettings ? ' on' : '')} title="桌面设置（壁纸/字体）" onClick={() => { setShowSettings((v) => !v); if (!showSettings) { refreshBgList(); refreshFontList(); } }}>
-                  桌面
+                <button className={'ws-action' + (showSettings ? ' on' : '')} title="桌面设置（壁纸/字体）" aria-pressed={showSettings} onClick={() => { setShowSettings((v) => !v); if (!showSettings) { refreshBgList(); refreshFontList(); } }}>
+                  <IcImage />
+                  <span>桌面</span>
                 </button>
+                {/* 重启会断开所有人的连接：与日常开关隔开，避免顺手误点 */}
+                <span className="ws-action-sep" aria-hidden="true" />
                 <button className="ws-action" title="重启实例（修复卡死/最小化丢失）" onClick={restartInstance}>
-                  重启
+                  <IcRestart />
+                  <span>重启</span>
                 </button>
               </>
             )}
@@ -1655,7 +1669,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           {dragging && (
             <div className="iv-drop" onDrop={onDrop} onDragOver={(e) => e.preventDefault()}>
               <div className="drop-card">
-                <div className="drop-icon">⬇</div>
+                <div className="drop-icon"><IcUpload size={36} /></div>
                 <div className="drop-title">松开上传到桌面</div>
                 <div className="drop-sub">上传后在应用里「+ / 文件」选择即可</div>
               </div>
@@ -1711,7 +1725,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 }}
               />
               <button className="btn btn-primary files-upload" disabled={uploading} onClick={() => fileInput.current?.click()}>
-                {uploading ? `上传中 ${uploadPct}` : '＋ 选择文件上传'}
+                <IcUpload size={18} />
+                {uploading ? `上传中 ${uploadPct}` : '选择文件上传'}
               </button>
               <div className="files-hint">也可直接把文件拖进来。下方为桌面（~/Desktop）里的文件，应用收到的文件另存到桌面即可在此下载。</div>
               <div className="files-list">
@@ -1724,10 +1739,13 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   <div key={f.name} className="files-item">
                     <a className="files-dl" href={api.downloadFileUrl(id, f.name)} download={f.name} title="下载">
                       <span className="files-name">{f.name}</span>
-                      <span className="files-size">{humanSize(f.size)} ↓</span>
+                      <span className="files-size">
+                        {humanSize(f.size)}
+                        <IcDownload size={14} />
+                      </span>
                     </a>
-                    <button className="files-del" title="删除" onClick={() => delFile(f.name)}>
-                      ✕
+                    <button className="files-del" title="删除" aria-label={`删除 ${f.name}`} onClick={() => delFile(f.name)}>
+                      <IcClose size={16} />
                     </button>
                   </div>
                 ))}
@@ -1754,7 +1772,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 发送到剪贴板
               </button>
               <button className="btn-text" style={{ alignSelf: 'flex-start', marginTop: 6 }} onClick={pullClipboardFromRemote}>
-                ↓ 读取容器剪贴板到此框
+                读取容器剪贴板到此框
               </button>
               <div className="files-hint">
                 局域网 http 访问时浏览器会禁用系统级剪贴板同步，故用此框中转：文本→容器剪贴板，再在应用里 Ctrl+V。
@@ -1777,10 +1795,11 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 <div className="settings-panel">
                   <input ref={bgInput} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={uploadBg} />
                   <button className="btn btn-primary files-upload" disabled={bgUploading} onClick={() => bgInput.current?.click()}>
-                    {bgUploading ? '上传中…' : '＋ 上传壁纸'}
+                    <IcUpload size={18} />
+                    {bgUploading ? '上传中…' : '上传壁纸'}
                   </button>
                   {currentBg && (
-                    <button className="btn-text" style={{ alignSelf: 'flex-start', color: 'var(--danger)', fontSize: 12 }} onClick={clearBg}>
+                    <button className="btn-text danger btn-text-sm" style={{ alignSelf: 'flex-start' }} onClick={clearBg}>
                       清除壁纸，恢复默认黑屏
                     </button>
                   )}
@@ -1792,8 +1811,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                         <div className="bg-thumb-wrap">
                           <img className="bg-thumb" src={`/api/admin/instances/${id}/backgrounds/${encodeURIComponent(name)}/image`} alt={name} loading="lazy" />
                           {currentBg !== name && <div className="bg-hint">单击应用</div>}
-                          {currentBg === name && <span className="bg-active-badge">✓ 使用中</span>}
-                          <button className="bg-del" title="删除" onClick={(e) => { e.stopPropagation(); deleteBg(name); }}>✕</button>
+                          {currentBg === name && <span className="bg-active-badge"><IcCheck size={12} />使用中</span>}
+                          <button className="bg-del" title="删除" aria-label={`删除壁纸 ${name}`} onClick={(e) => { e.stopPropagation(); deleteBg(name); }}><IcClose size={14} /></button>
                         </div>
                         <span className="bg-name">{name}</span>
                       </div>
@@ -1806,10 +1825,11 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 <div className="settings-panel">
                   <input ref={fontInput} type="file" accept=".ttf,.otf,.ttc" multiple style={{ display: 'none' }} onChange={uploadFont} />
                   <button className="btn btn-primary files-upload" disabled={fontUploading} onClick={() => fontInput.current?.click()}>
-                    {fontUploading ? '上传中…' : '＋ 上传字体'}
+                    <IcUpload size={18} />
+                    {fontUploading ? '上传中…' : '上传字体'}
                   </button>
                   {currentFont && (
-                    <button className="btn-text" style={{ alignSelf: 'flex-start', color: 'var(--danger)', fontSize: 12 }} onClick={resetFontDefault}>
+                    <button className="btn-text danger btn-text-sm" style={{ alignSelf: 'flex-start' }} onClick={resetFontDefault}>
                       恢复默认（文泉驿）
                     </button>
                   )}
@@ -1818,8 +1838,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   <div className="font-grid">
                     {fontList.map((name) => (
                       <div key={name} className={'font-card' + (currentFont === name ? ' active' : '')} onClick={() => applyUserFont(name)} title="点击应用">
-                        {currentFont === name && <span className="font-badge">✓ 使用中</span>}
-                        <button className="font-del" title="删除" onClick={(e) => { e.stopPropagation(); deleteFont(name); }}>✕</button>
+                        {currentFont === name && <span className="font-badge"><IcCheck size={12} />使用中</span>}
+                        <button className="font-del" title="删除" aria-label={`删除字体 ${name}`} onClick={(e) => { e.stopPropagation(); deleteFont(name); }}><IcClose size={14} /></button>
                         <div className="font-preview">
                           <span className="font-preview-text">Aa</span>
                         </div>

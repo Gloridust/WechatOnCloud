@@ -29,11 +29,18 @@
 | `--surface` | `#ffffff` | `#23262f` | 浮起表面（卡片/按钮 fill）——**必须 ≥ base 亮度** |
 | `--trough` | `#e0e3ea` | `#0e0f14` | 凹槽（输入框/进度槽/折叠菜单条）——比 base 更暗 |
 | `--text` | `#1a1d24` | `#e7eaef` | 主文字 |
-| `--muted` | `#8a9099` | `#969ca6` | 次文字（**最低到此级，不用三级灰**） |
-| `--wx-green` / `--wx-green-dark` | `#07c160` / `#06ad56` | 同 | 主色 / 主色按下态 |
-| `--danger` | `#fa5151` | 同 | 危险/离线/删除 |
+| `--muted` | `#5f6570` | `#9aa0aa` | 次文字（**最低到此级，不用三级灰**）。白底 5.9:1、凹槽 4.6:1 |
+| `--wx-green` / `--wx-green-dark` | `#07c160` / `#06ad56` | 同 | 品牌**标记**：Logo、状态点、进度条、选中底色。**不用于文字、不做白字底** |
+| `--accent` | `#05703a` | `#2fd47f` | 绿色**文字**：文本按钮、选中项、徽标字、链接 |
+| `--accent-fill` / `-press` | `#067a3c` / `#05652f` | 同 | 主按钮、开关「开」态等**白字的绿底**（白字 5.4:1） |
+| `--danger` | `#b42828` | `#ff7a7a` | 危险**文字**（删除、离线、失败原因） |
+| `--danger-fill` | `#cc3030` | `#c93434` | 危险按钮等**白字的红底** |
+| `--info` / `--info-dot` | `#2456c4` / `#2f7ad0` | `#7aa7ff` | 处理中：文字 / 状态点 |
+| `--warn` / `--warn-dot` | `#8a5800` / `#e6a23c` | `#f0b44c` | 可升级、待安装：文字 / 状态点 |
 | `--shadow` | `51 66 102`(冷灰蓝) | `0 0 0`(近纯黑) | 阴影色 RGB，配 `rgba(var(--shadow)/α)` |
 | `--green-rgb` / `--danger-rgb` | `7 193 96` / `250 81 81` | 同 | 半透强调用 |
+
+**为什么绿分三档**：`#07c160` 上白字只有 2.4:1、在白底上当文字只有 2.4:1，都过不了 WCAG AA（4.5:1）。所以亮绿只做「标记」，文字和白字底换成同色相的深一档。色相不变，用户的「微信绿」肌肉记忆不受影响。新增颜色先算对比度（文字 ≥4.5:1），过不了就加 ink/fill 两档，别直接拿亮色当字色。
 
 深色不是简单反色：`base` 用**亮蓝黑**、`surface` 再高一档、阴影转近纯黑、顶面高光压到极淡（0.06）。
 
@@ -61,7 +68,8 @@
 
 ### 动效曲线
 
-- **主 spring**：`cubic-bezier(0.2, 0.8, 0.2, 1)`，时长 0.16–0.2s（按钮、输入聚焦、Tab）。全站已用 12+ 处，别引入别的曲线。
+- **主 spring**：`var(--ease)` = `cubic-bezier(0.2, 0.8, 0.2, 1)`，时长 0.16–0.2s（按钮、输入聚焦、Tab）。新代码用令牌，别引入别的曲线。
+- 只动 `transform` / `opacity`（不确定进度条也用 `translateX`，不动 `margin`/`width` 做循环）。
 - Toast 入场：`cubic-bezier(0.2, 0.9, 0.2, 1)`，0.32s。
 
 ## 三、布局与信息架构
@@ -110,8 +118,20 @@
 外层 `trough` 凹槽胶囊（无外折痕），选中项是**顶起的 surface 白胶囊**（`--crease` + 绿字）。这套「凹槽 + 浮起 bump」和输入框凹陷同构，是本设计系统区分「选中/未选中」的标准范式。
 > **理想增强**：选中指示器用 matched-geometry「滑动」而非淡入淡出（当前是 background 渐变过渡，可接受）。未来若做，用一个绝对定位的 bump + `transform` 过渡在选项间滑动。
 
-### 折叠菜单 `.inst-menu-toggle` + `.inst-menu`
-操作多时收进「管理」折叠菜单，按 运维/设置/危险 **分组**，危险项 `.inst-menu-danger` 单列。悬浮层不占文档流，点外部关闭。
+### 卡片操作行 + 管理菜单 `.inst-actions` / `.inst-menu-toggle` / `.inst-menu`
+卡片底部一行：左边主按钮（`.inst-act-wide`，占满剩余宽度），右边「管理 ▾」次要按钮（`.btn.inst-menu-toggle`）。
+菜单是右对齐的悬浮层（`role="menu"`），**一行一项**（`.inst-menu-item`，≥36px 高），按 运维 / 设置 分组（`.inst-menu-label`），`.inst-menu-sep` 后放危险项（`.inst-menu-item.danger`）。点外部或 Esc 关闭。
+别再用「一排绿色文字链接自动换行」——换行后很难扫读，也分不清哪个危险。
+
+### 顶栏工具按钮 `.ws-action`
+图标 + 文字的浮起胶囊，**默认中性色**（文字 `--text`、图标 `--muted`），悬停变绿；开关类用 `aria-pressed`，开启态 `.on` = `--accent-fill` 白字。
+影响所有人的动作（重启）前放 `.ws-action-sep` 隔开。手机宽度只显示图标（文字移出视觉但保留给读屏）。
+
+### 提示条 `.warn-banner` / `.upgrade-banner`
+浮起白卡 + 左侧淡色图标块（危险红 / 琥珀）+ 两行文字（粗体结论 + 次文字说明）+ 右侧一个动作。**不用整块彩色底 + 彩色文字**（对比度不够，也太吵）。
+
+### 图标 `src/icons.tsx`
+全站线性图标集中在 `icons.tsx`（24 网格、2px 描边、圆角端点）。**禁止用 emoji 或 Unicode 字符当图标**（`🖥️ ⚠️ ＋ › ✓ ✕ ↓`）：不同系统字体下大小、基线、颜色都不一致。缺图标就往 `icons.tsx` 里加一个同风格的。
 
 ### 空状态 `.empty-state`
 中心 120px 的 surface 圆 blob（`.empty-blob` + 折痕 + 高光）+ 图标（ultraLight）+ 标题 + 副标题 + 一个主按钮。别用一行冷冰冰的「暂无数据」。
@@ -121,6 +141,8 @@ Toast 右上滑入（`.toast-ok`/`.toast-error`）。进度条：确定进度用
 
 ### 模态 `.modal-mask` + `.modal`
 遮罩点击关闭（内容 `stopPropagation`），`.modal-actions` 右对齐（取消在左、主/危险动作在右）。
+弹窗容器带 `role="dialog" aria-modal="true"`；Esc 关闭由 `UIProvider` 统一处理（等同点最上层遮罩），新弹窗沿用「点遮罩关闭」即自动支持。
+输入框要有可见的 `<label className="field-label" htmlFor>`；只靠 placeholder 当标签不行（一输入就消失、读屏也读不到）。
 
 ## 五、动效规范
 
@@ -131,7 +153,9 @@ Toast 右上滑入（`.toast-ok`/`.toast-error`）。进度条：确定进度用
 ## 六、无障碍（基线，不是可选项）
 
 - **键盘焦点环**：全局 `:focus-visible` → 2px 绿色 outline + 2px offset。**只在键盘导航时出现**，鼠标点击不触发。无边框的拟物 UI 尤其需要它，否则键盘用户完全看不到焦点。输入框用自带内环、不叠加。
-- **对比度**：文字最低到 `--muted`，**不用三级灰**（亮白 surface 上会糊）。
+- **对比度**：正文 / 次文字 / placeholder 都 ≥ 4.5:1（WCAG AA）。文字最低到 `--muted`，**不用三级灰**；绿色/红色文字用 `--accent` / `--danger`，不用亮色 `--wx-green`。
+- **浏览器表面**：选区、光标（`caret-color`）、原生控件（`accent-color`）、滚动条都已按令牌着色（`styles.css` 顶部）。
+- **语义**：页面里只有一个 `<main>`（壳层 `.workspace`），页面内容用 `<div className="content">`；自定义勾选框用 `role="checkbox"` + `aria-checked` 的按钮。
 - **触摸目标**：交互元素 ≥ 44×44（按钮 48 高达标；小图标按钮注意留足点击区）。
 - **减弱动效**：见上，尊重系统设置。
 
@@ -151,6 +175,9 @@ Toast 右上滑入（`.toast-ok`/`.toast-error`）。进度条：确定进度用
 | 组件 fill = base 或更暗 | 组件必须 `--surface`，**亮于 base** |
 | 标题行塞名字+3 个徽标 | 标题行只留名字+1 状态徽标，其余进 `.inst-meta` |
 | 写死 `#07c160` / `box-shadow: ...黑` | 用 `--wx-green` / `--crease` 令牌 |
+| 亮绿 `--wx-green` 当文字色或白字底 | 文字用 `--accent`，白字底用 `--accent-fill` |
+| emoji / `›` `＋` `✕` 当图标 | `icons.tsx` 里的线性图标 |
+| 一排彩色文字链接塞满卡片底部 | 主按钮 +「管理 ▾」菜单，一行一项 |
 | 直角或 8px 小圆角 | ≥16px 或胶囊 |
 | 亮白 surface 上用三级灰文字 | 最低 `--muted` |
 | 无键盘焦点样式 | 全局 `:focus-visible` 绿环 |
@@ -161,6 +188,8 @@ Toast 右上滑入（`.toast-ok`/`.toast-error`）。进度条：确定进度用
 - [ ] 浮起组件有 `surface` fill + `--crease` + `::before` 的 `--sheen`；
 - [ ] 阴影 `x=0`、`y≤6`、无大散射；圆角 ≥16 或胶囊；
 - [ ] 组件亮度 ≥ base；无 border/分割线；无三级灰文字；
+- [ ] 文字对比度 ≥4.5:1（绿字 `--accent`、红字 `--danger`，不用亮色当字色）；
+- [ ] 图标来自 `icons.tsx`，没有 emoji / Unicode 字符图标；输入框有可见 label；
 - [ ] 标题行 ≤ 名字 + 1 徽标，其余进元数据行；
 - [ ] 深浅色都过一遍（`data-theme` 切换）；
 - [ ] 键盘 Tab 能看到焦点环；`prefers-reduced-motion` 下无眩晕动画；

@@ -4,6 +4,7 @@ import { useAuth } from './auth';
 import { useUI, PasswordInput } from './ui';
 import { api, appProfile, type InstanceWithStatus } from './api';
 import { InstanceIcon } from './AppIcon';
+import { IcShield, IcChevronRight } from './icons';
 import { getThemeMode, applyThemeMode, nextThemeMode, resolveDark, type ThemeMode } from './theme';
 import InstanceView from './pages/Desktop';
 import Admin from './pages/Admin';
@@ -352,10 +353,16 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
 
         {user?.mustChangePassword && (
           <button className="warn-banner" onClick={onChangePassword}>
-            <span className="warn-icon">!</span>
+            <span className="warn-icon">
+              <IcShield size={20} />
+            </span>
             <span className="warn-text">
               <b>你还在使用默认密码</b>
-              <span>该系统登录着你的微信，请立即修改密码 ›</span>
+              <span>这个面板登录着你的微信，任何知道默认密码的人都能进来。</span>
+            </span>
+            <span className="warn-cta">
+              立即修改
+              <IcChevronRight size={16} />
             </span>
           </button>
         )}
@@ -363,8 +370,9 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
         <div className="section-row">
           <span className="section-title">我的实例</span>
           {isAdmin && (
-            <button className="btn-text" onClick={() => nav('/admin')}>
-              管理 ›
+            <button className="btn-text btn-text-icon" onClick={() => nav('/admin')}>
+              管理
+              <IcChevronRight size={16} />
             </button>
           )}
         </div>
@@ -399,7 +407,9 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
                       {meta && <span className="home-card-ver">{meta}</span>}
                     </span>
                   </span>
-                  <span className="enter-arrow">›</span>
+                  <span className="enter-arrow">
+                    <IcChevronRight size={18} />
+                  </span>
                 </button>
               );
             })}
@@ -442,7 +452,7 @@ export function ChangePassword({ onClose, onSaved }: { onClose: () => void; onSa
 
   return (
     <div className="modal-mask" onClick={onClose}>
-      <form className="card modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+      <form className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <h2>修改密码</h2>
         <PasswordInput placeholder="原密码" autoComplete="current-password" value={oldPassword} onChange={setOld} />
         <PasswordInput placeholder="新密码（至少 6 位）" autoComplete="new-password" value={newPassword} onChange={setNew} />
