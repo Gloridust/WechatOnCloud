@@ -1881,8 +1881,12 @@ function ChipMultiSelect({
           type="button"
           key={o.id}
           className={'chip chip-toggle' + (selected.has(o.id) ? ' on' : '')}
+          aria-pressed={selected.has(o.id)}
           onClick={() => onToggle(o.id)}
         >
+          <span className="chip-box" aria-hidden="true">
+            {selected.has(o.id) && <IcCheck size={12} />}
+          </span>
           {o.label}
         </button>
       ))}

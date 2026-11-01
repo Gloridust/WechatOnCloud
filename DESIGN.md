@@ -7,6 +7,7 @@ colors:
   green-cell: "#eaf0eb"
   rule: "#cfdbd2"
   rule-strong: "#8fb39c"
+  control-line: "#6a9479"
   carbon-ink: "#18201b"
   pencil: "#56605a"
   green-ink: "#126b40"
@@ -22,19 +23,20 @@ colors:
   carbon-cell: "#171c27"
   carbon-rule: "#283247"
   carbon-rule-strong: "#46557a"
+  carbon-control-line: "#64769f"
   carbon-ink-text: "#e4e9f2"
   carbon-pencil: "#9aa4b8"
   carbon-green-ink: "#5dd396"
   carbon-red-pen: "#ff8a73"
 typography:
   title:
-    fontFamily: "'Songti SC', 'STSong', 'Noto Serif SC', 'Source Han Serif SC', SimSun, serif"
+    fontFamily: "'Noto Serif SC', 'Songti SC', 'STSong', serif"
     fontSize: "26px"
     fontWeight: 700
     lineHeight: 1.25
     letterSpacing: "0.02em"
   header:
-    fontFamily: "'Songti SC', 'STSong', 'Noto Serif SC', 'Source Han Serif SC', SimSun, serif"
+    fontFamily: "'Noto Serif SC', 'Songti SC', 'STSong', serif"
     fontSize: "18px"
     fontWeight: 700
     lineHeight: 1.3
@@ -100,10 +102,11 @@ components:
     rounded: "{rounded.stamp}"
     typography: "{typography.stamp}"
     padding: "1px 6px"
-  entry-card:
+  entry-row:
     backgroundColor: "{colors.cell-white}"
-    rounded: "{rounded.card}"
-    padding: "16px"
+    rounded: "{rounded.stamp}"
+    padding: "14px 12px"
+    height: "72px"
 ---
 
 # Design System: 云微 · WechatOnCloud panel
@@ -112,7 +115,7 @@ components:
 
 **Creative North Star: "稿纸 — the manuscript sheet, marked with a red pen"**
 
-The panel is a sheet of Chinese squared manuscript paper (稿纸). Instances are entries written onto it: each has an index number like a page count, and its name is set into square writing cells. Everything runs on one green-ruled grid. The admin is the teacher with the red pen: anything broken is circled or wavy-underlined in red, with what to do next written beside it.
+The panel is a sheet of Chinese squared manuscript paper (稿纸). Instances are rows written onto it: one ruled table whose rows share columns — index number, name set into square writing cells, a state cell that always says what to do next, and the action. Everything runs on one green-ruled grid. The mark is 云 written in a 田字格 practice cell. The admin is the teacher with the red pen: anything broken is circled or wavy-underlined in red, with what to do next written beside it.
 
 Depth comes from rules, not light. There are no drop shadows, no glass, no soft blobs. A thin rule frames a card; a thick-and-thin double rule frames the important things (the sheet header, the margin column, dialogs, the login sheet). Dark mode is 复写纸, carbon paper: blue-black ground with pale blue rules.
 
@@ -123,7 +126,8 @@ This replaces the earlier "milk cloth" soft-neumorphism system entirely. Do not 
 - Ink colours carry meaning: green ink = action and selection, red pen = failure, warning to fix, destructive; carbon ink and pencil grey for everything else.
 - Song-style serif for titles; system sans for UI; monospaced tabular figures for numbers and versions.
 - Corners nearly square (2–4px). Status labels are stamped boxes, not pills.
-- Three signature moves: names in square cells, numbered entries, red-pen marks.
+- Three signature moves: names in square cells, numbered rows, red-pen marks.
+- Every list (instances, accounts, leftover containers/volumes) is the same ruled entry table.
 
 ## Colors
 
@@ -146,7 +150,8 @@ Cool paper and carbon ink, with green and red used as ink, never as decoration.
 - **Paper** (#f5f7f3): workspace and login ground, carries the grid. Cool, not cream.
 - **Cell White** (#ffffff): cards, inputs, sidebar, header.
 - **Green Cell** (#eaf0eb): troughs, progress track.
-- **Rule** (#cfdbd2) / **Rule Strong** (#8fb39c): hairlines and the double-rule frames.
+- **Rule** (#cfdbd2) / **Rule Strong** (#8fb39c): hairlines and the double-rule frames (decorative).
+- **Control Line** (#6a9479; dark #64769f): boundaries of inputs, secondary buttons, chips, toolbar buttons. ≥3:1 against their ground (WCAG 1.4.11).
 - **Carbon Ink** (#18201b): body text. **Pencil** (#56605a): secondary text, 6.1:1.
 - Dark: Carbon Paper #10141c, Carbon Cell #171c27, rules #283247 / #46557a, text #e4e9f2, pencil #9aa4b8.
 
@@ -157,7 +162,7 @@ Cool paper and carbon ink, with green and red used as ink, never as decoration.
 
 ## Typography
 
-**Title font:** Song-style serif (`Songti SC` → `Noto Serif SC` → `SimSun` → serif)
+**Title font:** Noto Serif SC Bold, self-hosted from `@fontsource/noto-serif-sc` (chunked by unicode-range, only the characters on screen download); system Song only as a pre-load fallback.
 **UI font:** platform sans (`PingFang SC`, `Microsoft YaHei`, `Noto Sans SC`)
 **Figures:** `ui-monospace` with tabular numerals
 
@@ -173,15 +178,15 @@ Cool paper and carbon ink, with green and red used as ink, never as decoration.
 - **Figures** (600, 12px mono): entry numbers (01, 02), image versions.
 
 ### Named Rules
-**The Cell Rule.** An instance's or account's name is written with `GridName`: CJK characters one per cell; each Latin word in one merged cell (one cell per two letters) so words are never split; spaces don't take cells; at most 10 cells, then "…". Never let a grid name wrap.
+**The Cell Rule.** An instance's or account's name is written with `GridName` in the title serif: CJK characters one per cell (1.25em); each Latin word in one merged cell about two letters per cell, with cell ticks along the top and bottom edges instead of lines through the letters; spaces don't take cells; at most 10 cells, then "…". Never let a grid name wrap or stretch.
 
 ## Layout
 
 - Shell: a left margin column (264px, collapsible to 64px, drawer under 768px) separated from the sheet by a 5px double rule. The sheet header is 52px with a 5px double rule beneath.
 - Sheet content: centred, 560px on phones, 940px at ≥880px. Background grid 24px.
-- Instance entries: `repeat(auto-fill, minmax(248px, 1fr))`, 12px gap. Home has a sheet footer line (`共 N 个实例 · 在线 · 需要处理`), echoing 稿纸's "20×15=300" footer.
+- Entry table: `grid-template-columns: 44px minmax(0,1fr) minmax(150px,232px) max-content`; each row is `subgrid`, so state and action columns align down the sheet. Rows are ≥72px (three grid cells), separated by a 1px rule; state and action cells have a 1px column rule. Under 640px a row becomes two lines (name; state | action) with 44px actions. Home ends with a sheet footer line (`共 N 个实例 · 在线 · 需要处理`), echoing 稿纸's "20×15=300" footer.
 - Admin: underline tabs (实例 / 用户 / 系统) across the full sheet width; sections are headed by a title over a 1px rule, with any description below the rule.
-- Instance page: header holds the toolbar; on phones the toolbar is icon-only so every action fits at 390px.
+- Instance page: header holds the toolbar (icon + label). 481–767px: icon-only 44px buttons. ≤480px: 文件 and 输入 stay, everything else moves into a 更多 menu so the instance name stays readable.
 
 ## Elevation & Depth
 
@@ -209,10 +214,12 @@ Flat. There are no shadows in this system. Depth and grouping are expressed with
 - **Text action**: green ink text, underline on hover (`+ 新建实例`, `管理 ›`).
 - **Input**: white, inset rule, 2px green ink inset ring on focus. Every input has a visible label (placeholder-only labels are not allowed).
 - **Stamp tag**: transparent fill, 1px border in the state colour (`currentColor`), 11px bold. Versions use the mono stamp with a neutral rule.
-- **Entry card (home)**: icon · number · grid name · state square + word · meta · chevron. Hover frames it in green ink.
-- **Entry card (admin)**: number + grid name on the first line; state stamp and version stamps on the second; description; then the primary button beside a "管理 ▾" secondary button whose menu is a double-framed one-item-per-row list, destructive item last and red.
+- **Entry row** (`.entry-table > .entry`): No. · icon + GridName + meta · state cell · action cell. The state cell always carries the next step; failures are circled in red pen with the cause wavy-underlined, and sub-accounts read 「请联系管理员」 instead of an action they can't take. The name opens the instance.
+- **Row menu** (`RowMenu`, "管理 ▾" / "更多"): double-framed, one item per row, grouped, destructive last and red. Opens upward and caps its height when there's no room below; Esc and outside click close it.
 - **Tabs**: underline style; active tab is green ink with a 2px underline.
 - **Red-pen note** (default-password banner, failure hints): white card; title wavy-underlined in red; icon in a red-ruled square; action in red.
+- **Red-pen circle** (`PenMark`): an authored SVG loop with open, overlapping ends drawn around a failed state word, padded clear of the glyphs.
+- **Chip toggle**: a small check box inside the chip; selected = green tint, green outline, filled box.
 - **State word**: when a status changes, the word flips in place (`state-flip`, 320ms) and the row never moves. Disabled under reduced motion.
 - **Dialog**: double frame, serif title, plain dim mask (no blur), sticky action row under a rule; Esc closes.
 
@@ -220,8 +227,8 @@ Flat. There are no shadows in this system. Depth and grouping are expressed with
 
 - **Do** use the tokens in `panel/web/src/styles.css` (`:root`) and the components in `paper.tsx` / `icons.tsx`.
 - **Do** keep text ≥ 4.5:1 in both themes; green and red text use `--accent` / `--danger`, never the status green.
-- **Do** write names with `GridName` and number entries with `EntryNo` wherever a list of instances or accounts appears.
-- **Do** circle failures with `.pen-circle` and give the cause with `.pen-wave` plus a plain-language hint.
+- **Do** put every list in the entry table, write names with `GridName`, and number rows with `EntryNo`.
+- **Do** circle failures with `PenMark`, give the cause with `.pen-wave`, and always show the next step in the state cell.
 - **Don't** add drop shadows, glows, glass/blur, gradients or radial highlights.
 - **Don't** use pills or large radii; don't use colored side borders on cards or list items.
 - **Don't** use emoji or Unicode glyphs as icons; add a line icon to `icons.tsx`.

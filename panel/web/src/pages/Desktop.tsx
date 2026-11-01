@@ -7,6 +7,7 @@ import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
 import { IcFolder, IcKeyboard, IcClipboard, IcVolume, IcVolumeOff, IcMic, IcImage, IcRestart, IcUpload, IcDownload, IcClose, IcCheck } from '../icons';
 import { VncAudio } from '../vncAudio';
+import { RowMenu, type RowMenuItem } from '../paper';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
 // ws 地址带上本页的查看者标识（noVNC 先解码 path 再拼进地址），面板据此做「同一实例只在一处显示」，转发前会去掉。
@@ -1428,6 +1429,28 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   };
 
   const title = inst?.name || '实例';
+  const narrow = typeof window !== 'undefined' && window.matchMedia('(max-width: 600px)').matches;
+  const moreItems: RowMenuItem[] = [
+    { label: '剪贴板', onClick: () => setShowClip((v) => !v) },
+    { label: soundOn ? '声音：开（点击关闭）' : '声音：关（点击开启）', onClick: toggleSound },
+    ...(soundOn ? [{ label: micOn ? '麦克风：开（点击关闭）' : '麦克风：关（点击开启）', onClick: toggleMic }] : []),
+    ...(isAdmin
+      ? [
+          {
+            label: '桌面设置',
+            onClick: () => {
+              setShowSettings((v) => !v);
+              if (!showSettings) {
+                refreshBgList();
+                refreshFontList();
+              }
+            },
+          },
+          { sep: true as const },
+          { label: '重启实例', danger: true, onClick: restartInstance },
+        ]
+      : []),
+  ];
 
   return (
     <div className="ws-page">
@@ -1465,7 +1488,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               <span>输入：{inputMode === 'seamless' ? '无感' : '转发'}</span>
             </button>
             <button
-              className={'ws-action' + (showClip ? ' on' : '')}
+              className={'ws-action ws-action-extra' + (showClip ? ' on' : '')}
               title="把文本发送到容器剪贴板（局域网 http 下也可用）"
               aria-pressed={showClip}
               onClick={() => setShowClip((v) => !v)}
@@ -1474,7 +1497,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               <span>剪贴板</span>
             </button>
             <button
-              className={'ws-action' + (soundOn ? ' on' : '')}
+              className={'ws-action ws-action-extra' + (soundOn ? ' on' : '')}
               title={soundOn ? '声音已开：已连接实例音频。点击关闭（关闭可减少一条到实例的连接，更稳）' : '声音已关：默认不连音频桥（连接更稳）。点此开启以听到实例声音'}
               aria-pressed={soundOn}
               onClick={toggleSound}
@@ -1484,7 +1507,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             </button>
             {soundOn && (
               <button
-                className={'ws-action' + (micOn ? ' on' : '')}
+                className={'ws-action ws-action-extra' + (micOn ? ' on' : '')}
                 title={
                   micOn
                     ? '麦克风已开：占用本机麦克风（AirPods 等可能被切到低音质通话模式）。点击关闭'
@@ -1499,18 +1522,22 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             )}
             {isAdmin && (
               <>
-                <button className={'ws-action' + (showSettings ? ' on' : '')} title="桌面设置（壁纸/字体）" aria-pressed={showSettings} onClick={() => { setShowSettings((v) => !v); if (!showSettings) { refreshBgList(); refreshFontList(); } }}>
+                <button className={'ws-action ws-action-extra' + (showSettings ? ' on' : '')} title="桌面设置（壁纸/字体）" aria-pressed={showSettings} onClick={() => { setShowSettings((v) => !v); if (!showSettings) { refreshBgList(); refreshFontList(); } }}>
                   <IcImage />
                   <span>桌面</span>
                 </button>
                 {/* 重启会断开所有人的连接：与日常开关隔开，避免顺手误点 */}
-                <span className="ws-action-sep" aria-hidden="true" />
-                <button className="ws-action" title="重启实例（修复卡死/最小化丢失）" onClick={restartInstance}>
+                <span className="ws-action-sep ws-action-extra" aria-hidden="true" />
+                <button className="ws-action ws-action-extra" title="重启实例（修复卡死/最小化丢失）" onClick={restartInstance}>
                   <IcRestart />
                   <span>重启</span>
                 </button>
               </>
             )}
+            {/* 手机：其余操作收进「更多」，标题留得下、按钮 44px */}
+            <div className="ws-more">
+              <RowMenu label="更多" items={moreItems} />
+            </div>
           </div>
         )}
       </header>
@@ -1893,9 +1920,13 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                       ? '这个实例已在别处打开；要在这里用，请点桌面上的「在这里继续使用」'
                       : readOnly
                       ? `「${control?.holder}」正在操作，你当前为只读；要操作请点桌面上的「申请控制」`
-                      : autoEnter
-                        ? '中文输入这里 → 回车直接发送到应用（先点好应用的输入框）。Shift+回车换行。'
-                        : '中文输入这里 → 回车只把文字填进应用输入框，不自动发送（发送由你按）。Shift+回车换行。'
+                      : narrow
+                        ? autoEnter
+                          ? '中文输入，回车发送'
+                          : '中文输入，回车填入'
+                        : autoEnter
+                          ? '中文输入这里 → 回车直接发送到应用（先点好应用的输入框）。Shift+回车换行。'
+                          : '中文输入这里 → 回车只把文字填进应用输入框，不自动发送（发送由你按）。Shift+回车换行。'
                   }
                   rows={1}
                 />

@@ -132,17 +132,17 @@
     {
       "name": "Red-pen Circle",
       "kind": "custom",
-      "description": "Signature: a failed state circled by hand in red.",
-      "html": "<span class=\"ds-pen\">创建失败</span>",
-      "css": ".ds-pen{position:relative;display:inline-block;padding:1px 7px;color:#c2311c;font-weight:700;font-size:12px}.ds-pen::after{content:'';position:absolute;inset:-3px -2px;border:1.5px solid #c2311c;border-radius:52% 48% 55% 45%/58% 46% 54% 42%;transform:rotate(-4deg)}"
+      "description": "Signature: an authored SVG loop with open overlapping ends around a failed state.",
+      "html": "<span class=\"ds-pen\">创建失败<svg viewBox=\"0 0 120 44\" preserveAspectRatio=\"none\"><path d=\"M96 6C74 1 34 2 15 9 3 14 2 27 10 34c11 9 51 9 79 6 19-3 29-11 27-20C114 11 97 5 70 5 52 5 38 7 30 10\"/></svg></span>",
+      "css": ".ds-pen{position:relative;display:inline-block;padding:2px 9px;color:#c2311c;font-weight:700;font-size:12px}.ds-pen svg{position:absolute;inset:-5px -8px -4px -9px;width:calc(100% + 17px);height:calc(100% + 9px);overflow:visible}.ds-pen path{fill:none;stroke:#c2311c;stroke-width:1.6;stroke-linecap:round;vector-effect:non-scaling-stroke}"
     },
     {
-      "name": "Entry Card",
+      "name": "Entry Row",
       "kind": "card",
-      "refersTo": "entry-card",
-      "description": "An instance written onto the sheet: number, grid name, state, action.",
-      "html": "<div class=\"ds-card\"><span class=\"ds-no\">01</span> <b>EthanWhoDev</b><div class=\"ds-meta\">在线 · 微信 4.1.1.4</div></div>",
-      "css": ".ds-card{width:260px;padding:16px;background:#fff;border-radius:4px;box-shadow:0 0 0 1px #cfdbd2}.ds-card:hover{box-shadow:0 0 0 1px #126b40}.ds-no{font:600 12px ui-monospace,monospace;color:#56605a}.ds-meta{margin-top:8px;font-size:12px;color:#56605a}"
+      "refersTo": "entry-row",
+      "description": "One row of the ruled entry table: No | icon + grid name | state with next step | action.",
+      "html": "<div class=\"ds-row\"><span class=\"ds-no\">05</span><span class=\"ds-name\">Diary</span><span class=\"ds-state\"><b>创建失败</b><i>拉取镜像失败</i></span><span class=\"ds-act\"><button>重试创建</button></span></div>",
+      "css": ".ds-row{display:grid;grid-template-columns:44px 1fr 200px auto;min-height:72px;background:#fff;box-shadow:0 0 0 1px #8fb39c}.ds-no{padding:22px 0 0 14px;font:600 12px ui-monospace,monospace;color:#56605a}.ds-name{padding:14px 12px;font:700 16px \"Noto Serif SC\",serif}.ds-state,.ds-act{border-left:1px solid #cfdbd2;padding:14px 12px;display:flex;flex-direction:column;gap:6px;font-size:12px}.ds-state b{color:#c2311c}.ds-state i{font-style:normal;color:#c2311c;text-decoration:underline wavy #c2311c;text-underline-offset:4px}.ds-act{justify-content:center}.ds-act button{height:36px;padding:0 16px;border:0;border-radius:3px;background:#14693f;color:#fff;font-weight:600}"
     },
     {
       "name": "Tabs",
@@ -160,7 +160,8 @@
       "green ink = action/selection, red pen = failure/destructive",
       "Song serif titles, sans UI, mono figures",
       "2–4px corners, stamped status boxes",
-      "names in square cells, numbered entries, red-pen marks"
+      "names in square cells, numbered entries, red-pen marks",
+      "every list is one ruled entry table with shared columns"
     ],
     "rules": [
       {
