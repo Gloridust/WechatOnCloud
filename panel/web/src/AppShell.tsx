@@ -5,7 +5,7 @@ import { useUI, PasswordInput } from './ui';
 import { api, appProfile, type InstanceWithStatus } from './api';
 import { InstanceIcon } from './AppIcon';
 import { IcShield, IcChevronRight } from './icons';
-import { GridName, EntryNo, StateWord, PenMark } from './paper';
+import { GridName, StateWord, PenMark } from './parts';
 import { getThemeMode, applyThemeMode, nextThemeMode, resolveDark, type ThemeMode } from './theme';
 import InstanceView from './pages/Desktop';
 import Admin from './pages/Admin';
@@ -50,7 +50,7 @@ function useInstancesLoader(): InstancesState {
 // 实例状态点（颜色 + 文案）
 export function statusOf(inst: InstanceWithStatus): { cls: string; text: string } {
   if (inst.provision?.state === 'creating') return { cls: 'st-busy', text: '创建中' };
-  if (inst.provision?.state === 'failed') return { cls: 'st-fail', text: '创建失败' }; // 只有真正的失败用红笔
+  if (inst.provision?.state === 'failed') return { cls: 'st-fail', text: '创建失败' }; // 只有真正的失败用红色
   const offline = inst.runtime !== 'running';
   if (offline) return { cls: 'st-off', text: inst.runtime === 'missing' ? '未创建' : '已停止' };
   if (BUSY.includes(inst.wechat.phase)) return { cls: 'st-busy', text: '处理中' };
@@ -197,12 +197,11 @@ function Sidebar({ collapsed, onToggleCollapsed }: { collapsed: boolean; onToggl
       {!collapsed && <div className="sb-section">实例</div>}
       <div className="sb-list">
         {instances.length === 0 && !collapsed && <div className="sb-empty">暂无可用实例</div>}
-        {instances.map((inst, i) => {
+        {instances.map((inst) => {
           const on = loc.pathname === `/i/${inst.id}`;
           const st = statusOf(inst);
           return (
             <button key={inst.id} className={'sb-item sb-inst' + (on ? ' on' : '')} onClick={() => go(`/i/${inst.id}`)} title={inst.name}>
-              {!collapsed && <span className="sb-no">{String(i + 1).padStart(2, '0')}</span>}
               <span className="sb-avatar">
                 <InstanceIcon icon={inst.icon} appType={inst.appType} size={34} radius={10} />
                 <span className={'sb-dot ' + st.cls} />
@@ -467,7 +466,7 @@ function HomeEntry({ no, inst, isAdmin }: { no: number; inst: InstanceWithStatus
     ) : null;
     if (!isAdmin) note += '，请联系管理员安装';
   } else {
-    // 失败：红笔写原因；停止 / 未创建：铅笔灰写下一步（不是错误，不用红笔）
+    // 失败：红字写原因；停止 / 未创建：灰字写下一步（不是错误，不用红色）
     if (failed) note = (inst.provision?.error || '创建失败') + (isAdmin ? '' : '，请联系管理员');
     else if (isAdmin) note = inst.runtime === 'missing' ? '容器还没创建，点「启动」会自动创建' : '点「启动」继续使用';
     else note = '已停止，请联系管理员启动';
@@ -481,10 +480,9 @@ function HomeEntry({ no, inst, isAdmin }: { no: number; inst: InstanceWithStatus
 
   return (
     <li className="entry">
-      <EntryNo n={no} />
       <div className="entry-main">
         <span className="entry-av">
-          <InstanceIcon icon={inst.icon} appType={inst.appType} size={36} radius={4} />
+          <InstanceIcon icon={inst.icon} appType={inst.appType} size={36} radius={10} />
         </span>
         <div className="entry-body">
           <button className="entry-open" onClick={open} aria-label={`打开 ${inst.name}`}>
@@ -493,6 +491,9 @@ function HomeEntry({ no, inst, isAdmin }: { no: number; inst: InstanceWithStatus
           <div className="entry-meta">
             <span>{meta}</span>
           </div>
+          {note && <span className={'entry-note' + (failed ? ' is-fail' : '')}>{note}</span>}
+          {/* 管理员看到「怎么办」，重试不再是盲点 */}
+          {failed && isAdmin && inst.provision?.hint && <span className="entry-hint">{inst.provision.hint}</span>}
         </div>
       </div>
       <div className="entry-state">
@@ -505,9 +506,6 @@ function HomeEntry({ no, inst, isAdmin }: { no: number; inst: InstanceWithStatus
             <StateWord text={st.text} />
           </span>
         )}
-        {note && <span className={'entry-note' + (failed ? ' pen-wave' : '')}>{note}</span>}
-        {/* 管理员看到「怎么办」，重试不再是盲点 */}
-        {failed && isAdmin && inst.provision?.hint && <span className="entry-hint">{inst.provision.hint}</span>}
       </div>
       <div className="entry-act">{action}</div>
     </li>

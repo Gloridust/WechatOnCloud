@@ -1,91 +1,83 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-01T01:30:05Z",
+  "generatedAt": "2026-11-01T14:01:48+00:00",
   "title": "Design System: 云微 · WechatOnCloud panel",
   "extensions": {
     "colorMeta": {
-      "green-ink": {
+      "green-fill": {
         "role": "primary",
-        "displayName": "绿格墨水 Green Ink"
+        "displayName": "Green Fill"
       },
-      "green-ink-fill": {
+      "green-text": {
         "role": "primary",
-        "displayName": "Green Ink Fill"
+        "displayName": "Green Text"
       },
-      "red-pen": {
+      "red": {
         "role": "secondary",
-        "displayName": "红笔 Red Pen"
+        "displayName": "Red (failures only)"
       },
-      "paper": {
+      "page-gray": {
         "role": "neutral",
-        "displayName": "稿纸 Paper"
+        "displayName": "Page Gray"
       },
-      "carbon-ink": {
+      "surface": {
         "role": "neutral",
-        "displayName": "碳素墨水 Carbon Ink"
-      },
-      "carbon-paper": {
-        "role": "neutral",
-        "displayName": "复写纸 Carbon Paper (dark ground)"
+        "displayName": "Surface"
       }
     },
     "typographyMeta": {
-      "title": {
-        "displayName": "Sheet title",
-        "purpose": "Home greeting; serif handwriting on the sheet header."
+      "large-title": {
+        "displayName": "Large Title",
+        "purpose": "Home greeting."
       },
-      "header": {
-        "displayName": "Header",
-        "purpose": "Sheet header title and dialog titles."
+      "row-title": {
+        "displayName": "Row Title",
+        "purpose": "Names in grouped lists."
       },
-      "stamp": {
-        "displayName": "Stamp",
-        "purpose": "Status and version stamps."
-      },
-      "figures": {
-        "displayName": "Figures",
-        "purpose": "Entry numbers and versions, tabular."
+      "pill": {
+        "displayName": "Pill",
+        "purpose": "Status pills."
       }
     },
     "shadows": [
       {
-        "name": "hairline-frame",
-        "value": "0 0 0 1px var(--rule)",
-        "purpose": "Cards, banners, empty states. A rule, not a shadow."
+        "name": "lift",
+        "value": "0 1px 2px rgba(0,0,0,.04), 0 1px 1px rgba(0,0,0,.02)",
+        "purpose": "Groups, cards, banners (light only)."
       },
       {
-        "name": "inset-rule",
-        "value": "inset 0 0 0 1px var(--rule-strong)",
-        "purpose": "Secondary buttons, inputs, chips, toolbar buttons."
-      },
-      {
-        "name": "frame-double",
-        "value": "0 0 0 1px var(--rule-strong), 0 0 0 4px var(--surface), 0 0 0 5px var(--rule-strong)",
-        "purpose": "Dialogs, login sheet, manage menu, toasts."
+        "name": "pop",
+        "value": "0 10px 30px rgba(0,0,0,.14), 0 2px 6px rgba(0,0,0,.08)",
+        "purpose": "Menus, dialogs, toasts, login card."
       }
     ],
     "motion": [
       {
         "name": "ease",
         "value": "cubic-bezier(0.2, 0.8, 0.2, 1)",
-        "purpose": "All state transitions, 120–200ms."
+        "purpose": "State transitions, 120–240ms."
       },
       {
-        "name": "state-flip",
-        "value": "rotateX(-90deg) → 0, 320ms",
-        "purpose": "Status word changes in place; off under reduced motion."
+        "name": "state-in",
+        "value": "fade + 2px rise, 240ms",
+        "purpose": "Status word change."
       }
     ],
     "breakpoints": [
       {
         "name": "phone",
         "value": "<768px",
-        "purpose": "Sidebar becomes a drawer; toolbar icon-only."
+        "purpose": "Sidebar drawer; icon-only toolbar."
+      },
+      {
+        "name": "narrow",
+        "value": "<=640px",
+        "purpose": "Two-line rows, 44px actions."
       },
       {
         "name": "wide",
         "value": ">=880px",
-        "purpose": "Sheet widens to 940px."
+        "purpose": "Content 940px."
       }
     ]
   },
@@ -94,103 +86,82 @@
       "name": "Primary Button",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "The one filled action per card or area.",
-      "html": "<button class=\"ds-btn-primary\">进入实例</button>",
-      "css": ".ds-btn-primary{height:44px;padding:0 22px;border:0;border-radius:3px;background:#14693f;color:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:background .15s,transform .12s}.ds-btn-primary:hover{background:#0f5532}.ds-btn-primary:active{transform:translateY(1px)}.ds-btn-primary:focus-visible{outline:2px solid #126b40;outline-offset:2px}"
+      "description": "One filled green pill per row or dialog.",
+      "html": "<button class=\"ds-p\">进入</button>",
+      "css": ".ds-p{height:44px;padding:0 18px;border:0;border-radius:999px;background:#06843f;color:#fff;font-weight:600;font-size:15px;cursor:pointer;transition:background .15s,transform .12s}.ds-p:hover{background:#056b34}.ds-p:active{transform:scale(.97)}.ds-p:focus-visible{outline:2px solid #05803f;outline-offset:2px}"
     },
     {
       "name": "Secondary Button",
       "kind": "button",
       "refersTo": "button-secondary",
-      "description": "Ruled button for secondary actions (管理 ▾, 取消).",
-      "html": "<button class=\"ds-btn\">管理</button>",
-      "css": ".ds-btn{height:44px;padding:0 16px;border:0;border-radius:3px;background:#fff;color:#18201b;box-shadow:inset 0 0 0 1px #8fb39c;font-size:15px;font-weight:600;cursor:pointer}.ds-btn:hover{box-shadow:inset 0 0 0 1px #126b40;color:#126b40}.ds-btn:focus-visible{outline:2px solid #126b40;outline-offset:2px}"
+      "description": "Gray pill for secondary actions.",
+      "html": "<button class=\"ds-s\">管理</button>",
+      "css": ".ds-s{height:44px;padding:0 16px;border:0;border-radius:999px;background:#ececf0;color:#1c1c1e;font-weight:600;font-size:15px;cursor:pointer}.ds-s:hover{background:#e0e0e5}"
     },
     {
       "name": "Input",
       "kind": "input",
       "refersTo": "input",
-      "description": "White cell with an inset rule; 2px green ring on focus.",
-      "html": "<label class=\"ds-label\">实例名称<input class=\"ds-input\" placeholder=\"留空自动命名\"></label>",
-      "css": ".ds-label{display:block;font-size:13px;font-weight:600;color:#56605a}.ds-input{display:block;margin-top:8px;width:260px;height:48px;padding:0 16px;border:0;border-radius:3px;background:#fff;color:#18201b;font-size:16px;box-shadow:inset 0 0 0 1px #8fb39c;outline:none}.ds-input:focus{box-shadow:inset 0 0 0 2px #126b40}"
+      "description": "White field with a visible outline and green focus ring.",
+      "html": "<label class=\"ds-l\">实例名称<input class=\"ds-i\" placeholder=\"留空自动命名\"></label>",
+      "css": ".ds-l{display:block;font-size:13px;font-weight:600;color:#65656b}.ds-i{display:block;margin-top:8px;width:260px;height:48px;padding:0 16px;border:0;border-radius:12px;box-shadow:inset 0 0 0 1px #8a8a8f;font-size:16px;outline:none}.ds-i:focus{box-shadow:inset 0 0 0 2px #06843f,0 0 0 4px rgba(7,193,96,.18)}"
     },
     {
-      "name": "Stamp Tag",
+      "name": "Status Pill",
       "kind": "chip",
-      "refersTo": "stamp-tag",
-      "description": "Status stamp; border in the state colour.",
-      "html": "<span class=\"ds-stamp\">在线</span> <span class=\"ds-stamp ds-warn\">可升级</span>",
-      "css": ".ds-stamp{display:inline-block;padding:1px 6px;border-radius:2px;font-size:11px;font-weight:700;letter-spacing:.06em;color:#126b40;box-shadow:inset 0 0 0 1px currentColor}.ds-warn{color:#835300}"
+      "refersTo": "status-pill",
+      "description": "Tinted status pill.",
+      "html": "<span class=\"ds-pill\">在线</span> <span class=\"ds-pill f\">创建失败</span> <span class=\"ds-pill n\">已停止</span>",
+      "css": ".ds-pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:#e8f8ef;color:#05803f}.ds-pill.f{background:#ffecea;color:#c4271f}.ds-pill.n{background:#f0f0f2;color:#65656b}"
     },
     {
-      "name": "Grid Name",
-      "kind": "custom",
-      "description": "Signature: a name written into square cells; Latin words take one merged cell per two letters.",
-      "html": "<span class=\"ds-gname\"><span class=\"ds-c\">工</span><span class=\"ds-c\">作</span><span class=\"ds-c\">号</span><span class=\"ds-c ds-w\" style=\"width:4.5em\">Dev</span></span>",
-      "css": ".ds-gname{display:inline-flex;box-shadow:0 0 0 1px #8fb39c;font:700 15px 'Songti SC','Noto Serif SC',serif;line-height:1}.ds-c{display:inline-flex;align-items:center;justify-content:center;width:1.5em;height:1.5em;box-shadow:1px 0 0 #cfdbd2}.ds-w{font-family:-apple-system,'PingFang SC',sans-serif}"
-    },
-    {
-      "name": "Red-pen Circle",
-      "kind": "custom",
-      "description": "Signature: an authored SVG loop with open overlapping ends around a failed state.",
-      "html": "<span class=\"ds-pen\">创建失败<svg viewBox=\"0 0 120 44\" preserveAspectRatio=\"none\"><path d=\"M96 6C74 1 34 2 15 9 3 14 2 27 10 34c11 9 51 9 79 6 19-3 29-11 27-20C114 11 97 5 70 5 52 5 38 7 30 10\"/></svg></span>",
-      "css": ".ds-pen{position:relative;display:inline-block;padding:2px 9px;color:#c2311c;font-weight:700;font-size:12px}.ds-pen svg{position:absolute;inset:-5px -8px -4px -9px;width:calc(100% + 17px);height:calc(100% + 9px);overflow:visible}.ds-pen path{fill:none;stroke:#c2311c;stroke-width:1.6;stroke-linecap:round;vector-effect:non-scaling-stroke}"
-    },
-    {
-      "name": "Entry Row",
+      "name": "Grouped List",
       "kind": "card",
-      "refersTo": "entry-row",
-      "description": "One row of the ruled entry table: No | icon + grid name | state with next step | action.",
-      "html": "<div class=\"ds-row\"><span class=\"ds-no\">05</span><span class=\"ds-name\">Diary</span><span class=\"ds-state\"><b>创建失败</b><i>拉取镜像失败</i></span><span class=\"ds-act\"><button>重试创建</button></span></div>",
-      "css": ".ds-row{display:grid;grid-template-columns:44px 1fr 200px auto;min-height:72px;background:#fff;box-shadow:0 0 0 1px #8fb39c}.ds-no{padding:22px 0 0 14px;font:600 12px ui-monospace,monospace;color:#56605a}.ds-name{padding:14px 12px;font:700 16px \"Noto Serif SC\",serif}.ds-state,.ds-act{border-left:1px solid #cfdbd2;padding:14px 12px;display:flex;flex-direction:column;gap:6px;font-size:12px}.ds-state b{color:#c2311c}.ds-state i{font-style:normal;color:#c2311c;text-decoration:underline wavy #c2311c;text-underline-offset:4px}.ds-act{justify-content:center}.ds-act button{height:36px;padding:0 16px;border:0;border-radius:3px;background:#14693f;color:#fff;font-weight:600}"
+      "refersTo": "grouped-list",
+      "description": "White rounded group; rows with inset separators, pill + action on the right.",
+      "html": "<div class=\"ds-g\"><div class=\"ds-r\"><i></i><div><b>EthanWhoDev</b><small>微信 4.1.1.4</small></div><span class=\"ds-pill\">在线</span><button class=\"ds-p\">进入</button></div><div class=\"ds-r\"><i></i><div><b>Diary</b><small class=\"e\">拉取镜像失败：docker.io 连接超时</small></div><span class=\"ds-pill f\">创建失败</span><button class=\"ds-p\">重试创建</button></div></div>",
+      "css": ".ds-g{width:560px;background:#fff;border-radius:18px;box-shadow:0 1px 2px rgba(0,0,0,.04)}.ds-r{display:grid;grid-template-columns:38px 1fr auto auto;gap:14px;align-items:center;padding:12px 16px;position:relative}.ds-r+.ds-r:before{content:'';position:absolute;left:68px;right:0;top:0;height:1px;background:#e5e5ea}.ds-r i{width:38px;height:38px;border-radius:10px;background:#07c160}.ds-r b{display:block;font-size:16px;font-weight:600}.ds-r small{font-size:13px;color:#65656b}.ds-r small.e{color:#c4271f}.ds-pill{padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:#e8f8ef;color:#05803f}.ds-pill.f{background:#ffecea;color:#c4271f}.ds-p{height:34px;padding:0 16px;border:0;border-radius:999px;background:#06843f;color:#fff;font-weight:600}"
     },
     {
-      "name": "Tabs",
+      "name": "Segmented Control",
       "kind": "nav",
-      "description": "Underline tabs across the sheet.",
-      "html": "<nav class=\"ds-tabs\"><a class=\"on\">实例</a><a>用户</a><a>系统</a></nav>",
-      "css": ".ds-tabs{display:flex;border-bottom:1px solid #cfdbd2}.ds-tabs a{padding:10px 18px 11px;margin-bottom:-1px;border-bottom:2px solid transparent;color:#56605a;font-weight:600;font-size:15px;cursor:pointer}.ds-tabs a.on{color:#126b40;border-bottom-color:#126b40}"
+      "description": "Admin tabs.",
+      "html": "<div class=\"ds-seg\"><a class=\"on\">实例</a><a>用户</a><a>系统</a></div>",
+      "css": ".ds-seg{display:inline-flex;gap:2px;padding:3px;border-radius:999px;background:#ececf0}.ds-seg a{padding:7px 22px;border-radius:999px;font-weight:600;font-size:14px;color:#65656b;cursor:pointer}.ds-seg a.on{background:#fff;color:#1c1c1e;box-shadow:0 1px 3px rgba(0,0,0,.12)}"
     }
   ],
   "narrative": {
-    "northStar": "稿纸 — the manuscript sheet, marked with a red pen",
-    "overview": "The panel is a sheet of squared manuscript paper. Instances are numbered entries with names written into square cells; failures are circled in red pen with what to do next. Depth comes from rules, not light; dark mode is carbon paper.",
+    "northStar": "Settings, but for your own WeChat server",
+    "overview": "An iOS-Settings-style grouped-list interface: light gray page, white rounded groups, inset hairlines, tinted status pills and green pill buttons. Every list is the same grouped list, and every row says what to do next.",
     "keyCharacteristics": [
-      "24px visible grid",
-      "green ink = action/selection, red pen = failure/destructive",
-      "Song serif titles, sans UI, mono figures",
-      "2–4px corners, stamped status boxes",
-      "names in square cells, numbered entries, red-pen marks",
-      "every list is one ruled entry table with shared columns"
+      "light gray page, white 18px groups",
+      "inset row separators",
+      "tinted status pills",
+      "green pill primary button",
+      "system sans, large bold titles",
+      "fixed >_ logo"
     ],
     "rules": [
       {
-        "name": "The Two Inks Rule",
-        "body": "Only green and red are accent inks; green acts/selects, red flags failure or destruction.",
+        "name": "The Red Means Broken Rule",
+        "body": "Red only for failures, errors, destructive actions; stopped is neutral gray.",
         "section": "colors"
       },
       {
-        "name": "The Cell Rule",
-        "body": "Names use GridName: one CJK char per cell, Latin words merged, max 10 cells, never wraps.",
-        "section": "typography"
-      },
-      {
-        "name": "The No-Light Rule",
-        "body": "No shadows, glows or blur; stand-out layers get the double frame.",
-        "section": "elevation"
+        "name": "The One Green Rule",
+        "body": "One filled green button per row or dialog.",
+        "section": "colors"
       }
     ],
     "dos": [
       "Use tokens from styles.css :root",
-      "Circle failures with .pen-circle and explain with .pen-wave",
-      "Number entries with EntryNo"
+      "Show the next step in every non-online row",
+      "Keep text ≥4.5:1 and outlines ≥3:1"
     ],
     "donts": [
-      "No drop shadows, glass, gradients or radial highlights",
-      "No pills or large radii",
-      "No emoji or Unicode glyph icons",
-      "No serif in buttons, labels or data",
-      "Don't change the logo; the green >_ tile is a fixed brand asset"
+      "Don't change the >_ logo",
+      "No square corners, heavy borders, glass, gradients or emoji icons",
+      "Don't use red for stopped states"
     ]
   }
 }

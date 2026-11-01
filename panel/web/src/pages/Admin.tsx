@@ -6,7 +6,7 @@ import { InstanceIcon, ICON_CHOICES } from '../AppIcon';
 import { useUI, PasswordInput } from '../ui';
 import { useAuth } from '../auth';
 import { IcPlus, IcChevronRight, IcAlert, IcMonitor, IcUsers, IcCheck } from '../icons';
-import { GridName, EntryNo, StateWord, PenMark, RowMenu, type RowMenuItem } from '../paper';
+import { GridName, StateWord, PenMark, RowMenu, type RowMenuItem } from '../parts';
 
 const BUSY_PHASES = ['downloading', 'extracting', 'installing'];
 
@@ -676,10 +676,9 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                 }
               />
             ) : (
-              <ul className="entry-table" aria-label="子账号">
+              <ul className="entry-table no-av" aria-label="子账号">
                 {subs.map((u) => (
                   <li key={u.id} className="entry">
-                    <span className="entry-no" aria-hidden="true" />
                     <div className="entry-main">
                       <div className="entry-body">
                         <GridName name={u.username} className="entry-name" />
@@ -691,16 +690,13 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                               </span>
                             ))
                           ) : (
-                            <span>未分配实例</span>
+                            <span>未分配实例，登录后看不到任何实例</span>
                           )}
                         </div>
                       </div>
                     </div>
                     <div className="entry-state">
                       {u.disabled ? <span className="tag tag-off">已禁用</span> : <span className="tag tag-on">正常</span>}
-                      <span className="entry-note">
-                        {u.allowedInstances.length > 0 ? `可访问 ${u.allowedInstances.length} 个实例` : '登录后看不到任何实例'}
-                      </span>
                     </div>
                     <div className="entry-act">
                       <button className="btn entry-btn" onClick={() => setAssignUser(u)}>
@@ -731,10 +727,9 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                   <span className="section-title">残留容器</span>
                 </div>
                 <p className="section-desc">不属于任何登记实例，多为创建失败遗留。它们占着数据卷名，先删掉它们才能删除同名数据卷。</p>
-                <ul className="entry-table" aria-label="残留容器">
+                <ul className="entry-table no-av" aria-label="残留容器">
                   {orphanConts.map((c) => (
                     <li key={c.id} className="entry">
-                      <span className="entry-no" aria-hidden="true" />
                       <div className="entry-main">
                         <div className="entry-body">
                           <span className="entry-name mono">{c.name}</span>
@@ -760,10 +755,9 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                   <span className="section-title">未使用的数据卷</span>
                 </div>
                 <p className="section-desc">删除实例时没勾选「同时永久删除聊天记录」就会留下来。新建实例时可以复用，继承原来的聊天记录。</p>
-                <ul className="entry-table" aria-label="未使用的数据卷">
+                <ul className="entry-table no-av" aria-label="未使用的数据卷">
                   {orphanVols.map((v) => (
                     <li key={v.name} className="entry">
-                      <span className="entry-no" aria-hidden="true" />
                       <div className="entry-main">
                         <div className="entry-body">
                           <span className="entry-name mono">{v.name}</span>
@@ -796,9 +790,8 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
             <div className="section-row" style={{ marginTop: isAdmin ? 22 : 0 }}>
               <span className="section-title">账号</span>
             </div>
-            <ul className="entry-table" aria-label="我的账号">
+            <ul className="entry-table no-av" aria-label="我的账号">
               <li className="entry">
-                <span className="entry-no" aria-hidden="true" />
                 <div className="entry-main">
                   <div className="entry-body">
                     <GridName name={user?.username || ''} className="entry-name" />
@@ -1343,7 +1336,7 @@ function InstanceAdminCard({
   if (acting) badge = { text: '处理中', cls: 'tag-busy' };
   else if (creating) badge = { text: '创建中', cls: 'tag-busy' };
   else if (createFailed) badge = { text: '创建失败', cls: 'tag-off' };
-  else if (offline) badge = { text: inst.runtime === 'missing' ? '未创建' : '已停止', cls: 'tag-off' };
+  else if (offline) badge = { text: inst.runtime === 'missing' ? '未创建' : '已停止', cls: 'tag-muted' }; // 停止不是错误：灰色
   else if (busy) badge = { text: '处理中', cls: 'tag-busy' };
   else if (installed) badge = { text: '在线', cls: 'tag-on' };
   else badge = { text: '待安装', cls: 'tag-warn' };
@@ -1355,7 +1348,7 @@ function InstanceAdminCard({
   else if (busy) sub = wx.percent >= 0 ? `${wx.message || '处理中'} ${wx.percent}%` : wx.message || '请稍候…';
   else if (wx.phase === 'error') sub = wx.message || '操作失败，可重试';
   else if (offline) sub = inst.runtime === 'missing' ? '容器尚未创建' : '容器已停止';
-  else if (installed) sub = wx.version ? `${profile.label} ${wx.version}` : `${profile.label}已就绪`;
+  else if (installed) sub = wx.version ? `版本 ${wx.version}` : '已就绪';
   else sub = `${profile.label}尚未安装`;
 
   const isImgRelease = !!inst.imageVersion && /^\d+\.\d+\.\d+$/.test(inst.imageVersion);
@@ -1384,10 +1377,9 @@ function InstanceAdminCard({
 
   return (
     <li className="entry">
-      <EntryNo n={no} />
       <div className="entry-main">
         <span className="entry-av">
-          <InstanceIcon icon={inst.icon} appType={inst.appType} size={36} radius={4} />
+          <InstanceIcon icon={inst.icon} appType={inst.appType} size={36} radius={10} />
         </span>
         <div className="entry-body">
           <GridName name={inst.name} className="entry-name" />
@@ -1405,6 +1397,8 @@ function InstanceAdminCard({
             )}
             {!createFailed && <span>可访问 {userCount} 人</span>}
           </div>
+          <span className={'entry-note' + (createFailed && !acting ? ' is-fail' : '')}>{sub}</span>
+          {createFailed && !acting && prov?.hint && <span className="entry-hint">{prov.hint}</span>}
           {working && (
             <div className="wx-progress entry-progress">
               <div
@@ -1425,8 +1419,6 @@ function InstanceAdminCard({
             <StateWord text={badge.text} />
           </span>
         )}
-        <span className={'entry-note' + (createFailed && !acting ? ' pen-wave' : '')}>{sub}</span>
-        {createFailed && !acting && prov?.hint && <span className="entry-hint">{prov.hint}</span>}
       </div>
       {/* 进行中（升级/重启/停止/下载）时不给操作，避免重复点击 */}
       <div className="entry-act">

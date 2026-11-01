@@ -22,11 +22,15 @@ Decision round: user asked not to pause; the assigned direction was built withou
 - lexicon shoulder & plate: declined · raise kept: colour quarantined; full colour only in app icons and state marks.
 - streaming title wall / transit diagram: declined.
 
+## Direction history
+1. Refinement of the soft-neumorphic original (PR #173): rejected as not different enough.
+2. 稿纸 squared manuscript paper (rolled direction, seed:912dde73f3117499): built and reviewed, then rejected by the user as "primitive"; the user wants rounded edges.
+3. The user chose **A: iOS grouped list** from three rounded mockups (A iOS grouped list, B modern app with dark sidebar, C refined soft cards). User-pinned direction; it beats the roll.
+
 ## Direction contract
-THESIS: The panel is a sheet of 稿纸 — squared manuscript paper — and the admin is the teacher with the red pen. Refuses the category default of soft grey cards with drop shadows and one accent.
-OWN-WORLD: Cool paper white ground ruled by a faint green square module (24px cells); carbon-ink text; deep 绿格 green ink for actions and selection; vermilion red pen only for errors, warnings to fix and destructive actions. Frames are a thick+thin double rule, corners nearly square (2–4px), no shadows. Dark theme is 复写纸 carbon paper: blue-black ground, pale blue rules. Song-style serif for page titles, system sans for UI, tabular figures.
-STORY: The visitor sees their instances as numbered entries written into the grid, reads each one's state as a word in a ruled cell, and opens one in a click; anything broken is circled in red with what to do next.
-FIRST VIEWPORT: Left margin column (the existing `>_` logo, unchanged by user instruction; numbered instance list with failures in red pen, admin/logout) separated from the sheet by a 5px double rule. The sheet: serif greeting with an instance count, a red-pen note when the default password is still in use, then one ruled table whose rows share columns (subgrid): No. | icon + name in square cells | state cell with the next step | primary action (进入 / 启动 / 重试创建 / 下载安装, or 请联系管理员 for sub-accounts). Admin, users and system lists use the same table plus a 管理 ▾ menu. Phones: two lines per row, 44px actions.
-AMENDMENT (after finish review, disposition rebuild): earlier wording said "2-col table"; built as a single shared-column table, which reads as one sheet and keeps state/action columns aligned at every width.
-FORM: 稿纸 manuscript paper, my list position 6 of 7. seed:912dde73f3117499. Signature move: names set in square writing cells; red-pen circle/underline marks for failures.
+THESIS: The panel is iOS Settings for your own WeChat server: calm, familiar grouped lists where every row says what to do next. Refuses both heavy neumorphic blobs and square, bordered "tool" chrome.
+OWN-WORLD: Light gray page (#f2f3f5), white 18px-radius groups with a barely-there lift, inset hairline separators, tinted status pills, pill buttons with one green primary (#06843f), system sans with large bold titles. Dark: black page, #1c1c1e groups. The `>_` logo is fixed.
+STORY: The visitor sees their instances as one grouped list, reads each one's state as a colored pill, and opens or fixes it from the same row; failures say why and what to do.
+FIRST VIEWPORT: White sidebar (logo, nav, instance list with status dots), large bold greeting with an instance count, the default-password banner when relevant, then one grouped list: icon · name · subtitle · note · status pill · action. Phones: two-line rows, 44px actions.
+FORM: User-pinned direction A (iOS grouped list), chosen from three rounded mockups after the rolled 稿纸 direction (seed:912dde73f3117499) was rejected.
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance

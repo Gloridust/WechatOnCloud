@@ -7,7 +7,7 @@ import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
 import { IcFolder, IcKeyboard, IcClipboard, IcVolume, IcVolumeOff, IcMic, IcImage, IcRestart, IcUpload, IcDownload, IcClose, IcCheck } from '../icons';
 import { VncAudio } from '../vncAudio';
-import { RowMenu, type RowMenuItem } from '../paper';
+import { RowMenu, type RowMenuItem } from '../parts';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
 // ws 地址带上本页的查看者标识（noVNC 先解码 path 再拼进地址），面板据此做「同一实例只在一处显示」，转发前会去掉。
