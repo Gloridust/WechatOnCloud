@@ -490,14 +490,23 @@ function HomeEntry({ no, inst, isAdmin }: { no: number; inst: InstanceWithStatus
             <GridName name={inst.name} className="entry-name" />
           </button>
           <div className="entry-meta">
-            <span>{detail ? `${prof.label} · ${detail}` : prof.label}</span>
+            <span>
+              {prof.label}
+              {detail && ` · ${detail}`}
+              {/* 失败原因并进副标题（红字），与其它行同为「应用 · 状态」一行 */}
+              {failNote && (
+                <>
+                  {' · '}
+                  <span className="is-fail-text">{failNote}</span>
+                </>
+              )}
+            </span>
           </div>
           {installing && wx.percent >= 0 && (
             <div className="wx-progress entry-progress">
               <div className="wx-progress-bar" style={{ width: `${wx.percent}%` }} />
             </div>
           )}
-          {failNote && <span className="entry-note is-fail">{failNote}</span>}
           {/* 管理员看到「怎么办」，重试不再是盲点 */}
           {failed && isAdmin && inst.provision?.hint && <span className="entry-hint">{inst.provision.hint}</span>}
         </div>
