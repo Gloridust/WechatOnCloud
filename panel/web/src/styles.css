@@ -3085,6 +3085,9 @@ select.input {
   margin-left: 0;
 }
 /* 条目里列出的实例名只是信息，不是按钮：去掉控件边框 */
+.entry-meta:has(.chip-static) {
+  column-gap: 0;
+}
 .entry-meta .chip-static {
   padding: 0;
   box-shadow: none;
@@ -3092,8 +3095,7 @@ select.input {
   color: var(--text);
 }
 .entry-meta .chip-static + .chip-static::before {
-  content: '·';
-  margin-right: 8px;
+  content: '、'; /* 中文顿号分隔：名字里本身可能带「·」，用「·」分隔会读错 */
   color: var(--muted);
 }
 .entry-progress {
