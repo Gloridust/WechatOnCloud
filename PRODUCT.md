@@ -40,7 +40,9 @@ The session lives on your own box, not on a phone or a vendor cloud: one always-
 
 ## Brand Commitments
 
-None binding. The user explicitly allowed replacing the name styling, icon, colors, type and layout. The product name 云微 / WechatOnCloud stays as the product's name.
+- **The logo is fixed.** Keep the existing app icon (green tile with a white `>_` prompt: `panel/web/public/favicon.svg`, the PWA PNGs from `scripts/gen-icons.mjs`) exactly as it is. Never redraw, recolor or replace it. (User instruction.)
+- The product name 云微 / WechatOnCloud stays.
+- Everything else visual (colors, type, layout, components) may change; the user allowed a total redesign.
 
 ## Evidence on Hand
 

@@ -1,9 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
-  <!-- 云微标志：绿墨方块里一格田字格，格中写「云」（字形取自 Noto Serif SC Bold，SIL OFL 1.1） -->
-  <rect width="100" height="100" rx="14" fill="#14693f"/>
-  <rect x="13" y="13" width="74" height="74" rx="2" fill="#ffffff"/>
-  <g stroke="#9cc3ab" stroke-width="1.4" stroke-dasharray="3.2 2.6" fill="none">
-    <path d="M50 15V85M15 50H85"/>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#13D873"/>
+      <stop offset="1" stop-color="#05A852"/>
+    </linearGradient>
+  </defs>
+  <rect width="100" height="100" rx="23" fill="url(#bg)"/>
+  <rect x="3.5" y="3.5" width="93" height="93" rx="20" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="2"/>
+  <g fill="none" stroke="#ffffff" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M28 24 L42 38 L28 52"/>
+    <path d="M50 54 L66 54"/>
   </g>
-  <path fill="#14693f" transform="translate(18.625 73.500) scale(0.0625 -0.0625)" d="M590 375Q586 366 570.0 361.5Q554 357 529 366L561 373Q533 335 488.0 290.5Q443 246 389.5 200.5Q336 155 279.5 115.5Q223 76 172 48L171 61H233Q227 1 207.5 -31.5Q188 -64 163 -72L118 79Q118 79 126.0 81.0Q134 83 144.5 86.5Q155 90 161 95Q195 118 235.0 162.0Q275 206 314.0 259.5Q353 313 383.5 366.0Q414 419 430 460ZM145 71Q188 70 260.0 71.0Q332 72 424.5 75.0Q517 78 622.0 81.5Q727 85 835 89L836 73Q733 48 564.5 16.0Q396 -16 177 -51ZM739 839Q739 839 752.5 829.0Q766 819 786.5 803.5Q807 788 829.0 770.0Q851 752 869 736Q865 720 840 720H144L136 749H668ZM837 566Q837 566 850.5 556.0Q864 546 884.5 529.5Q905 513 928.0 495.0Q951 477 969 461Q965 445 941 445H43L35 473H765ZM613 314Q706 275 768.5 231.0Q831 187 868.0 142.0Q905 97 919.5 56.0Q934 15 931.5 -17.5Q929 -50 913.0 -68.5Q897 -87 871.0 -87.5Q845 -88 815 -65Q803 -18 780.5 31.5Q758 81 729.0 129.5Q700 178 667.5 223.0Q635 268 603 307Z"/>
 </svg>

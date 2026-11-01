@@ -189,7 +189,8 @@
       "No drop shadows, glass, gradients or radial highlights",
       "No pills or large radii",
       "No emoji or Unicode glyph icons",
-      "No serif in buttons, labels or data"
+      "No serif in buttons, labels or data",
+      "Don't change the logo; the green >_ tile is a fixed brand asset"
     ]
   }
 }

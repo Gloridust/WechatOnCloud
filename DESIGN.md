@@ -115,7 +115,9 @@ components:
 
 **Creative North Star: "稿纸 — the manuscript sheet, marked with a red pen"**
 
-The panel is a sheet of Chinese squared manuscript paper (稿纸). Instances are rows written onto it: one ruled table whose rows share columns — index number, name set into square writing cells, a state cell that always says what to do next, and the action. Everything runs on one green-ruled grid. The mark is 云 written in a 田字格 practice cell. The admin is the teacher with the red pen: anything broken is circled or wavy-underlined in red, with what to do next written beside it.
+The panel is a sheet of Chinese squared manuscript paper (稿纸). Instances are rows written onto it: one ruled table whose rows share columns — index number, name set into square writing cells, a state cell that always says what to do next, and the action. Everything runs on one green-ruled grid.
+
+The app icon is the one fixed brand asset: the green `>_` tile is kept exactly as it was and is never redrawn to fit the paper world. The admin is the teacher with the red pen: anything broken is circled or wavy-underlined in red, with what to do next written beside it.
 
 Depth comes from rules, not light. There are no drop shadows, no glass, no soft blobs. A thin rule frames a card; a thick-and-thin double rule frames the important things (the sheet header, the margin column, dialogs, the login sheet). Dark mode is 复写纸, carbon paper: blue-black ground with pale blue rules.
 
@@ -226,6 +228,7 @@ Flat. There are no shadows in this system. Depth and grouping are expressed with
 ## Do's and Don'ts
 
 - **Do** use the tokens in `panel/web/src/styles.css` (`:root`) and the components in `paper.tsx` / `icons.tsx`.
+- **Don't** change the logo (`favicon.svg`, PWA icons). It is a fixed brand asset.
 - **Do** keep text ≥ 4.5:1 in both themes; green and red text use `--accent` / `--danger`, never the status green.
 - **Do** put every list in the entry table, write names with `GridName`, and number rows with `EntryNo`.
 - **Do** circle failures with `PenMark`, give the cause with `.pen-wave`, and always show the next step in the state cell.
