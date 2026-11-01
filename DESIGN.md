@@ -158,7 +158,7 @@ Cool paper and carbon ink, with green and red used as ink, never as decoration.
 - Dark: Carbon Paper #10141c, Carbon Cell #171c27, rules #283247 / #46557a, text #e4e9f2, pencil #9aa4b8.
 
 ### Named Rules
-**The Two Inks Rule.** Only green and red are used as accent ink. Green means "you can act / this is selected / healthy"; red means "broken, fix this, or destroys data". Any other colour must be a state (info, warn) or come from an app's own icon.
+**The Two Inks Rule.** Only green and red are used as accent ink. Green means "you can act / this is selected / healthy"; red means "broken, fix this, or destroys data". A stopped instance is not broken: it is pencil grey with a next step, never red. Any other colour must be a state (info, warn) or come from an app's own icon.
 
 **The Quarantine Rule.** Full saturation lives only inside app icons and status squares. Surfaces stay paper, white and rule.
 
@@ -206,7 +206,7 @@ Flat. There are no shadows in this system. Depth and grouping are expressed with
 
 - Radius: 2px stamps and frames, 3px controls, 4px cards. Nothing round except the theme-toggle glyph.
 - Status indicators are small squares, not dots.
-- The red-pen circle is the only organic shape: an irregular ellipse (`border-radius: 52% 48% 55% 45% / 58% 46% 54% 42%`, rotated −4°) drawn around a failed state.
+- The red-pen loop (`PenMark`, an SVG stroke with open, overlapping ends) is the only organic shape. It is drawn only around a failed state.
 
 ## Components
 
@@ -230,7 +230,8 @@ Flat. There are no shadows in this system. Depth and grouping are expressed with
 - **Do** use the tokens in `panel/web/src/styles.css` (`:root`) and the components in `paper.tsx` / `icons.tsx`.
 - **Don't** change the logo (`favicon.svg`, PWA icons). It is a fixed brand asset.
 - **Do** keep text ≥ 4.5:1 in both themes; green and red text use `--accent` / `--danger`, never the status green.
-- **Do** put every list in the entry table, write names with `GridName`, and number rows with `EntryNo`.
+- **Do** put every list in the entry table and write names with `GridName`. Number rows with `EntryNo` only in instance lists, where the number is how people refer to an instance.
+- **Do** use stamp tags for every state word (home and admin alike); only a failure gets the `PenMark` loop instead.
 - **Do** circle failures with `PenMark`, give the cause with `.pen-wave`, and always show the next step in the state cell.
 - **Don't** add drop shadows, glows, glass/blur, gradients or radial highlights.
 - **Don't** use pills or large radii; don't use colored side borders on cards or list items.

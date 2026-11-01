@@ -462,9 +462,6 @@ body {
 .modal-mask {
   position: fixed;
   inset: 0;
-  background: rgba(26, 29, 36, 0.4);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -548,19 +545,13 @@ body {
   resize: vertical;
   min-height: 96px;
   padding: 10px 12px;
-  border-radius: 14px;
   border: none;
-  background: var(--trough, #edeef1);
-  color: var(--text, #1a1d24);
+  color: var(--text);
   font-size: 14px;
   line-height: 1.5;
   font-family: inherit;
-  box-shadow: inset 0 1px 3px rgba(51, 66, 102, 0.16);
   outline: none;
   box-sizing: border-box;
-}
-.clip-area:focus {
-  box-shadow: inset 0 1px 3px rgba(51, 66, 102, 0.16), 0 0 0 2px rgba(7, 193, 96, 0.35);
 }
 .security-status {
   margin-top: 12px;
@@ -1594,9 +1585,6 @@ body {
   box-shadow: inset 0 1px 3px rgba(var(--shadow) / 0.16);
   box-sizing: border-box;
 }
-.iv-imebar-input:focus {
-  box-shadow: inset 0 1px 3px rgba(var(--shadow) / 0.16), 0 0 0 2px rgba(7, 193, 96, 0.35);
-}
 .iv-imebar-send {
   height: 38px;
   flex: 0 0 auto;
@@ -1695,9 +1683,7 @@ body {
 }
 .iv-drop {
   z-index: 30;
-  background: rgba(7, 193, 96, 0.16);
-  -webkit-backdrop-filter: blur(3px);
-  backdrop-filter: blur(3px);
+  background: rgba(var(--green-rgb) / 0.1); /* 拖文件进来：纸面泛一层淡绿，不用模糊 */
 }
 .iv-files > * {
   /* 面板限高 + 纵向 flex：默认所有子项都可被压缩，文件一多「选择文件上传」按钮会被挤成一条线（issue #125）。
@@ -1731,9 +1717,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(26, 29, 36, 0.28);
-  -webkit-backdrop-filter: blur(1.5px);
-  backdrop-filter: blur(1.5px);
+  background: rgba(16 20 28 / 0.32);
 }
 .iv-lock-card {
   background: var(--surface);
@@ -2487,14 +2471,19 @@ body {
   color: #fff;
   box-shadow: none;
 }
-.btn:disabled,
-.btn-primary:disabled,
-.btn-danger:disabled {
+.btn:disabled {
   opacity: 1;
   background: var(--trough);
   color: var(--muted);
   box-shadow: inset 0 0 0 1px var(--rule);
   cursor: not-allowed;
+}
+/* 主按钮禁用时保持绿墨身份、只降透明度：一眼看出「填完就能点」，深色下也不会像一个可点的黑按钮 */
+.btn-primary:disabled {
+  background: var(--accent-fill);
+  color: #fff;
+  box-shadow: none;
+  opacity: 0.45;
 }
 .btn-text {
   border-radius: var(--r-small);
@@ -2648,6 +2637,17 @@ select.input {
     padding: 10px 0 11px;
   }
 }
+/* 待处理红点贴着文字，而不是挂在整格的角上 */
+.seg-tab {
+  display: inline-flex;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 3px;
+}
+.seg-dot {
+  position: static;
+  margin-top: 2px;
+}
 
 /* —— 侧栏：稿纸左侧的「天头」，与纸面以双线隔开 —— */
 .sidebar {
@@ -2757,17 +2757,6 @@ select.input {
 
 /* —— 签名一：名字写进方格（稿纸格） —— */
 .gname {
-  position: relative;
-  display: inline-flex;
-  flex-wrap: nowrap;
-  max-width: 100%;
-  vertical-align: middle;
-  box-shadow: 0 0 0 1px var(--rule-strong);
-  font-family: var(--font-title);
-  font-weight: 700;
-  line-height: 1;
-}
-.gname {
   --gc: 1.25em; /* 一格的边长，按名字字号计算 */
 }
 .gname {
@@ -2781,7 +2770,7 @@ select.input {
   font-weight: 700;
   line-height: 1;
 }
-/* 每格右侧画一条格线；合并格（西文单词）内部也按格宽画线，网格节奏不断 */
+/* 每格右侧画一条格线 */
 .gname-c {
   display: inline-flex;
   align-items: center;
@@ -2794,6 +2783,10 @@ select.input {
   color: var(--muted);
 }
 .gname-c.word {
+  /* 宽度由 GridName 量出字宽后取整到整格；单词左对齐，不留空的前导格 */
+  justify-content: flex-start;
+  min-width: var(--gc);
+  padding-left: 0.18em;
   letter-spacing: 0.02em;
   white-space: nowrap;
   /* 合并格内不画穿字的竖线，只在上下边缘留格位刻度，网格节奏不断、字母不被切 */
@@ -3091,6 +3084,18 @@ select.input {
 .entry-meta .tag {
   margin-left: 0;
 }
+/* 条目里列出的实例名只是信息，不是按钮：去掉控件边框 */
+.entry-meta .chip-static {
+  padding: 0;
+  box-shadow: none;
+  font-size: 12px;
+  color: var(--text);
+}
+.entry-meta .chip-static + .chip-static::before {
+  content: '·';
+  margin-right: 8px;
+  color: var(--muted);
+}
 .entry-progress {
   margin-top: 4px;
   width: min(260px, 100%);
@@ -3151,6 +3156,7 @@ select.input {
   padding: 12px 14px;
 }
 .entry-btn {
+  min-width: 88px;
   height: 36px;
   padding: 0 16px;
   font-size: 14px;
@@ -3310,6 +3316,14 @@ select.input {
   background: none;
 }
 .sb-stxt.st-off {
+  color: var(--muted);
+}
+.sb-stxt.st-fail {
+  color: var(--pen);
+  background: none;
+}
+.st-fail {
+  background: var(--danger-fill);
   color: var(--pen);
 }
 .sb-stxt.st-on {

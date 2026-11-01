@@ -1447,7 +1447,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             },
           },
           { sep: true as const },
-          { label: '重启实例', danger: true, onClick: restartInstance },
+          { label: '重启实例', onClick: restartInstance }, // 与桌面工具栏一致：中性色（隔线分开，不是删除类操作）
         ]
       : []),
   ];

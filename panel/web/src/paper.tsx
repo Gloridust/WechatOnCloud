@@ -6,7 +6,7 @@ const MAX_CELLS = 10; // 名字最多占这么多格，超出收成「…」，�
 
 interface Cell {
   t: string;
-  span: number; // 占几格：汉字 1 格；一个西文单词按每两个字母一格合并成一个宽格（单词不被拆开）
+  span: number; // 占几格：汉字 1 格；西文单词的格数用于截断估算，实际宽度渲染后按字宽取整
 }
 
 // 拆格：汉字一字一格；连续的半角字符是一个「词」，写在跨若干格的合并格里（格线照画，字母不被拆开）；空格只用来断词，不占格。
@@ -47,19 +47,49 @@ export function GridName({ name, className }: { name: string; className?: string
     shown.push(c);
     used += c.span;
   }
+  const box = useRef<HTMLSpanElement>(null);
+  // 西文合并格按「实际字宽」取整到整格：先让单词自然排版，量出宽度后向上取整成 n 格。
+  // 字体加载完（自托管宋体是异步的）再量一次，避免用兜底字体的宽度定格。
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const fit = () => {
+      const words = el.querySelectorAll<HTMLElement>('.gname-c.word');
+      if (!words.length) return;
+      const cell = parseFloat(getComputedStyle(el).fontSize) * 1.25; // 与 CSS 的 --gc: 1.25em 一致
+      words.forEach((w) => {
+        w.style.width = 'auto';
+        const need = Math.max(1, Math.ceil((w.scrollWidth + 4) / cell));
+        w.style.width = `${need * cell}px`;
+      });
+    };
+    fit();
+    // 宋体按字分片懒加载：每批字体加载完都重量一次（fonts.ready 可能早于这些分片开始加载）
+    let alive = true;
+    const refit = () => alive && fit();
+    document.fonts?.ready.then(refit);
+    document.fonts?.addEventListener?.('loadingdone', refit);
+    return () => {
+      alive = false;
+      document.fonts?.removeEventListener?.('loadingdone', refit);
+    };
+  }, [name]);
   return (
-    <span className={'gname' + (className ? ' ' + className : '')} title={name}>
+    <span ref={box} className={'gname' + (className ? ' ' + className : '')} title={name}>
       <span className="sr-only">{name}</span>
-      {shown.map((c, i) => (
-        <span
-          key={i}
-          className={'gname-c' + (/^[\x21-\x7e]+$/.test(c.t) ? ' word' : c.t === '·' ? ' sp' : '')}
-          style={{ width: `calc(var(--gc) * ${c.span})` }}
-          aria-hidden="true"
-        >
-          {c.t}
-        </span>
-      ))}
+      {shown.map((c, i) => {
+        const isWord = /^[\x21-\x7e]+$/.test(c.t);
+        return (
+          <span
+            key={i}
+            className={'gname-c' + (isWord ? ' word' : c.t === '·' ? ' sp' : '')}
+            style={isWord ? undefined : { width: `calc(var(--gc) * ${c.span})` }}
+            aria-hidden="true"
+          >
+            {c.t}
+          </span>
+        );
+      })}
       {more && (
         <span className="gname-c gname-more" aria-hidden="true">
           …

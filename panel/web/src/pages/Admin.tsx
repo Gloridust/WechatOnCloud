@@ -422,8 +422,8 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
     setAct(inst.id, '启动中…');
     try {
       const r = await api.instanceStart(inst.id);
-      // 容器不存在时服务端转为后台重新创建（可能要拉镜像），进度和结果显示在卡片上
-      if (r?.started) toast('已开始创建容器，进度见卡片', 'info');
+      // 容器不存在时服务端转为后台重新创建（可能要拉镜像），进度和结果显示在实例行上
+      if (r?.started) toast('已开始创建容器，进度见实例列表', 'info');
       else toast('实例已启动', 'ok');
       await load();
     } catch (e: any) {
@@ -677,9 +677,9 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
               />
             ) : (
               <ul className="entry-table" aria-label="子账号">
-                {subs.map((u, i) => (
+                {subs.map((u) => (
                   <li key={u.id} className="entry">
-                    <EntryNo n={i + 1} />
+                    <span className="entry-no" aria-hidden="true" />
                     <div className="entry-main">
                       <div className="entry-body">
                         <GridName name={u.username} className="entry-name" />
@@ -732,9 +732,9 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                 </div>
                 <p className="section-desc">不属于任何登记实例，多为创建失败遗留。它们占着数据卷名，先删掉它们才能删除同名数据卷。</p>
                 <ul className="entry-table" aria-label="残留容器">
-                  {orphanConts.map((c, i) => (
+                  {orphanConts.map((c) => (
                     <li key={c.id} className="entry">
-                      <EntryNo n={i + 1} />
+                      <span className="entry-no" aria-hidden="true" />
                       <div className="entry-main">
                         <div className="entry-body">
                           <span className="entry-name mono">{c.name}</span>
@@ -761,9 +761,9 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                 </div>
                 <p className="section-desc">删除实例时没勾选「同时永久删除聊天记录」就会留下来。新建实例时可以复用，继承原来的聊天记录。</p>
                 <ul className="entry-table" aria-label="未使用的数据卷">
-                  {orphanVols.map((v, i) => (
+                  {orphanVols.map((v) => (
                     <li key={v.name} className="entry">
-                      <EntryNo n={i + 1} />
+                      <span className="entry-no" aria-hidden="true" />
                       <div className="entry-main">
                         <div className="entry-body">
                           <span className="entry-name mono">{v.name}</span>
@@ -798,7 +798,7 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
             </div>
             <ul className="entry-table" aria-label="我的账号">
               <li className="entry">
-                <EntryNo n={1} />
+                <span className="entry-no" aria-hidden="true" />
                 <div className="entry-main">
                   <div className="entry-body">
                     <GridName name={user?.username || ''} className="entry-name" />
@@ -1290,7 +1290,7 @@ function DeleteInstance({ inst, onClose, onDone }: { inst: InstanceWithStatus; o
   );
 }
 
-// 管理页的实例卡片：含微信版本管理（下载/更新）+ 重命名/分配/删除
+// 管理页的实例行：含微信版本管理（下载/更新）+ 重命名/分配/删除
 function InstanceAdminCard({
   inst,
   no,
@@ -1332,11 +1332,11 @@ function InstanceAdminCard({
   const busy = BUSY_PHASES.includes(wx.phase);
   const installed = wx.installed && wx.phase !== 'downloading';
   const offline = inst.runtime !== 'running';
-  // 容器还没建成（#129）：创建中锁住卡片显示进度；失败则显示原因 + 怎么办 + 「重试创建」
+  // 容器还没建成（#129）：创建中锁住该行显示进度；失败则显示原因 + 怎么办 + 「重试创建」
   const prov = inst.provision;
   const creating = prov?.state === 'creating';
   const createFailed = prov?.state === 'failed';
-  const working = !!acting || busy || creating; // 生命周期操作中 / 微信下载更新中 / 后台创建中 → 锁住卡片
+  const working = !!acting || busy || creating; // 生命周期操作中 / 微信下载更新中 / 后台创建中 → 锁住该行
   const profile = appProfile(inst.appType);
 
   let badge: { text: string; cls: string };
@@ -1728,7 +1728,7 @@ function VolumeManager({ inst, onClose, onChanged }: { inst: InstanceWithStatus;
 
         {offline ? (
           <div className="vol-warn">
-            实例未运行，文件浏览不可用。可执行上方的整卷备份 / 恢复；要浏览或上传单个文件，请先在卡片上启动实例。
+            实例未运行，文件浏览不可用。可执行上方的整卷备份 / 恢复；要浏览或上传单个文件，请先在实例列表里启动实例。
           </div>
         ) : (
           <div className="vol-sec">
@@ -1986,9 +1986,9 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
     setErr('');
     setBusy(true);
     try {
-      // 服务端登记后立即返回、后台建容器（可能要先拉镜像）：关掉弹窗，进度和结果看卡片（#129）
+      // 服务端登记后立即返回、后台建容器（可能要先拉镜像）：关掉弹窗，进度和结果看实例列表（#129）
       await api.createInstance(name.trim(), [...sel], reuse || undefined, appType);
-      toast('实例已登记，正在后台创建，进度见卡片', 'info');
+      toast('实例已登记，正在后台创建，进度见实例列表', 'info');
       onDone();
     } catch (e: any) {
       setErr(e.message || '创建失败');
@@ -2055,8 +2055,8 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
         )}
         {err && <div className="error">{err}</div>}
         <div className="muted small" style={{ marginTop: 4 }}>
-          创建后在后台拉起一个新的 {APP_LABELS[appType]} 容器（本地没有实例镜像时先自动拉取，首次可能要几分钟，进度见卡片）
-          {appProfile(appType).needsInstall ? `；建好后点卡片上的「下载安装${APP_LABELS[appType]}」，再进入实例登录。` : '。'}
+          {`创建后在后台拉起一个新的${APP_LABELS[appType]}容器（本地没有实例镜像时先自动拉取，首次可能要几分钟，进度见实例列表）`}
+          {appProfile(appType).needsInstall ? '；建好后点该行的「下载安装」，再进入实例登录。' : '。'}
         </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>

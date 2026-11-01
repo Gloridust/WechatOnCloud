@@ -50,7 +50,7 @@ function useInstancesLoader(): InstancesState {
 // 实例状态点（颜色 + 文案）
 export function statusOf(inst: InstanceWithStatus): { cls: string; text: string } {
   if (inst.provision?.state === 'creating') return { cls: 'st-busy', text: '创建中' };
-  if (inst.provision?.state === 'failed') return { cls: 'st-off', text: '创建失败' };
+  if (inst.provision?.state === 'failed') return { cls: 'st-fail', text: '创建失败' }; // 只有真正的失败用红笔
   const offline = inst.runtime !== 'running';
   if (offline) return { cls: 'st-off', text: inst.runtime === 'missing' ? '未创建' : '已停止' };
   if (BUSY.includes(inst.wechat.phase)) return { cls: 'st-busy', text: '处理中' };
@@ -337,7 +337,7 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
   const nav = useNavigate();
   const isAdmin = user?.role === 'admin';
   const online = instances.filter((i) => statusOf(i).cls === 'st-on').length;
-  const attention = instances.filter((i) => ['st-off', 'st-warn'].includes(statusOf(i).cls)).length;
+  const attention = instances.filter((i) => ['st-off', 'st-warn', 'st-fail'].includes(statusOf(i).cls)).length;
 
   return (
     <div className="ws-page">
@@ -467,14 +467,17 @@ function HomeEntry({ no, inst, isAdmin }: { no: number; inst: InstanceWithStatus
     ) : null;
     if (!isAdmin) note += '，请联系管理员安装';
   } else {
-    note = failed ? inst.provision?.error || '创建失败' : inst.runtime === 'missing' ? '容器还没创建' : '实例已停止';
+    // 失败：红笔写原因；停止 / 未创建：铅笔灰写下一步（不是错误，不用红笔）
+    if (failed) note = (inst.provision?.error || '创建失败') + (isAdmin ? '' : '，请联系管理员');
+    else if (isAdmin) note = inst.runtime === 'missing' ? '容器还没创建，点「启动」会自动创建' : '点「启动」继续使用';
+    else note = '已停止，请联系管理员启动';
     action = isAdmin ? (
       <button className="btn btn-primary entry-btn" disabled={busy} onClick={() => run(() => api.instanceStart(inst.id), failed ? '已重新开始创建' : '已启动')}>
         {busy ? '处理中…' : failed ? '重试创建' : '启动'}
       </button>
     ) : null;
-    if (!isAdmin) note += '，请联系管理员';
   }
+  const stamp: Record<string, string> = { 'st-on': 'tag-on', 'st-busy': 'tag-busy', 'st-warn': 'tag-warn', 'st-off': 'tag-muted' };
 
   return (
     <li className="entry">
@@ -498,11 +501,13 @@ function HomeEntry({ no, inst, isAdmin }: { no: number; inst: InstanceWithStatus
             <StateWord text={st.text} />
           </PenMark>
         ) : (
-          <span className={'entry-st ' + st.cls}>
+          <span className={'tag ' + (stamp[st.cls] || 'tag-muted')}>
             <StateWord text={st.text} />
           </span>
         )}
-        {note && <span className={'entry-note' + (failed || st.cls === 'st-off' ? ' pen-wave' : '')}>{note}</span>}
+        {note && <span className={'entry-note' + (failed ? ' pen-wave' : '')}>{note}</span>}
+        {/* 管理员看到「怎么办」，重试不再是盲点 */}
+        {failed && isAdmin && inst.provision?.hint && <span className="entry-hint">{inst.provision.hint}</span>}
       </div>
       <div className="entry-act">{action}</div>
     </li>
