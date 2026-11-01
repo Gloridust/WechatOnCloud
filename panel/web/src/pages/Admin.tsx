@@ -255,12 +255,11 @@ function AboutSection({ isAdmin }: { isAdmin: boolean }) {
           {updateNote}
           {isAdmin && (outdatedInst > 0 || remoteNewer) && (
             <>
-              {' '}
               {outdatedInst > 0 ? `另有 ${outdatedInst} 个实例的镜像可升级。` : '实例镜像检测到新版本。'}
               更新面板不会自动升级实例（二者是不同镜像），请在「实例」页用「全部升级」。
             </>
           )}
-          {info?.source && ` 来源 ${info.source}。`}
+          {info?.source && `来源 ${info.source}。`}
           {info?.error && ` 检查失败：${info.error}`}
         </p>
       )}
