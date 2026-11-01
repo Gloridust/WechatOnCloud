@@ -5,6 +5,7 @@ import { useUI, PasswordInput } from './ui';
 import { api, appProfile, type InstanceWithStatus } from './api';
 import { InstanceIcon } from './AppIcon';
 import { IcShield, IcChevronRight } from './icons';
+import { GridName, EntryNo, StateWord } from './paper';
 import { getThemeMode, applyThemeMode, nextThemeMode, resolveDark, type ThemeMode } from './theme';
 import InstanceView from './pages/Desktop';
 import Admin from './pages/Admin';
@@ -334,6 +335,8 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
   const { instances, loaded } = useInstances();
   const nav = useNavigate();
   const isAdmin = user?.role === 'admin';
+  const online = instances.filter((i) => statusOf(i).cls === 'st-on').length;
+  const attention = instances.filter((i) => ['st-off', 'st-warn'].includes(statusOf(i).cls)).length;
 
   return (
     <div className="ws-page">
@@ -346,10 +349,17 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
       </header>
 
       <div className="content">
-        <div className="hello">
+        <h1 className="hello">
           你好，<b>{user?.username}</b>
           {isAdmin && <span className="tag">管理员</span>}
-        </div>
+        </h1>
+        <p className="sheet-sub">
+          {loaded
+            ? instances.length
+              ? `${instances.length} 个实例，${online} 个在线。点一个进入。`
+              : '还没有可用的实例。'
+            : '正在读取实例…'}
+        </p>
 
         {user?.mustChangePassword && (
           <button className="warn-banner" onClick={onChangePassword}>
@@ -368,7 +378,7 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
         )}
 
         <div className="section-row">
-          <span className="section-title">我的实例</span>
+          <h2 className="section-title">我的实例</h2>
           {isAdmin && (
             <button className="btn-text btn-text-icon" onClick={() => nav('/admin')}>
               管理
@@ -387,23 +397,35 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
           </div>
         ) : (
           <div className="inst-grid">
-            {instances.map((inst) => {
+            {instances.map((inst, i) => {
               const st = statusOf(inst);
               const prof = appProfile(inst.appType);
+              const failed = inst.provision?.state === 'failed';
               const meta = inst.wechat.installed
                 ? `${prof.label} ${inst.wechat.version || ''}`.trim()
                 : inst.runtime === 'running' && prof.needsInstall
                   ? `待下载安装${prof.label}`
-                  : '';
+                  : prof.label;
               return (
                 <button key={inst.id} className="home-card" onClick={() => nav(`/i/${inst.id}`)}>
                   <span className="home-card-av">
-                    <InstanceIcon icon={inst.icon} appType={inst.appType} size={42} radius={12} />
+                    <InstanceIcon icon={inst.icon} appType={inst.appType} size={40} radius={4} />
                   </span>
                   <span className="home-card-main">
-                    <span className="home-card-name">{inst.name}</span>
+                    <span className="home-card-top">
+                      <EntryNo n={i + 1} />
+                      <GridName name={inst.name} className="home-card-name" />
+                    </span>
                     <span className="home-card-meta">
-                      <span className={'home-card-st ' + st.cls}>● {st.text}</span>
+                      {failed ? (
+                        <span className="home-card-st pen-circle">
+                          <StateWord text={st.text} />
+                        </span>
+                      ) : (
+                        <span className={'home-card-st ' + st.cls}>
+                          <StateWord text={st.text} />
+                        </span>
+                      )}
                       {meta && <span className="home-card-ver">{meta}</span>}
                     </span>
                   </span>
@@ -416,6 +438,14 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
           </div>
         )}
 
+        {loaded && instances.length > 0 && (
+          <div className="sheet-foot">
+            <span>共 {instances.length} 个实例</span>
+            <span>
+              在线 {online} · 需要处理 {attention}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

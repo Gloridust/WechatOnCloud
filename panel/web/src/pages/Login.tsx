@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth';
 import { PasswordInput } from '../ui';
+import { GridName } from '../paper';
 
 export default function Login() {
   const { login } = useAuth();
@@ -33,7 +34,9 @@ export default function Login() {
             <div className="brand-logo">
               <img src="/favicon.svg" alt="" />
             </div>
-            <h1>云微</h1>
+            <h1>
+              <GridName name="云微" />
+            </h1>
             <p className="muted">登录以访问 NAS 上的微信</p>
           </div>
           <input

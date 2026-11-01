@@ -6,6 +6,7 @@ import { InstanceIcon, ICON_CHOICES } from '../AppIcon';
 import { useUI, PasswordInput } from '../ui';
 import { useAuth } from '../auth';
 import { IcPlus, IcChevronRight, IcAlert, IcMonitor, IcUsers, IcCheck } from '../icons';
+import { GridName, EntryNo, StateWord } from '../paper';
 
 const BUSY_PHASES = ['downloading', 'extracting', 'installing'];
 
@@ -625,9 +626,10 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
               />
             ) : (
               <div className="inst-grid">
-                {instances.map((inst) => (
+                {instances.map((inst, i) => (
                   <InstanceAdminCard
                     key={inst.id}
+                    no={i + 1}
                     inst={inst}
                     outdated={!!upg?.outdatedIds.includes(inst.id)}
                     userCount={usersForInstance(inst.id).length}
@@ -675,10 +677,15 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
               />
             ) : (
               <div className="inst-grid">
-                {subs.map((u) => (
+                {subs.map((u, i) => (
                   <div key={u.id} className="inst-card">
                     <div className="inst-head">
-                      <span className="inst-name">{u.username}</span>
+                      <EntryNo n={i + 1} />
+                      <span className="inst-name">
+                        <GridName name={u.username} />
+                      </span>
+                    </div>
+                    <div className="inst-meta">
                       {u.disabled ? <span className="tag tag-off">已禁用</span> : <span className="tag tag-on">正常</span>}
                     </div>
                     <div className="inst-sub">{u.allowedInstances.length > 0 ? `可访问 ${u.allowedInstances.length} 个实例` : '未分配实例'}</div>
@@ -1277,6 +1284,7 @@ function DeleteInstance({ inst, onClose, onDone }: { inst: InstanceWithStatus; o
 // 管理页的实例卡片：含微信版本管理（下载/更新）+ 重命名/分配/删除
 function InstanceAdminCard({
   inst,
+  no,
   outdated,
   userCount,
   acting,
@@ -1294,6 +1302,7 @@ function InstanceAdminCard({
   onIcon,
 }: {
   inst: InstanceWithStatus;
+  no: number;
   outdated?: boolean;
   userCount: number;
   acting?: string;
@@ -1362,14 +1371,22 @@ function InstanceAdminCard({
   return (
     <div className={'inst-card' + (menuOpen ? ' open-menu' : '')}>
       <div className="inst-head">
-        <span className="inst-name" title={inst.name}>
-          {inst.name}
+        <EntryNo n={no} />
+        <span className="inst-name">
+          <GridName name={inst.name} />
         </span>
-        <span className={'tag ' + badge.cls}>{badge.text}</span>
       </div>
-      {/* 次要元数据独占一行（可换行），不再和名字挤在标题行导致名字被截断、徽标竖排换行 */}
-      {((outdated && !acting) || inst.imageVersion) && (
-        <div className="inst-meta">
+      {/* 状态 + 次要元数据同一行（可换行）：标题行只放编号与方格名字，名字永不被挤断 */}
+      <div className="inst-meta">
+        {createFailed && !acting ? (
+          <span className="pen-circle inst-state">
+            <StateWord text={badge.text} />
+          </span>
+        ) : (
+          <span className={'tag ' + badge.cls}>
+            <StateWord text={badge.text} />
+          </span>
+        )}
           {outdated && !acting && (
             <span className="tag tag-warn" title="该实例的镜像落后于最新版，点「升级实例」可更新">
               可升级
@@ -1383,8 +1400,7 @@ function InstanceAdminCard({
               镜像 {/^\d+\.\d+\.\d+$/.test(inst.imageVersion) ? `v${inst.imageVersion}` : inst.imageVersion.slice(0, 8)}
             </span>
           )}
-        </div>
-      )}
+      </div>
       <div className={'inst-sub' + (createFailed && !acting ? ' is-error' : '')}>
         {sub}
         {!acting && !createFailed && ` · 可访问 ${userCount} 人`}
