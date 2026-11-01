@@ -39,6 +39,7 @@ export default function Login() {
           <input
             className="input"
             placeholder="用户名"
+            aria-label="用户名"
             autoCapitalize="off"
             autoCorrect="off"
             autoComplete="username"

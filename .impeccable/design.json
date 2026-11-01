@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-01T14:01:48+00:00",
+  "title": "Design System: 云微 · WechatOnCloud panel",
+  "extensions": {
+    "colorMeta": {
+      "green-fill": {
+        "role": "primary",
+        "displayName": "Green Fill"
+      },
+      "green-text": {
+        "role": "primary",
+        "displayName": "Green Text"
+      },
+      "red": {
+        "role": "secondary",
+        "displayName": "Red (failures only)"
+      },
+      "page-gray": {
+        "role": "neutral",
+        "displayName": "Page Gray"
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Surface"
+      }
+    },
+    "typographyMeta": {
+      "large-title": {
+        "displayName": "Large Title",
+        "purpose": "Home greeting."
+      },
+      "row-title": {
+        "displayName": "Row Title",
+        "purpose": "Names in grouped lists."
+      },
+      "pill": {
+        "displayName": "Pill",
+        "purpose": "Status pills."
+      }
+    },
+    "shadows": [
+      {
+        "name": "lift",
+        "value": "0 1px 2px rgba(0,0,0,.04), 0 1px 1px rgba(0,0,0,.02)",
+        "purpose": "Groups, cards, banners (light only)."
+      },
+      {
+        "name": "pop",
+        "value": "0 10px 30px rgba(0,0,0,.14), 0 2px 6px rgba(0,0,0,.08)",
+        "purpose": "Menus, dialogs, toasts, login card."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease",
+        "value": "cubic-bezier(0.2, 0.8, 0.2, 1)",
+        "purpose": "State transitions, 120–240ms."
+      },
+      {
+        "name": "state-in",
+        "value": "fade + 2px rise, 240ms",
+        "purpose": "Status word change."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "phone",
+        "value": "<768px",
+        "purpose": "Sidebar drawer; icon-only toolbar."
+      },
+      {
+        "name": "narrow",
+        "value": "<=640px",
+        "purpose": "Two-line rows, 44px actions."
+      },
+      {
+        "name": "wide",
+        "value": ">=880px",
+        "purpose": "Content 940px."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "One filled green pill per row or dialog.",
+      "html": "<button class=\"ds-p\">进入</button>",
+      "css": ".ds-p{height:44px;padding:0 18px;border:0;border-radius:999px;background:#06843f;color:#fff;font-weight:600;font-size:15px;cursor:pointer;transition:background .15s,transform .12s}.ds-p:hover{background:#056b34}.ds-p:active{transform:scale(.97)}.ds-p:focus-visible{outline:2px solid #05803f;outline-offset:2px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Gray pill for secondary actions.",
+      "html": "<button class=\"ds-s\">管理</button>",
+      "css": ".ds-s{height:44px;padding:0 16px;border:0;border-radius:999px;background:#ececf0;color:#1c1c1e;font-weight:600;font-size:15px;cursor:pointer}.ds-s:hover{background:#e0e0e5}"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "White field with a visible outline and green focus ring.",
+      "html": "<label class=\"ds-l\">实例名称<input class=\"ds-i\" placeholder=\"留空自动命名\"></label>",
+      "css": ".ds-l{display:block;font-size:13px;font-weight:600;color:#65656b}.ds-i{display:block;margin-top:8px;width:260px;height:48px;padding:0 16px;border:0;border-radius:12px;box-shadow:inset 0 0 0 1px #8a8a8f;font-size:16px;outline:none}.ds-i:focus{box-shadow:inset 0 0 0 2px #06843f,0 0 0 4px rgba(7,193,96,.18)}"
+    },
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "status-pill",
+      "description": "Tinted status pill.",
+      "html": "<span class=\"ds-pill\">在线</span> <span class=\"ds-pill f\">创建失败</span> <span class=\"ds-pill n\">已停止</span>",
+      "css": ".ds-pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:#e8f8ef;color:#05803f}.ds-pill.f{background:#ffecea;color:#c4271f}.ds-pill.n{background:#f0f0f2;color:#65656b}"
+    },
+    {
+      "name": "Grouped List",
+      "kind": "card",
+      "refersTo": "grouped-list",
+      "description": "White rounded group; rows with inset separators, pill + action on the right.",
+      "html": "<div class=\"ds-g\"><div class=\"ds-r\"><i></i><div><b>EthanWhoDev</b><small>微信 4.1.1.4</small></div><span class=\"ds-pill\">在线</span><button class=\"ds-p\">进入</button></div><div class=\"ds-r\"><i></i><div><b>Diary</b><small class=\"e\">拉取镜像失败：docker.io 连接超时</small></div><span class=\"ds-pill f\">创建失败</span><button class=\"ds-p\">重试创建</button></div></div>",
+      "css": ".ds-g{width:560px;background:#fff;border-radius:18px;box-shadow:0 1px 2px rgba(0,0,0,.04)}.ds-r{display:grid;grid-template-columns:38px 1fr auto auto;gap:14px;align-items:center;padding:12px 16px;position:relative}.ds-r+.ds-r:before{content:'';position:absolute;left:68px;right:0;top:0;height:1px;background:#e5e5ea}.ds-r i{width:38px;height:38px;border-radius:10px;background:#07c160}.ds-r b{display:block;font-size:16px;font-weight:600}.ds-r small{font-size:13px;color:#65656b}.ds-r small.e{color:#c4271f}.ds-pill{padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:#e8f8ef;color:#05803f}.ds-pill.f{background:#ffecea;color:#c4271f}.ds-p{height:34px;padding:0 16px;border:0;border-radius:999px;background:#06843f;color:#fff;font-weight:600}"
+    },
+    {
+      "name": "Segmented Control",
+      "kind": "nav",
+      "description": "Admin tabs.",
+      "html": "<div class=\"ds-seg\"><a class=\"on\">实例</a><a>用户</a><a>系统</a></div>",
+      "css": ".ds-seg{display:inline-flex;gap:2px;padding:3px;border-radius:999px;background:#ececf0}.ds-seg a{padding:7px 22px;border-radius:999px;font-weight:600;font-size:14px;color:#65656b;cursor:pointer}.ds-seg a.on{background:#fff;color:#1c1c1e;box-shadow:0 1px 3px rgba(0,0,0,.12)}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Settings, but for your own WeChat server",
+    "overview": "An iOS-Settings-style grouped-list interface: light gray page, white rounded groups, inset hairlines, tinted status pills and green pill buttons. Every list is the same grouped list, and every row says what to do next.",
+    "keyCharacteristics": [
+      "light gray page, white 18px groups",
+      "inset row separators",
+      "tinted status pills",
+      "green pill primary button",
+      "system sans, large bold titles",
+      "fixed >_ logo"
+    ],
+    "rules": [
+      {
+        "name": "The Red Means Broken Rule",
+        "body": "Red only for failures, errors, destructive actions; stopped is neutral gray.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Green Rule",
+        "body": "One filled green button per row or dialog.",
+        "section": "colors"
+      }
+    ],
+    "dos": [
+      "Use tokens from styles.css :root",
+      "Show the next step in every non-online row",
+      "Keep text ≥4.5:1 and outlines ≥3:1"
+    ],
+    "donts": [
+      "Don't change the >_ logo",
+      "No square corners, heavy borders, glass, gradients or emoji icons",
+      "Don't use red for stopped states"
+    ]
+  }
+}
