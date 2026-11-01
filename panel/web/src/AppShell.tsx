@@ -5,7 +5,7 @@ import { useUI, PasswordInput } from './ui';
 import { api, appProfile, type InstanceWithStatus } from './api';
 import { InstanceIcon } from './AppIcon';
 import { IcShield, IcChevronRight } from './icons';
-import { GridName, EntryNo, StateWord } from './paper';
+import { GridName, EntryNo, StateWord, PenMark } from './paper';
 import { getThemeMode, applyThemeMode, nextThemeMode, resolveDark, type ThemeMode } from './theme';
 import InstanceView from './pages/Desktop';
 import Admin from './pages/Admin';
@@ -197,17 +197,18 @@ function Sidebar({ collapsed, onToggleCollapsed }: { collapsed: boolean; onToggl
       {!collapsed && <div className="sb-section">实例</div>}
       <div className="sb-list">
         {instances.length === 0 && !collapsed && <div className="sb-empty">暂无可用实例</div>}
-        {instances.map((inst) => {
+        {instances.map((inst, i) => {
           const on = loc.pathname === `/i/${inst.id}`;
           const st = statusOf(inst);
           return (
             <button key={inst.id} className={'sb-item sb-inst' + (on ? ' on' : '')} onClick={() => go(`/i/${inst.id}`)} title={inst.name}>
+              {!collapsed && <span className="sb-no">{String(i + 1).padStart(2, '0')}</span>}
               <span className="sb-avatar">
                 <InstanceIcon icon={inst.icon} appType={inst.appType} size={34} radius={10} />
                 <span className={'sb-dot ' + st.cls} />
               </span>
               {!collapsed && <span className="sb-label">{inst.name}</span>}
-              {!collapsed && <span className="sb-stxt">{st.text}</span>}
+              {!collapsed && <span className={'sb-stxt ' + st.cls}>{st.text}</span>}
             </button>
           );
         })}
@@ -396,46 +397,11 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
             <div className="empty-sub">{isAdmin ? '去「管理」新建一个实例' : '请联系管理员为你分配实例'}</div>
           </div>
         ) : (
-          <div className="inst-grid">
-            {instances.map((inst, i) => {
-              const st = statusOf(inst);
-              const prof = appProfile(inst.appType);
-              const failed = inst.provision?.state === 'failed';
-              const meta = inst.wechat.installed
-                ? `${prof.label} ${inst.wechat.version || ''}`.trim()
-                : inst.runtime === 'running' && prof.needsInstall
-                  ? `待下载安装${prof.label}`
-                  : prof.label;
-              return (
-                <button key={inst.id} className="home-card" onClick={() => nav(`/i/${inst.id}`)}>
-                  <span className="home-card-av">
-                    <InstanceIcon icon={inst.icon} appType={inst.appType} size={40} radius={4} />
-                  </span>
-                  <span className="home-card-main">
-                    <span className="home-card-top">
-                      <EntryNo n={i + 1} />
-                      <GridName name={inst.name} className="home-card-name" />
-                    </span>
-                    <span className="home-card-meta">
-                      {failed ? (
-                        <span className="home-card-st pen-circle">
-                          <StateWord text={st.text} />
-                        </span>
-                      ) : (
-                        <span className={'home-card-st ' + st.cls}>
-                          <StateWord text={st.text} />
-                        </span>
-                      )}
-                      {meta && <span className="home-card-ver">{meta}</span>}
-                    </span>
-                  </span>
-                  <span className="enter-arrow">
-                    <IcChevronRight size={18} />
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+          <ul className="entry-table" aria-label="我的实例">
+            {instances.map((inst, i) => (
+              <HomeEntry key={inst.id} no={i + 1} inst={inst} isAdmin={isAdmin} />
+            ))}
+          </ul>
         )}
 
         {loaded && instances.length > 0 && (
@@ -448,6 +414,98 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
         )}
       </div>
     </div>
+  );
+}
+
+// 主页的一行：编号 · 图标 + 方格名字 · 状态（含下一步）· 主操作。
+// 每个状态都给出能做的事：在线 → 进入；停止 / 失败 / 待安装 → 管理员直接点，子账号看到「请联系管理员」。
+function HomeEntry({ no, inst, isAdmin }: { no: number; inst: InstanceWithStatus; isAdmin: boolean }) {
+  const nav = useNavigate();
+  const { reload } = useInstances();
+  const { toast } = useUI();
+  const [busy, setBusy] = useState(false);
+  const st = statusOf(inst);
+  const prof = appProfile(inst.appType);
+  const failed = inst.provision?.state === 'failed';
+  const open = () => nav(`/i/${inst.id}`);
+  const meta = inst.wechat.installed ? `${prof.label} ${inst.wechat.version || ''}`.trim() : prof.label;
+
+  const run = async (fn: () => Promise<unknown>, ok: string) => {
+    setBusy(true);
+    try {
+      await fn();
+      toast(ok, 'ok');
+      await reload();
+    } catch (e: any) {
+      toast(e.message || '操作失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  let note = '';
+  let action: JSX.Element | null = null;
+  if (st.cls === 'st-on') {
+    action = (
+      <button className="btn btn-primary entry-btn" onClick={open}>
+        进入
+      </button>
+    );
+  } else if (st.cls === 'st-busy') {
+    note = inst.provision?.state === 'creating' ? '正在创建，完成后自动就绪' : '正在处理，完成后自动就绪';
+    action = (
+      <button className="btn entry-btn" onClick={open}>
+        查看进度
+      </button>
+    );
+  } else if (st.cls === 'st-warn') {
+    note = `${prof.label}还没装好`;
+    action = isAdmin ? (
+      <button className="btn btn-primary entry-btn" disabled={busy} onClick={() => run(() => api.instanceWechatInstall(inst.id), `已开始下载${prof.label}`)}>
+        下载安装
+      </button>
+    ) : null;
+    if (!isAdmin) note += '，请联系管理员安装';
+  } else {
+    note = failed ? inst.provision?.error || '创建失败' : inst.runtime === 'missing' ? '容器还没创建' : '实例已停止';
+    action = isAdmin ? (
+      <button className="btn btn-primary entry-btn" disabled={busy} onClick={() => run(() => api.instanceStart(inst.id), failed ? '已重新开始创建' : '已启动')}>
+        {busy ? '处理中…' : failed ? '重试创建' : '启动'}
+      </button>
+    ) : null;
+    if (!isAdmin) note += '，请联系管理员';
+  }
+
+  return (
+    <li className="entry">
+      <EntryNo n={no} />
+      <div className="entry-main">
+        <span className="entry-av">
+          <InstanceIcon icon={inst.icon} appType={inst.appType} size={36} radius={4} />
+        </span>
+        <div className="entry-body">
+          <button className="entry-open" onClick={open} aria-label={`打开 ${inst.name}`}>
+            <GridName name={inst.name} className="entry-name" />
+          </button>
+          <div className="entry-meta">
+            <span>{meta}</span>
+          </div>
+        </div>
+      </div>
+      <div className="entry-state">
+        {failed ? (
+          <PenMark>
+            <StateWord text={st.text} />
+          </PenMark>
+        ) : (
+          <span className={'entry-st ' + st.cls}>
+            <StateWord text={st.text} />
+          </span>
+        )}
+        {note && <span className={'entry-note' + (failed || st.cls === 'st-off' ? ' pen-wave' : '')}>{note}</span>}
+      </div>
+      <div className="entry-act">{action}</div>
+    </li>
   );
 }
 

@@ -1,15 +1,18 @@
-// 生成 PWA / Apple 图标：绿底 macOS 终端风格（白色 `>_` 提示符 + 左上小圆点）。
-// 纯 Node 实现，无需外部工具（rsvg/imagemagick），保证本地 / Docker / CI 构建都产出一致图标。
-// 与 public/favicon.svg 同一视觉；改图标时两边一起改（坐标基于 100×100 视图）。
+// 生成 PWA / Apple 图标：绿墨方块 + 白色田字格 + 格中「云」（与 public/favicon.svg 同一视觉，坐标基于 100×100）。
+// 纯 Node 实现（无 rsvg / imagemagick / 浏览器），本地、Docker、CI 构建产出一致。
+// 「云」的字形轮廓取自 Noto Serif SC Bold（SIL OFL 1.1），已拍平成多边形存在 yun-glyph.json。
 import { deflateSync } from 'node:zlib';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const TOP = [0x13, 0xd8, 0x73]; // 顶部亮绿 #13D873
-const BOT = [0x05, 0xa8, 0x52]; // 底部深绿 #05A852
-const WHITE = [255, 255, 255];
-const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
+const HERE = dirname(fileURLToPath(import.meta.url));
+const OUT = join(HERE, '..', 'public');
+const GLYPH = JSON.parse(readFileSync(join(HERE, 'yun-glyph.json'), 'utf8')).polys; // [[x,y]...][]
+
+const INK = [0x14, 0x69, 0x3f]; // 绿墨 #14693f
+const PAPER = [255, 255, 255];
+const GUIDE = [0x9c, 0xc3, 0xab]; // 田字格虚线
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -20,13 +23,11 @@ const CRC_TABLE = (() => {
   }
   return t;
 })();
-
 function crc32(buf) {
   let c = 0xffffffff;
   for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
-
 function chunk(type, data) {
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length, 0);
@@ -35,86 +36,90 @@ function chunk(type, data) {
   crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
   return Buffer.concat([len, typeBuf, data, crc]);
 }
-
-// 点到线段距离（用于画带圆角端点的笔画）
-function distToSeg(px, py, ax, ay, bx, by) {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len2 = dx * dx + dy * dy || 1;
-  let t = ((px - ax) * dx + (py - ay) * dy) / len2;
-  t = Math.max(0, Math.min(1, t));
-  const cx = ax + t * dx;
-  const cy = ay + t * dy;
-  return Math.hypot(px - cx, py - cy);
-}
-
-const clamp01 = (v) => Math.max(0, Math.min(1, v));
-
-function makePng(size) {
-  const s = size / 100; // 视图 100 → 像素
-  const radius = 23 * s; // 圆角，与 favicon 一致
-  const stroke = (7.5 / 2) * s; // 笔画半宽
-  // 提示符坐标（基于 100 视图）
-  const chevron = [
-    [28, 24],
-    [42, 38],
-    [28, 52],
-  ].map(([x, y]) => [x * s, y * s]);
-  const underline = [
-    [50, 54],
-    [66, 54],
-  ].map(([x, y]) => [x * s, y * s]);
-
-  const inRounded = (x, y) => {
-    const r = radius;
-    const cx = x < r ? r : x > size - r ? size - r : x;
-    const cy = y < r ? r : y > size - r ? size - r : y;
-    if (cx === x && cy === y) return 1;
-    const d = Math.hypot(x - cx, y - cy);
-    return clamp01(r - d + 0.5); // 边缘 1px 抗锯齿
-  };
-
-  const rowLen = size * 4 + 1;
-  const raw = Buffer.alloc(rowLen * size);
+function png(size, rgb) {
+  const raw = Buffer.alloc((size * 3 + 1) * size);
   for (let y = 0; y < size; y++) {
-    raw[y * rowLen] = 0; // filter type 0
-    const gy = y + 0.5;
-    const mix = gy / size; // 竖直渐变系数
-    const bg = [
-      Math.round(TOP[0] + (BOT[0] - TOP[0]) * mix),
-      Math.round(TOP[1] + (BOT[1] - TOP[1]) * mix),
-      Math.round(TOP[2] + (BOT[2] - TOP[2]) * mix),
-    ];
-    for (let x = 0; x < size; x++) {
-      const gx = x + 0.5;
-      // 白色提示符覆盖度（取各形状最大值）
-      let cov = 0;
-      cov = Math.max(cov, clamp01(stroke - distToSeg(gx, gy, chevron[0][0], chevron[0][1], chevron[1][0], chevron[1][1]) + 0.5));
-      cov = Math.max(cov, clamp01(stroke - distToSeg(gx, gy, chevron[1][0], chevron[1][1], chevron[2][0], chevron[2][1]) + 0.5));
-      cov = Math.max(cov, clamp01(stroke - distToSeg(gx, gy, underline[0][0], underline[0][1], underline[1][0], underline[1][1]) + 0.5));
-
-      const o = y * rowLen + 1 + x * 4;
-      raw[o] = Math.round(bg[0] + (WHITE[0] - bg[0]) * cov);
-      raw[o + 1] = Math.round(bg[1] + (WHITE[1] - bg[1]) * cov);
-      raw[o + 2] = Math.round(bg[2] + (WHITE[2] - bg[2]) * cov);
-      raw[o + 3] = Math.round(255 * inRounded(gx, gy));
-    }
+    raw[y * (size * 3 + 1)] = 0;
+    rgb.copy(raw, y * (size * 3 + 1) + 1, y * size * 3, (y + 1) * size * 3);
   }
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(size, 0);
   ihdr.writeUInt32BE(size, 4);
   ihdr[8] = 8; // bit depth
-  ihdr[9] = 6; // color type RGBA
-  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  return Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+  ihdr[9] = 2; // RGB
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+// 非零环绕规则：对每条扫描线 y 求出字形各条边的交点（x 与方向），按 x 排序后缓存；
+// 判断点 (x, y) 时累加其右侧交点的方向即可（字形由多条闭合轮廓组成，含内孔）。
+const EDGES = GLYPH.flatMap((poly) => poly.map((a, i) => [a, poly[(i + 1) % poly.length]]));
+let rowY = NaN;
+let rowHits = [];
+function crossings(y) {
+  if (y === rowY) return rowHits;
+  const hits = [];
+  for (const [[ax, ay], [bx, by]] of EDGES) {
+    if ((ay <= y && by > y) || (by <= y && ay > y)) {
+      hits.push([ax + ((y - ay) / (by - ay)) * (bx - ax), by > ay ? 1 : -1]);
+    }
+  }
+  hits.sort((p, q) => p[0] - q[0]);
+  rowY = y;
+  rowHits = hits;
+  return hits;
+}
+function inGlyph(x, y) {
+  let wind = 0;
+  for (const [hx, dir] of crossings(y)) if (hx > x) wind += dir;
+  return wind !== 0;
+}
+
+// 在 100×100 坐标里取一个点的颜色。iOS 自己会切圆角，PNG 铺满不留透明角。
+function sample(x, y) {
+  const inCell = x >= 13 && x <= 87 && y >= 13 && y <= 87;
+  if (!inCell) return INK;
+  if (inGlyph(x, y)) return INK;
+  const onV = Math.abs(x - 50) <= 0.7 && y >= 15 && y <= 85 && (y - 15) % 5.8 < 3.2;
+  const onH = Math.abs(y - 50) <= 0.7 && x >= 15 && x <= 85 && (x - 15) % 5.8 < 3.2;
+  return onV || onH ? GUIDE : PAPER;
+}
+
+function render(size) {
+  const SS = 4; // 4×4 超采样抗锯齿
+  const rgb = Buffer.alloc(size * size * 3);
+  const acc = new Float64Array(size * 3);
+  for (let py = 0; py < size; py++) {
+    acc.fill(0);
+    // 先逐条子扫描线、再逐像素：同一 y 的交点只算一次
+    for (let sy = 0; sy < SS; sy++) {
+      const y = ((py + (sy + 0.5) / SS) / size) * 100;
+      for (let px = 0; px < size; px++) {
+        for (let sx = 0; sx < SS; sx++) {
+          const c = sample(((px + (sx + 0.5) / SS) / size) * 100, y);
+          acc[px * 3] += c[0];
+          acc[px * 3 + 1] += c[1];
+          acc[px * 3 + 2] += c[2];
+        }
+      }
+    }
+    const n = SS * SS;
+    for (let px = 0; px < size; px++) {
+      const o = (py * size + px) * 3;
+      rgb[o] = Math.round(acc[px * 3] / n);
+      rgb[o + 1] = Math.round(acc[px * 3 + 1] / n);
+      rgb[o + 2] = Math.round(acc[px * 3 + 2] / n);
+    }
+  }
+  return png(size, rgb);
 }
 
 mkdirSync(OUT, { recursive: true });
-for (const [name, size] of [
-  ['icon-192.png', 192],
-  ['icon-512.png', 512],
-  ['icon-180.png', 180],
-]) {
-  writeFileSync(join(OUT, name), makePng(size));
-  console.log('generated', name);
+for (const size of [180, 192, 512]) {
+  writeFileSync(join(OUT, `icon-${size}.png`), render(size));
+  console.log(`icon-${size}.png`);
 }

@@ -6,7 +6,7 @@ import { InstanceIcon, ICON_CHOICES } from '../AppIcon';
 import { useUI, PasswordInput } from '../ui';
 import { useAuth } from '../auth';
 import { IcPlus, IcChevronRight, IcAlert, IcMonitor, IcUsers, IcCheck } from '../icons';
-import { GridName, EntryNo, StateWord } from '../paper';
+import { GridName, EntryNo, StateWord, PenMark, RowMenu, type RowMenuItem } from '../paper';
 
 const BUSY_PHASES = ['downloading', 'extracting', 'installing'];
 
@@ -590,7 +590,7 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
         {isAdmin && tab === 'inst' && (
           <>
             <div className="section-row">
-              <span className="section-title">实例</span>
+              <span className="section-count">共 {instances.length} 个实例</span>
               <button className="btn-text btn-text-icon" onClick={() => setCreatingInst(true)}>
                 <IcPlus size={16} />
                 新建实例
@@ -625,7 +625,7 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                 }
               />
             ) : (
-              <div className="inst-grid">
+              <ul className="entry-table" aria-label="实例">
                 {instances.map((inst, i) => (
                   <InstanceAdminCard
                     key={inst.id}
@@ -648,7 +648,7 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                     onIcon={() => setIconInst(inst)}
                   />
                 ))}
-              </div>
+              </ul>
             )}
 
           </>
@@ -676,48 +676,49 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                 }
               />
             ) : (
-              <div className="inst-grid">
+              <ul className="entry-table" aria-label="子账号">
                 {subs.map((u, i) => (
-                  <div key={u.id} className="inst-card">
-                    <div className="inst-head">
-                      <EntryNo n={i + 1} />
-                      <span className="inst-name">
-                        <GridName name={u.username} />
+                  <li key={u.id} className="entry">
+                    <EntryNo n={i + 1} />
+                    <div className="entry-main">
+                      <div className="entry-body">
+                        <GridName name={u.username} className="entry-name" />
+                        <div className="entry-meta">
+                          {u.allowedInstances.length > 0 ? (
+                            u.allowedInstances.map((id) => (
+                              <span key={id} className="chip chip-static">
+                                {instName(id)}
+                              </span>
+                            ))
+                          ) : (
+                            <span>未分配实例</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="entry-state">
+                      {u.disabled ? <span className="tag tag-off">已禁用</span> : <span className="tag tag-on">正常</span>}
+                      <span className="entry-note">
+                        {u.allowedInstances.length > 0 ? `可访问 ${u.allowedInstances.length} 个实例` : '登录后看不到任何实例'}
                       </span>
                     </div>
-                    <div className="inst-meta">
-                      {u.disabled ? <span className="tag tag-off">已禁用</span> : <span className="tag tag-on">正常</span>}
-                    </div>
-                    <div className="inst-sub">{u.allowedInstances.length > 0 ? `可访问 ${u.allowedInstances.length} 个实例` : '未分配实例'}</div>
-                    {u.allowedInstances.length > 0 && (
-                      <div className="chip-row" style={{ marginTop: 8 }}>
-                        {u.allowedInstances.map((id) => (
-                          <span key={id} className="chip chip-static">
-                            {instName(id)}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    <div className="inst-admin-links">
-                      <button className="btn-text" onClick={() => setAssignUser(u)}>
+                    <div className="entry-act">
+                      <button className="btn entry-btn" onClick={() => setAssignUser(u)}>
                         可访问实例
                       </button>
-                      <button className="btn-text" onClick={() => setRenameUserTarget(u)}>
-                        改名
-                      </button>
-                      <button className="btn-text" onClick={() => toggle(u)}>
-                        {u.disabled ? '启用' : '禁用'}
-                      </button>
-                      <button className="btn-text" onClick={() => setResetTarget(u)}>
-                        重置密码
-                      </button>
-                      <button className="btn-text danger" onClick={() => removeUser(u)}>
-                        删除
-                      </button>
+                      <RowMenu
+                        items={[
+                          { label: '改名', onClick: () => setRenameUserTarget(u) },
+                          { label: u.disabled ? '启用' : '禁用', onClick: () => toggle(u) },
+                          { label: '重置密码', onClick: () => setResetTarget(u) },
+                          { sep: true },
+                          { label: '删除子账号', danger: true, onClick: () => removeUser(u) },
+                        ]}
+                      />
                     </div>
-                  </div>
+                  </li>
                 ))}
-              </div>
+              </ul>
             )}
           </>
         )}
@@ -730,26 +731,27 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                   <span className="section-title">残留容器</span>
                 </div>
                 <p className="section-desc">不属于任何登记实例，多为创建失败遗留。它们占着数据卷名，先删掉它们才能删除同名数据卷。</p>
-                <div className="inst-grid">
-                  {orphanConts.map((c) => (
-                    <div key={c.id} className="inst-card">
-                      <div className="inst-head">
-                        <span className="inst-name mono">{c.name}</span>
+                <ul className="entry-table" aria-label="残留容器">
+                  {orphanConts.map((c, i) => (
+                    <li key={c.id} className="entry">
+                      <EntryNo n={i + 1} />
+                      <div className="entry-main">
+                        <div className="entry-body">
+                          <span className="entry-name mono">{c.name}</span>
+                          {c.volumeName && <div className="entry-meta mono">占用卷 {c.volumeName}</div>}
+                        </div>
+                      </div>
+                      <div className="entry-state">
                         <span className="tag tag-off">{c.status || 'unknown'}</span>
                       </div>
-                      {c.volumeName && (
-                        <div className="inst-sub mono">
-                          占用卷：{c.volumeName}
-                        </div>
-                      )}
-                      <div className="inst-admin-links">
-                        <button className="btn-text danger" onClick={() => removeOrphanCont(c)}>
+                      <div className="entry-act">
+                        <button className="btn btn-danger-outline entry-btn" onClick={() => removeOrphanCont(c)}>
                           删除容器
                         </button>
                       </div>
-                    </div>
+                    </li>
                   ))}
-                </div>
+                </ul>
               </>
             )}
             {orphanVols.length > 0 && (
@@ -758,27 +760,31 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                   <span className="section-title">未使用的数据卷</span>
                 </div>
                 <p className="section-desc">删除实例时没勾选「同时永久删除聊天记录」就会留下来。新建实例时可以复用，继承原来的聊天记录。</p>
-                <div className="inst-grid">
-                  {orphanVols.map((v) => (
-                    <div key={v.name} className="inst-card">
-                      <div className="inst-head">
-                        <span className="inst-name mono">{v.name}</span>
+                <ul className="entry-table" aria-label="未使用的数据卷">
+                  {orphanVols.map((v, i) => (
+                    <li key={v.name} className="entry">
+                      <EntryNo n={i + 1} />
+                      <div className="entry-main">
+                        <div className="entry-body">
+                          <span className="entry-name mono">{v.name}</span>
+                          <div className="entry-meta">
+                            {v.createdAt ? `创建于 ${v.createdAt.slice(0, 10)}` : '创建时间未知'}
+                            {typeof v.sizeBytes === 'number' && <span>{(v.sizeBytes / 1024 / 1024).toFixed(1)} MB</span>}
+                          </div>
+                        </div>
                       </div>
-                      <div className="inst-sub">
-                        {v.createdAt ? `创建于 ${v.createdAt.slice(0, 10)}` : '创建时间未知'}
-                        {typeof v.sizeBytes === 'number' ? `　·　${(v.sizeBytes / 1024 / 1024).toFixed(1)} MB` : ''}
+                      <div className="entry-state">
+                        <span className="tag tag-muted">未挂载</span>
                       </div>
-                      <div className="inst-admin-links">
-                        <button className="btn-text" onClick={() => setCreatingInst(true)} title="去「新建实例」对话框，在「数据卷」下拉里选择复用此卷">
-                          复用为新实例
+                      <div className="entry-act">
+                        <button className="btn entry-btn" onClick={() => setCreatingInst(true)} title="去「新建实例」，在「数据卷」下拉里选择复用此卷">
+                          复用
                         </button>
-                        <button className="btn-text danger" onClick={() => removeOrphanVol(v.name)}>
-                          彻底删除
-                        </button>
+                        <RowMenu items={[{ label: '彻底删除', danger: true, onClick: () => removeOrphanVol(v.name) }]} />
                       </div>
-                    </div>
+                    </li>
                   ))}
-                </div>
+                </ul>
               </>
             )}
           </>
@@ -790,20 +796,23 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
             <div className="section-row" style={{ marginTop: isAdmin ? 22 : 0 }}>
               <span className="section-title">账号</span>
             </div>
-            <div className="inst-grid">
-              <div className="inst-card">
-                <div className="inst-head">
-                  <span className="inst-name">{user?.username}</span>
-                  {isAdmin ? <span className="tag">管理员</span> : <span className="tag tag-on">子账号</span>}
+            <ul className="entry-table" aria-label="我的账号">
+              <li className="entry">
+                <EntryNo n={1} />
+                <div className="entry-main">
+                  <div className="entry-body">
+                    <GridName name={user?.username || ''} className="entry-name" />
+                    <div className="entry-meta">{isAdmin ? '可访问全部实例' : `可访问 ${user?.allowedInstances.length ?? 0} 个实例`}</div>
+                  </div>
                 </div>
-                <div className="inst-sub">{isAdmin ? '可访问全部实例' : `可访问 ${user?.allowedInstances.length ?? 0} 个实例`}</div>
-                <div className="inst-actions">
-                  <button className="btn btn-primary inst-act-wide" onClick={onChangePassword}>
+                <div className="entry-state">{isAdmin ? <span className="tag">管理员</span> : <span className="tag tag-on">子账号</span>}</div>
+                <div className="entry-act">
+                  <button className="btn entry-btn" onClick={onChangePassword}>
                     修改密码
                   </button>
                 </div>
-              </div>
-            </div>
+              </li>
+            </ul>
           </>
         )}
 
@@ -1328,25 +1337,6 @@ function InstanceAdminCard({
   const creating = prov?.state === 'creating';
   const createFailed = prov?.state === 'failed';
   const working = !!acting || busy || creating; // 生命周期操作中 / 微信下载更新中 / 后台创建中 → 锁住卡片
-  const [menuOpen, setMenuOpen] = useState(false); // 「管理」菜单是否展开（悬浮层，不占文档流）
-  const menuRef = useRef<HTMLDivElement>(null);
-  // 悬浮下拉：点击菜单外部时关闭
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDocDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMenuOpen(false);
-    };
-    document.addEventListener('mousedown', onDocDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDocDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [menuOpen]);
-
   const profile = appProfile(inst.appType);
 
   let badge: { text: string; cls: string };
@@ -1368,136 +1358,96 @@ function InstanceAdminCard({
   else if (installed) sub = wx.version ? `${profile.label} ${wx.version}` : `${profile.label}已就绪`;
   else sub = `${profile.label}尚未安装`;
 
+  const isImgRelease = !!inst.imageVersion && /^\d+\.\d+\.\d+$/.test(inst.imageVersion);
+  const menuItems: RowMenuItem[] = [
+    { group: '运维' },
+    ...(!offline && profile.needsInstall
+      ? [{ label: installed ? profile.updateLabel : '下载安装', onClick: () => onTrigger(inst, installed ? 'update' : 'install') }]
+      : []),
+    {
+      label: '升级实例',
+      title: '拉取最新镜像并重建（保留聊天记录）',
+      onClick: onUpgrade,
+      badge: outdated ? <span className="tag tag-warn">可升级</span> : undefined,
+    },
+    ...(!offline ? [{ label: '重启', onClick: onRestart }, { label: '停止', onClick: onStop }] : []),
+    { label: '日志', title: '实例日志（含重启原因与上一容器日志快照）', onClick: () => window.open(api.instanceLogsUrl(inst.id), '_blank') },
+    { group: '设置' },
+    { label: '重命名', onClick: onRename },
+    { label: '分配账户', onClick: onAssign },
+    { label: '图标', title: '内置图标 / 上传图片裁剪', onClick: onIcon },
+    { label: '内存安全阈值', title: '内存阈值自愈', onClick: onSecurity },
+    { label: '数据卷', title: '备份/恢复、上传 PC 微信数据、文件管理', onClick: onVolume },
+    { sep: true },
+    { label: '删除实例', danger: true, onClick: onDelete },
+  ];
+
   return (
-    <div className={'inst-card' + (menuOpen ? ' open-menu' : '')}>
-      <div className="inst-head">
-        <EntryNo n={no} />
-        <span className="inst-name">
-          <GridName name={inst.name} />
+    <li className="entry">
+      <EntryNo n={no} />
+      <div className="entry-main">
+        <span className="entry-av">
+          <InstanceIcon icon={inst.icon} appType={inst.appType} size={36} radius={4} />
         </span>
+        <div className="entry-body">
+          <GridName name={inst.name} className="entry-name" />
+          <div className="entry-meta">
+            <span>{profile.label}</span>
+            {inst.imageVersion && (
+              <span className="tag tag-muted" title={isImgRelease ? '该实例当前运行的镜像版本' : '本地自构建镜像（无发布版本号，显示镜像短 id）'}>
+                镜像 {isImgRelease ? `v${inst.imageVersion}` : inst.imageVersion.slice(0, 8)}
+              </span>
+            )}
+            {outdated && !acting && (
+              <span className="tag tag-warn" title="该实例的镜像落后于最新版，在「管理 → 升级实例」更新">
+                可升级
+              </span>
+            )}
+            {!createFailed && <span>可访问 {userCount} 人</span>}
+          </div>
+          {working && (
+            <div className="wx-progress entry-progress">
+              <div
+                className={'wx-progress-bar' + (acting || creating || wx.percent < 0 ? ' indeterminate' : '')}
+                style={!acting && !creating && wx.percent >= 0 ? { width: `${wx.percent}%` } : undefined}
+              />
+            </div>
+          )}
+        </div>
       </div>
-      {/* 状态 + 次要元数据同一行（可换行）：标题行只放编号与方格名字，名字永不被挤断 */}
-      <div className="inst-meta">
+      <div className="entry-state">
         {createFailed && !acting ? (
-          <span className="pen-circle inst-state">
+          <PenMark>
             <StateWord text={badge.text} />
-          </span>
+          </PenMark>
         ) : (
           <span className={'tag ' + badge.cls}>
             <StateWord text={badge.text} />
           </span>
         )}
-          {outdated && !acting && (
-            <span className="tag tag-warn" title="该实例的镜像落后于最新版，点「升级实例」可更新">
-              可升级
-            </span>
-          )}
-          {inst.imageVersion && (
-            <span
-              className="tag tag-muted"
-              title={/^\d+\.\d+\.\d+$/.test(inst.imageVersion) ? '该实例当前运行的镜像版本' : '本地自构建镜像（无发布版本号，显示镜像短 id）'}
-            >
-              镜像 {/^\d+\.\d+\.\d+$/.test(inst.imageVersion) ? `v${inst.imageVersion}` : inst.imageVersion.slice(0, 8)}
-            </span>
-          )}
+        <span className={'entry-note' + (createFailed && !acting ? ' pen-wave' : '')}>{sub}</span>
+        {createFailed && !acting && prov?.hint && <span className="entry-hint">{prov.hint}</span>}
       </div>
-      <div className={'inst-sub' + (createFailed && !acting ? ' is-error' : '')}>
-        {sub}
-        {!acting && !createFailed && ` · 可访问 ${userCount} 人`}
-      </div>
-      {createFailed && !acting && prov?.hint && <div className="inst-hint">{prov.hint}</div>}
-
-      {working && (
-        <div className="wx-progress">
-          <div
-            className={'wx-progress-bar' + (acting || creating || wx.percent < 0 ? ' indeterminate' : '')}
-            style={!acting && !creating && wx.percent >= 0 ? { width: `${wx.percent}%` } : undefined}
-          />
-        </div>
-      )}
-
-      {/* 进行中（升级/重启/停止/下载）时隐藏所有操作，避免重复点击 */}
-      {!working && (
-        <div className="inst-actions" ref={menuRef}>
-          {offline ? (
-            <button className="btn btn-primary inst-act-wide" onClick={onStart}>
-              {createFailed ? '重试创建' : inst.runtime === 'missing' ? '创建并启动' : '启动实例'}
+      {/* 进行中（升级/重启/停止/下载）时不给操作，避免重复点击 */}
+      <div className="entry-act">
+        {!working &&
+          (offline ? (
+            <button className="btn btn-primary entry-btn" onClick={onStart}>
+              {createFailed ? '重试创建' : inst.runtime === 'missing' ? '创建并启动' : '启动'}
             </button>
           ) : !installed && profile.needsInstall ? (
-            // 容器建好但应用还没装：主按钮直接是「下载安装」。此前是一个灰掉的「进入实例」、安装入口藏在「管理」菜单里，
-            // 用户以为实例没建好（#129 下「同问」的用户最后是在「管理」里找到了下载安装）
-            <button className="btn btn-primary inst-act-wide" onClick={() => onTrigger(inst, 'install')}>
-              {wx.phase === 'error' ? '重新下载安装' : `下载安装${profile.label}`}
+            // 容器建好但应用还没装：主按钮直接是「下载安装」（#129：安装入口藏在菜单里会让人以为实例没建好）
+            <button className="btn btn-primary entry-btn" onClick={() => onTrigger(inst, 'install')}>
+              {wx.phase === 'error' ? '重新安装' : '下载安装'}
             </button>
           ) : (
-            <button className="btn btn-primary inst-act-wide" disabled={!installed} onClick={onEnter} title={installed ? '' : '需先下载安装' + profile.label}>
-              进入实例
+            <button className="btn btn-primary entry-btn" onClick={onEnter}>
+              进入
             </button>
-          )}
-
-          {/* 「管理」与主按钮同排：次要动作收进悬浮菜单，按 运维 / 设置 / 危险 分组，一行一项便于扫读 */}
-          <button
-            className={'btn inst-menu-toggle' + (menuOpen ? ' open' : '')}
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((v) => !v)}
-          >
-            管理
-            <span className="inst-menu-caret">{CaretIcon}</span>
-          </button>
-
-          {menuOpen && (
-            <div className="inst-menu" role="menu" onClick={() => setMenuOpen(false)}>
-              <div className="inst-menu-label">运维</div>
-              {!offline && profile.needsInstall && (
-                <button role="menuitem" className="inst-menu-item" onClick={() => onTrigger(inst, installed ? 'update' : 'install')}>
-                  {installed ? profile.updateLabel : '下载安装'}
-                </button>
-              )}
-              <button role="menuitem" className="inst-menu-item" onClick={onUpgrade} title="拉取最新镜像并重建（保留聊天记录）">
-                升级实例
-                {outdated && <span className="tag tag-warn">可升级</span>}
-              </button>
-              {!offline && (
-                <button role="menuitem" className="inst-menu-item" onClick={onRestart}>
-                  重启
-                </button>
-              )}
-              {!offline && (
-                <button role="menuitem" className="inst-menu-item" onClick={onStop}>
-                  停止
-                </button>
-              )}
-              <button role="menuitem" className="inst-menu-item" onClick={() => window.open(api.instanceLogsUrl(inst.id), '_blank')} title="查看实例日志（含历史：重启原因 + 上一容器日志快照，跨重启保留）">
-                日志
-              </button>
-
-              <div className="inst-menu-label">设置</div>
-              <button role="menuitem" className="inst-menu-item" onClick={onRename}>
-                重命名
-              </button>
-              <button role="menuitem" className="inst-menu-item" onClick={onAssign}>
-                分配账户
-              </button>
-              <button role="menuitem" className="inst-menu-item" onClick={onIcon} title="设置实例图标：内置图标 / 上传图片裁剪">
-                图标
-              </button>
-              <button role="menuitem" className="inst-menu-item" onClick={onSecurity} title="内存阈值自愈">
-                内存安全阈值
-              </button>
-              <button role="menuitem" className="inst-menu-item" onClick={onVolume} title="数据卷：备份/恢复、上传 PC 微信数据、文件管理">
-                数据卷
-              </button>
-
-              <div className="inst-menu-sep" />
-              <button role="menuitem" className="inst-menu-item danger" onClick={onDelete}>
-                删除实例
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+          ))}
+        <RowMenu items={menuItems} disabled={working} />
+      </div>
+    </li>
   );
 }
 

@@ -2,6 +2,8 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
+// 标题宋体：自托管 Noto Serif SC 粗体（按 unicode-range 分片，只下载页面用到的字）
+import '@fontsource/noto-serif-sc/700.css';
 import './styles.css';
 
 // PWA 更新即时生效：vite-plugin-pwa 用 autoUpdate + skipWaiting + clientsClaim，新版本会立即接管，
