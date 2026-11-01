@@ -142,3 +142,6 @@ dist
 /.claude
 .DS_Store
 /scratchpad
+
+# Impeccable 本地评审截图（不入库）
+.impeccable/review/

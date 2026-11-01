@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-01T01:30:05Z",
+  "title": "Design System: 云微 · WechatOnCloud panel",
+  "extensions": {
+    "colorMeta": {
+      "green-ink": {
+        "role": "primary",
+        "displayName": "绿格墨水 Green Ink"
+      },
+      "green-ink-fill": {
+        "role": "primary",
+        "displayName": "Green Ink Fill"
+      },
+      "red-pen": {
+        "role": "secondary",
+        "displayName": "红笔 Red Pen"
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "稿纸 Paper"
+      },
+      "carbon-ink": {
+        "role": "neutral",
+        "displayName": "碳素墨水 Carbon Ink"
+      },
+      "carbon-paper": {
+        "role": "neutral",
+        "displayName": "复写纸 Carbon Paper (dark ground)"
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Sheet title",
+        "purpose": "Home greeting; serif handwriting on the sheet header."
+      },
+      "header": {
+        "displayName": "Header",
+        "purpose": "Sheet header title and dialog titles."
+      },
+      "stamp": {
+        "displayName": "Stamp",
+        "purpose": "Status and version stamps."
+      },
+      "figures": {
+        "displayName": "Figures",
+        "purpose": "Entry numbers and versions, tabular."
+      }
+    },
+    "shadows": [
+      {
+        "name": "hairline-frame",
+        "value": "0 0 0 1px var(--rule)",
+        "purpose": "Cards, banners, empty states. A rule, not a shadow."
+      },
+      {
+        "name": "inset-rule",
+        "value": "inset 0 0 0 1px var(--rule-strong)",
+        "purpose": "Secondary buttons, inputs, chips, toolbar buttons."
+      },
+      {
+        "name": "frame-double",
+        "value": "0 0 0 1px var(--rule-strong), 0 0 0 4px var(--surface), 0 0 0 5px var(--rule-strong)",
+        "purpose": "Dialogs, login sheet, manage menu, toasts."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease",
+        "value": "cubic-bezier(0.2, 0.8, 0.2, 1)",
+        "purpose": "All state transitions, 120–200ms."
+      },
+      {
+        "name": "state-flip",
+        "value": "rotateX(-90deg) → 0, 320ms",
+        "purpose": "Status word changes in place; off under reduced motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "phone",
+        "value": "<768px",
+        "purpose": "Sidebar becomes a drawer; toolbar icon-only."
+      },
+      {
+        "name": "wide",
+        "value": ">=880px",
+        "purpose": "Sheet widens to 940px."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one filled action per card or area.",
+      "html": "<button class=\"ds-btn-primary\">进入实例</button>",
+      "css": ".ds-btn-primary{height:44px;padding:0 22px;border:0;border-radius:3px;background:#14693f;color:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:background .15s,transform .12s}.ds-btn-primary:hover{background:#0f5532}.ds-btn-primary:active{transform:translateY(1px)}.ds-btn-primary:focus-visible{outline:2px solid #126b40;outline-offset:2px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Ruled button for secondary actions (管理 ▾, 取消).",
+      "html": "<button class=\"ds-btn\">管理</button>",
+      "css": ".ds-btn{height:44px;padding:0 16px;border:0;border-radius:3px;background:#fff;color:#18201b;box-shadow:inset 0 0 0 1px #8fb39c;font-size:15px;font-weight:600;cursor:pointer}.ds-btn:hover{box-shadow:inset 0 0 0 1px #126b40;color:#126b40}.ds-btn:focus-visible{outline:2px solid #126b40;outline-offset:2px}"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "White cell with an inset rule; 2px green ring on focus.",
+      "html": "<label class=\"ds-label\">实例名称<input class=\"ds-input\" placeholder=\"留空自动命名\"></label>",
+      "css": ".ds-label{display:block;font-size:13px;font-weight:600;color:#56605a}.ds-input{display:block;margin-top:8px;width:260px;height:48px;padding:0 16px;border:0;border-radius:3px;background:#fff;color:#18201b;font-size:16px;box-shadow:inset 0 0 0 1px #8fb39c;outline:none}.ds-input:focus{box-shadow:inset 0 0 0 2px #126b40}"
+    },
+    {
+      "name": "Stamp Tag",
+      "kind": "chip",
+      "refersTo": "stamp-tag",
+      "description": "Status stamp; border in the state colour.",
+      "html": "<span class=\"ds-stamp\">在线</span> <span class=\"ds-stamp ds-warn\">可升级</span>",
+      "css": ".ds-stamp{display:inline-block;padding:1px 6px;border-radius:2px;font-size:11px;font-weight:700;letter-spacing:.06em;color:#126b40;box-shadow:inset 0 0 0 1px currentColor}.ds-warn{color:#835300}"
+    },
+    {
+      "name": "Grid Name",
+      "kind": "custom",
+      "description": "Signature: a name written into square cells; Latin words take one merged cell per two letters.",
+      "html": "<span class=\"ds-gname\"><span class=\"ds-c\">工</span><span class=\"ds-c\">作</span><span class=\"ds-c\">号</span><span class=\"ds-c ds-w\" style=\"width:4.5em\">Dev</span></span>",
+      "css": ".ds-gname{display:inline-flex;box-shadow:0 0 0 1px #8fb39c;font:700 15px 'Songti SC','Noto Serif SC',serif;line-height:1}.ds-c{display:inline-flex;align-items:center;justify-content:center;width:1.5em;height:1.5em;box-shadow:1px 0 0 #cfdbd2}.ds-w{font-family:-apple-system,'PingFang SC',sans-serif}"
+    },
+    {
+      "name": "Red-pen Circle",
+      "kind": "custom",
+      "description": "Signature: a failed state circled by hand in red.",
+      "html": "<span class=\"ds-pen\">创建失败</span>",
+      "css": ".ds-pen{position:relative;display:inline-block;padding:1px 7px;color:#c2311c;font-weight:700;font-size:12px}.ds-pen::after{content:'';position:absolute;inset:-3px -2px;border:1.5px solid #c2311c;border-radius:52% 48% 55% 45%/58% 46% 54% 42%;transform:rotate(-4deg)}"
+    },
+    {
+      "name": "Entry Card",
+      "kind": "card",
+      "refersTo": "entry-card",
+      "description": "An instance written onto the sheet: number, grid name, state, action.",
+      "html": "<div class=\"ds-card\"><span class=\"ds-no\">01</span> <b>EthanWhoDev</b><div class=\"ds-meta\">在线 · 微信 4.1.1.4</div></div>",
+      "css": ".ds-card{width:260px;padding:16px;background:#fff;border-radius:4px;box-shadow:0 0 0 1px #cfdbd2}.ds-card:hover{box-shadow:0 0 0 1px #126b40}.ds-no{font:600 12px ui-monospace,monospace;color:#56605a}.ds-meta{margin-top:8px;font-size:12px;color:#56605a}"
+    },
+    {
+      "name": "Tabs",
+      "kind": "nav",
+      "description": "Underline tabs across the sheet.",
+      "html": "<nav class=\"ds-tabs\"><a class=\"on\">实例</a><a>用户</a><a>系统</a></nav>",
+      "css": ".ds-tabs{display:flex;border-bottom:1px solid #cfdbd2}.ds-tabs a{padding:10px 18px 11px;margin-bottom:-1px;border-bottom:2px solid transparent;color:#56605a;font-weight:600;font-size:15px;cursor:pointer}.ds-tabs a.on{color:#126b40;border-bottom-color:#126b40}"
+    }
+  ],
+  "narrative": {
+    "northStar": "稿纸 — the manuscript sheet, marked with a red pen",
+    "overview": "The panel is a sheet of squared manuscript paper. Instances are numbered entries with names written into square cells; failures are circled in red pen with what to do next. Depth comes from rules, not light; dark mode is carbon paper.",
+    "keyCharacteristics": [
+      "24px visible grid",
+      "green ink = action/selection, red pen = failure/destructive",
+      "Song serif titles, sans UI, mono figures",
+      "2–4px corners, stamped status boxes",
+      "names in square cells, numbered entries, red-pen marks"
+    ],
+    "rules": [
+      {
+        "name": "The Two Inks Rule",
+        "body": "Only green and red are accent inks; green acts/selects, red flags failure or destruction.",
+        "section": "colors"
+      },
+      {
+        "name": "The Cell Rule",
+        "body": "Names use GridName: one CJK char per cell, Latin words merged, max 10 cells, never wraps.",
+        "section": "typography"
+      },
+      {
+        "name": "The No-Light Rule",
+        "body": "No shadows, glows or blur; stand-out layers get the double frame.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Use tokens from styles.css :root",
+      "Circle failures with .pen-circle and explain with .pen-wave",
+      "Number entries with EntryNo"
+    ],
+    "donts": [
+      "No drop shadows, glass, gradients or radial highlights",
+      "No pills or large radii",
+      "No emoji or Unicode glyph icons",
+      "No serif in buttons, labels or data"
+    ]
+  }
+}
