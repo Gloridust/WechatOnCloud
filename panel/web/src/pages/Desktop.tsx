@@ -1017,11 +1017,11 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       return;
     }
     if (allowAutoRecover(id)) {
-      api.clientLog(id, `KasmVNC 致命错误，自动重连：${msg}`);
+      api.clientLog(id, `桌面连接异常，自动整页重连：${msg}`);
       toast('桌面连接异常，正在自动重连…', 'error');
       window.setTimeout(() => window.location.reload(), 800);
     } else {
-      api.clientLog(id, `KasmVNC 反复致命错误，停止自动重连、转手动恢复：${msg}`);
+      api.clientLog(id, `桌面连接反复异常，停止自动重连、转手动恢复：${msg}`);
       setFrameLoaded(false);
       setLoadStuck(true); // 露出"桌面无响应"浮层，由用户「重新连接/重启实例」
       recovering.current = false;
@@ -1034,6 +1034,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   useEffect(() => {
     if (!showVnc || !frameLoaded || !id) return;
     let lastState = '';
+    let disconnectedTicks = 0;
     const t = window.setInterval(() => {
       const doc = frameRef.current?.contentDocument;
       const fatal = fatalErrorMsg(doc, onExtensionError);
@@ -1060,6 +1061,19 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       if (state && state !== lastState) {
         lastState = state;
         api.clientLog(id, `VNC状态→${state}`);
+      }
+      // 停在 disconnected = noVNC 不会再自己重连（第一次就没连上：实例刚起 Xvnc 还没就绪、Xvnc 起不来；或非干净断开）。
+      // 以前靠 KasmVNC 保活定时器在这个状态下必抛的 lastActiveAt 报错弹出致命浮层来触发整页重连；KasmVNC 1.5.2 修掉了
+      // 那个报错，这条路就断了：页面一直停在 KasmVNC 的蓝色背景上，没有任何提示，只能手动刷新（#175）。
+      // 现在直接认状态：连续两次（约 6s）都是 disconnected 就走同一套自愈（先查是否被别处接管；5 分钟 4 次，
+      // 超限转「桌面无响应」浮层）。这些重连在服务端也会被计入「桌面服务连不上」，实例真起不来时由面板重建。
+      if (state === 'disconnected') {
+        if (++disconnectedTicks >= 2) {
+          disconnectedTicks = 0;
+          recoverFromFatal('桌面连接已断开，且不会自动重连');
+        }
+      } else {
+        disconnectedTicks = 0;
       }
     }, 3000);
     return () => window.clearInterval(t);
