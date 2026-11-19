@@ -71,6 +71,7 @@ import {
   uploadToInstance,
   listInstanceFiles,
   downloadFromInstance,
+  downloadAllFromInstance,
   deleteInstanceFile,
   instanceLogs,
   buildDiagnostics,
@@ -1032,6 +1033,23 @@ app.get('/api/instances/:id/download', async (req, reply) => {
     return reply.send(stream);
   } catch (e: any) {
     return reply.code(400).send({ error: e?.message || '下载失败' });
+  }
+});
+
+// 打包下载桌面全部中转文件为 tar.gz（流式，不爆内存）
+app.get('/api/instances/:id/download-all', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  try {
+    const { stream } = await downloadAllFromInstance(findInstance(id)!);
+    const stamp = new Date().toISOString().slice(0, 10);
+    reply.header('content-type', 'application/gzip');
+    reply.header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`woc-files-${stamp}.tar.gz`)}`);
+    return reply.send(stream);
+  } catch (e: any) {
+    return reply.code(400).send({ error: e?.message || '打包下载失败' });
   }
 });
 

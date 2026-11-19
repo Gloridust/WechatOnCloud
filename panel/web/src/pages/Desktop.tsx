@@ -709,6 +709,23 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     recovering.current = false;
   }, [id]);
 
+  // 文件面板打开时每 5s 自动刷新列表：微信里"另存到桌面"的文件会自动出现，不必关掉面板再打开。
+  // 页面隐藏时跳过，避免无谓的 docker exec；仅 showFiles 时轮询，平时零开销。
+  useEffect(() => {
+    if (!showFiles || !id) return;
+    const poll = async () => {
+      if (document.hidden) return;
+      try {
+        const { files } = await api.listFiles(id);
+        setFiles(files);
+      } catch {
+        /* ignore */
+      }
+    };
+    const t = window.setInterval(poll, 5000);
+    return () => window.clearInterval(t);
+  }, [showFiles, id]);
+
   // 桌面久未加载出来 → 判为"无响应"，把无限转圈换成可操作的重试/重启，不让用户干等。
   // （实测容器跑久了会 I/O/服务 stall，进程没死、显示在线，但读不出 VNC 文件而永远连接中。）
   useEffect(() => {
@@ -1769,9 +1786,22 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             <div className="iv-files">
               <div className="files-head">
                 <span>文件传输</span>
-                <button className="btn-text" onClick={() => setShowFiles(false)}>
-                  关闭
-                </button>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <button className="btn-text btn-text-sm" title="立即刷新文件列表" onClick={refreshFiles}>
+                    刷新
+                  </button>
+                  <a
+                    className="btn-text btn-text-sm"
+                    title="把桌面所有文件打包成 tar.gz 一次下载"
+                    href={api.downloadAllUrl(id)}
+                    style={{ textDecoration: 'none' }}
+                  >
+                    打包下载
+                  </a>
+                  <button className="btn-text" onClick={() => setShowFiles(false)}>
+                    关闭
+                  </button>
+                </span>
               </div>
               <input
                 ref={fileInput}
@@ -1787,7 +1817,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 <IcUpload size={18} />
                 {uploading ? `上传中 ${uploadPct}` : '选择文件上传'}
               </button>
-              <div className="files-hint">也可直接把文件拖进来。下方为桌面（~/Desktop）里的文件，应用收到的文件另存到桌面即可在此下载。</div>
+              <div className="files-hint">也可直接把文件拖进来。下方为桌面（~/Desktop）里的文件，应用收到的文件另存到桌面后会自动出现在这里；可逐个下载，或点「打包下载」一次全部取走。</div>
               <div className="files-list">
                 {files.length === 0 && (
                   <div className="muted small" style={{ padding: '10px 2px' }}>

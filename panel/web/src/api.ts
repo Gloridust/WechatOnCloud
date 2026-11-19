@@ -424,6 +424,7 @@ export const api = {
     return data;
   },
   downloadFileUrl: (id: string, name: string) => `/api/instances/${id}/download?name=${encodeURIComponent(name)}`,
+  downloadAllUrl: (id: string) => `/api/instances/${id}/download-all`,
   deleteFile: (id: string, name: string) => req(`/api/instances/${id}/files?name=${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
   // 数据卷管理（仅管理员）

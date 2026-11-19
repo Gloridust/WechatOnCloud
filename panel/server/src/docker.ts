@@ -1998,6 +1998,52 @@ export async function downloadFromInstance(inst: Instance, name: string): Promis
   return streamRegularFile(inst, `${TRANSFER_DIR}/${name}`);
 }
 
+// 打包下载桌面全部中转文件：在容器内流式生成 tar.gz（走 docker exec stdout，自己拆帧），不落临时文件、不整个读进内存。
+// 与单文件下载同样是流式，几百 MB 也不会让面板 OOM。用 tar -C 切到中转目录、逐个 basename 传给 tar（argv 数组直传，
+// 文件名含空格/中文/以 - 开头都经 safeName 与 -- 保护），避免 shell 注入。
+export async function downloadAllFromInstance(inst: Instance): Promise<{ stream: NodeJS.ReadableStream }> {
+  const files = await listInstanceFiles(inst);
+  const names = files.map((f) => f.name).filter((n) => safeName(n));
+  if (!names.length) throw new Error('桌面暂无可下载的文件');
+  // -C 到中转目录后用 basename；-- 之后即使文件名以 - 开头也不会被当参数
+  const exec = await execCreate(docker.getContainer(inst.containerName), {
+    Cmd: ['tar', '-czf', '-', '-C', TRANSFER_DIR, '--', ...names],
+    AttachStdout: true,
+    AttachStderr: true,
+    Tty: false,
+    User: 'root',
+  });
+  const raw = (await exec.start({ hijack: true, stdin: false })) as NodeJS.ReadableStream & { destroy?: () => void };
+  const out = new PassThrough();
+  let buf: Buffer = Buffer.alloc(0);
+  let need = 0;
+  let type = 0;
+  raw.on('data', (chunk: Buffer) => {
+    buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+    for (;;) {
+      if (need === 0) {
+        if (buf.length < 8) break;
+        type = buf[0];
+        need = buf.readUInt32BE(4);
+        buf = buf.subarray(8);
+        continue;
+      }
+      if (!buf.length) break;
+      const part = buf.subarray(0, need);
+      buf = buf.subarray(part.length);
+      need -= part.length;
+      if (type === 1 && !out.write(part)) {
+        raw.pause();
+        out.once('drain', () => raw.resume());
+      }
+    }
+  });
+  raw.on('end', () => out.end());
+  raw.on('error', (e) => out.destroy(e as Error));
+  out.on('close', () => raw.destroy?.()); // 客户端中途断开：停掉 tar
+  return { stream: out };
+}
+
 // 从 docker getArchive 返回的 tar 中取出第一个普通文件的内容。Docker(Go archive/tar) 在 mtime 含纳秒精度等
 // 情况下会先写一个 PAX 扩展头块（typeflag 'x'），把它误当文件头会读到扩展记录长度 → 返回错误长度的数据
 // （"大小不对"）。这里跳过 PAX/全局('x'/'g')与 GNU 长名('L'/'K')等扩展头，找到普通文件('0'/NUL)再取内容。
