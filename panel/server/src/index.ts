@@ -1835,7 +1835,18 @@ function watchUpstream(proxyReq: ClientRequest, instId: string, what: string, do
   done.once('close', clear); // 客户端先走了（关页 / 自行放弃）
 }
 
+// 转发给实例前去掉浏览器带来的 Cookie：实例里的 nginx / KasmVNC 不认任何 cookie（凭据是上面注入的 Basic auth），
+// 原样转发有两个问题——
+// 1. Cookie 不按端口隔离：同一个 IP / 域名下别的服务（飞牛自己的界面、其它 NAS 应用）种的 cookie 都会发到面板来。
+//    面板（Node，请求头总长上限 16KB）收得下，实例 nginx 单个请求头上限 8KB，超了直接回
+//    「400 Request Header Or Cookie Too Large」，桌面打不开（#179 飞牛手机 App）。
+// 2. 面板的登录会话 cookie 没必要交给实例容器。
+function scrubUpstreamHeaders(proxyReq: ClientRequest) {
+  proxyReq.removeHeader('cookie');
+}
+
 proxy.on('proxyReq', (proxyReq, req, res) => {
+  scrubUpstreamHeaders(proxyReq);
   const auth = (req as any)._wocAuth;
   if (auth) proxyReq.setHeader('authorization', auth);
   // 只盯 noVNC 页面本身：它出不来 = 实例服务卡住。其余资源 / 音频长轮询不计。
@@ -1843,6 +1854,7 @@ proxy.on('proxyReq', (proxyReq, req, res) => {
   if (instId && (req.url || '').startsWith('/vnc/index.html')) watchUpstream(proxyReq, instId, '桌面页面', res);
 });
 proxy.on('proxyReqWs', (proxyReq, req, socket) => {
+  scrubUpstreamHeaders(proxyReq);
   const auth = (req as any)._wocAuth;
   if (auth) proxyReq.setHeader('authorization', auth);
   // 上游（实例 nginx → KasmVNC websockify）回 101 = ws 接收器接受了连接，桌面真正连上。
