@@ -89,6 +89,14 @@ const NO_IPV6 = /^(1|true|yes)$/i.test(process.env.WOC_DISABLE_IPV6 || '') || !e
 const INSTANCE_MEM_GB = Number(process.env.WOC_INSTANCE_MEM_GB) || 0;
 const INSTANCE_MEM = INSTANCE_MEM_GB > 0 ? Math.floor(INSTANCE_MEM_GB * 1024 * 1024 * 1024) : 0;
 
+// 可选：给每个实例容器设 CPU 核数上限（默认 0 = 不限制，保持原行为）。
+// 场景：小核数宿主（如 4 核）上多个实例的 Xvnc 软渲染会互相抢满 CPU，导致远程桌面卡顿。
+// 用 CpuQuota/CpuPeriod 实现：quota = 核数 × 100000µs，period = 100000µs。
+// 例如设 1.5 → 每实例最多用 1.5 核，避免单个实例把宿主 CPU 吃满、拖慢其它实例与面板。
+// 默认值保持不变（0 = 不限制），只在显式配置时才生效，属行为保持型增强。
+const INSTANCE_CPU_CORES = Number(process.env.WOC_INSTANCE_CPU_CORES) || 0;
+const INSTANCE_CPU_QUOTA = INSTANCE_CPU_CORES > 0 ? Math.round(INSTANCE_CPU_CORES * 100000) : 0;
+
 // 设备伪装：把 /etc/os-release 伪装成 deepin（微信官方支持的发行版，且 Deepin 本就基于 Debian，
 // 与本镜像的 Debian 用户态一致，不会自相矛盾）。默认开启；设 WOC_SPOOF_OS=0 关闭恢复 Debian。
 // 配合 00-woc-identity 钩子里的 machine-id 唯一化 + 真实 hostname，整体让容器更像一台普通 Linux 桌面，
@@ -784,6 +792,10 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
   if (INSTANCE_MEM > 0) {
     hostConfig.Memory = INSTANCE_MEM;
     hostConfig.MemorySwap = INSTANCE_MEM; // 禁止 swap 膨胀：限制即为硬上限
+  }
+  if (INSTANCE_CPU_QUOTA > 0) {
+    hostConfig.CpuQuota = INSTANCE_CPU_QUOTA;
+    hostConfig.CpuPeriod = 100000;
   }
   if (vids.length) {
     hostConfig.Devices = vids.map((d) => ({ PathOnHost: d, PathInContainer: d, CgroupPermissions: 'rwm' }));
@@ -2168,6 +2180,30 @@ export async function pasteTextInInstance(inst: Instance, text: string): Promise
       `xclip -selection clipboard -i /tmp/${name} >/dev/null 2>&1`,
       `rm -f /tmp/${name}`,
       xdoKey('ctrl+v'),
+    ].join('\n');
+    await execCapture(inst, ['bash', '-c', cmd]);
+  });
+}
+
+// 【优化】把已上传到桌面的文件路径以 text/uri-list 写入容器 X 剪贴板，让用户在应用里按一次 Ctrl+V
+// 就直接拿到文件，省去在文件选择器里逐级翻找 ~/Desktop 的步骤。刻意「不自动按 Ctrl+V」：
+// 按键作用于 X server 当前焦点窗口，上传时焦点通常在面板浏览器而非容器内应用，自动按会落点不可控、
+// 甚至把路径当消息发出去。这里只备好剪贴板，由用户主动到应用输入框粘贴，安全且可回退。
+// 是否真正得到文件取决于应用（微信 Linux 版）对 text/uri-list 的支持；不支持时用户仍可用文件选择器，
+// 体验不比原来差。uri-list 不在 Xvnc 的 DLP_ClipTypes（text/html,image/png）里，不会触发大图 INCR 卡死。
+export async function pasteFilePathInInstance(inst: Instance, fileName: string): Promise<void> {
+  assertSafeName(fileName);
+  const name = `woc-uri-${Date.now()}.txt`;
+  // file:// + encodeURI：中文/空格路径按 URI 规则转义；路径固定指向桌面中转目录，文件名经 safeName 校验。
+  const uri = `file://${TRANSFER_DIR}/${encodeURIComponent(fileName)}\r\n`;
+  await withClipLock(inst.id, async () => {
+    cancelClipRestore(inst.id);
+    await docker.getContainer(inst.containerName).putArchive(tarSingleFile(name, Buffer.from(uri, 'utf8')), { path: '/tmp' });
+    const cmd = [
+      ...X_PRELUDE,
+      CLIP_DISCARD,
+      `xclip -selection clipboard -t text/uri-list -i /tmp/${name} >/dev/null 2>&1`,
+      `rm -f /tmp/${name}`,
     ].join('\n');
     await execCapture(inst, ['bash', '-c', cmd]);
   });

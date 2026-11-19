@@ -470,6 +470,9 @@ export const api = {
   // 本机剪贴板文字粘进应用（粘贴桥判断本机比容器新时用；贴完留在容器剪贴板）
   pasteText: (id: string, text: string) =>
     req(`/api/instances/${id}/paste-text`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ text }) }),
+  // 【优化】把已上传到桌面的文件路径以 uri-list 写进容器剪贴板，用户在应用里 Ctrl+V 直接取用（不自动按键）
+  pasteFilePath: (id: string, name: string) =>
+    req(`/api/instances/${id}/paste-path`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ name }) }),
   keyInInstance: (id: string, key: string) =>
     req(`/api/instances/${id}/key`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ key }) }),
 

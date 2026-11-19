@@ -81,6 +81,7 @@ import {
   instanceAcceptsLargePng,
   PASTE_IMAGE_PNG_TOO_BIG,
   pasteTextInInstance,
+  pasteFilePathInInstance,
   listOrphanVolumes,
   removeVolume,
   listOrphanContainers,
@@ -1224,6 +1225,27 @@ app.post('/api/instances/:id/paste-text', { bodyLimit: 2 * 1024 * 1024 }, async 
     return { ok: true };
   } catch (e: any) {
     return reply.code(500).send({ error: e?.message || '粘贴失败' });
+  }
+});
+
+// 【优化】把已上传到桌面的文件路径写进容器剪贴板（text/uri-list），用户在应用里按一次 Ctrl+V 即可取用，
+// 省去在文件选择器里翻找 ~/Desktop。只写剪贴板、不自动按键（按键落点不可控）。文件须确实存在于中转目录。
+app.post('/api/instances/:id/paste-path', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const { name } = (req.body as any) ?? {};
+  if (!name || typeof name !== 'string') return reply.code(400).send({ error: '文件名无效' });
+  const busy = claimControl(u, id, req);
+  if (busy) return reply.code(409).send(busy);
+  try {
+    const files = await listInstanceFiles(findInstance(id)!);
+    if (!files.some((f) => f.name === name)) return reply.code(404).send({ error: '文件不在桌面中转目录' });
+    await pasteFilePathInInstance(findInstance(id)!, name);
+    return { ok: true };
+  } catch (e: any) {
+    return reply.code(500).send({ error: e?.message || '写入路径失败' });
   }
 });
 

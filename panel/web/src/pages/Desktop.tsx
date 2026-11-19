@@ -44,17 +44,33 @@ function installSeamlessIme(
     if (draining) return;
     draining = true;
     while (queue.length) {
-      const job = queue[0];
-      try {
-        if (job.kind === 'text') {
-          onTyped(job.data);
-          await api.typeInInstance(instId, job.data);
+      // 先出队再处理：即使请求失败也不会重复 shift 或漏掉后续 job。
+      const job = queue.shift()!;
+      if (job.kind === 'text') {
+        // 【优化】合并队首连续的 text job 为一次 /type：上屏延迟的大头是每段一个 HTTP 往返
+        // （中文 + 全角标点 + 混排数字会连续入队成多段）。每段本身已 ≤500（pushText 分段），
+        // 累计接近 500 就停、余下的留下一轮；遇到 key job 立即停 —— text/key 相对顺序严格不变，
+        // 不会回归「你好123→23」丢字。合并后剪贴板里就是整串，noteTyped 记整串也更贴合归还判断。
+        let combined = job.data;
+        while (queue.length && queue[0].kind === 'text') {
+          const next = (queue[0] as { kind: 'text'; data: string }).data;
+          if (combined.length + next.length > 500) break;
+          combined += next;
+          queue.shift();
         }
-        else await api.keyInInstance(instId, job.data);
-      } catch (e) {
-        onFail(e); // 单条失败丢弃、继续后续，避免卡住队列；但要让用户知道刚打的字没发出去
+        try {
+          onTyped(combined);
+          await api.typeInInstance(instId, combined);
+        } catch (e) {
+          onFail(e); // 单批失败丢弃、继续后续，避免卡住队列；但要让用户知道刚打的字没发出去
+        }
+      } else {
+        try {
+          await api.keyInInstance(instId, job.data);
+        } catch (e) {
+          onFail(e);
+        }
       }
-      queue.shift();
     }
     draining = false;
   };
@@ -1134,6 +1150,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     setUploading(true);
     let ok = 0;
     let done = 0;
+    const okNames: string[] = [];
     try {
       while (uploadQueue.current.length) {
         const f = uploadQueue.current.shift()!;
@@ -1145,6 +1162,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             setUploadPct(loaded < size ? `${prefix}${Math.floor((loaded / size) * 100)}%` : `${prefix}写入中`),
           );
           ok++;
+          okNames.push(f.name);
         } catch (e: any) {
           toast(`${f.name}: ${e.message || '上传失败'}`, 'error');
         }
@@ -1156,7 +1174,21 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       setUploadPct('');
     }
     if (ok) {
-      toast(`已上传 ${ok} 个文件到桌面，应用里可直接取用`, 'ok');
+      // 【优化】把最后上传的文件路径写进容器剪贴板：用户在应用输入框按一次 Ctrl+V 就可能直接拿到文件，
+      // 省去在文件选择器里翻找桌面。失败静默（不影响上传本身，用户仍可按老办法取用），给出可照做的提示。
+      let pathReady = false;
+      try {
+        await api.pasteFilePath(id, okNames[okNames.length - 1]);
+        pathReady = true;
+      } catch {
+        /* 路径写入失败不影响上传结果，保持原有取用方式 */
+      }
+      toast(
+        pathReady
+          ? `已上传 ${ok} 个文件到桌面；路径已备好，到应用输入框按 Ctrl+V 可直接取用`
+          : `已上传 ${ok} 个文件到桌面，应用里可从 ~/Desktop 取用`,
+        'ok',
+      );
       refreshFiles();
     }
   };
