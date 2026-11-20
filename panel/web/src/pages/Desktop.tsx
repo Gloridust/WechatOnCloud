@@ -1017,11 +1017,11 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       return;
     }
     if (allowAutoRecover(id)) {
-      api.clientLog(id, `KasmVNC 致命错误，自动重连：${msg}`);
+      api.clientLog(id, `桌面连接异常，自动整页重连：${msg}`);
       toast('桌面连接异常，正在自动重连…', 'error');
       window.setTimeout(() => window.location.reload(), 800);
     } else {
-      api.clientLog(id, `KasmVNC 反复致命错误，停止自动重连、转手动恢复：${msg}`);
+      api.clientLog(id, `桌面连接反复异常，停止自动重连、转手动恢复：${msg}`);
       setFrameLoaded(false);
       setLoadStuck(true); // 露出"桌面无响应"浮层，由用户「重新连接/重启实例」
       recovering.current = false;
@@ -1034,6 +1034,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   useEffect(() => {
     if (!showVnc || !frameLoaded || !id) return;
     let lastState = '';
+    let disconnectedTicks = 0;
     const t = window.setInterval(() => {
       const doc = frameRef.current?.contentDocument;
       const fatal = fatalErrorMsg(doc, onExtensionError);
@@ -1060,6 +1061,19 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       if (state && state !== lastState) {
         lastState = state;
         api.clientLog(id, `VNC状态→${state}`);
+      }
+      // 停在 disconnected = noVNC 不会再自己重连（第一次就没连上：实例刚起 Xvnc 还没就绪、Xvnc 起不来；或非干净断开）。
+      // 以前靠 KasmVNC 保活定时器在这个状态下必抛的 lastActiveAt 报错弹出致命浮层来触发整页重连；KasmVNC 1.5.2 修掉了
+      // 那个报错，这条路就断了：页面一直停在 KasmVNC 的蓝色背景上，没有任何提示，只能手动刷新（#175）。
+      // 现在直接认状态：连续两次（约 6s）都是 disconnected 就走同一套自愈（先查是否被别处接管；5 分钟 4 次，
+      // 超限转「桌面无响应」浮层）。这些重连在服务端也会被计入「桌面服务连不上」，实例真起不来时由面板重建。
+      if (state === 'disconnected') {
+        if (++disconnectedTicks >= 2) {
+          disconnectedTicks = 0;
+          recoverFromFatal('桌面连接已断开，且不会自动重连');
+        }
+      } else {
+        disconnectedTicks = 0;
       }
     }, 3000);
     return () => window.clearInterval(t);
@@ -1382,6 +1396,31 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     } catch {
       toast('读取失败', 'error');
     }
+  };
+
+  // 应用里复制的图片 → 本机：HTTPS 下写进本机剪贴板；局域网 http 下浏览器不给写剪贴板，改为存成图片文件。
+  // ClipboardItem 直接收 Promise，write 在点击的同一轮里发起，不会因等待网络丢掉用户手势而被拒。
+  const [copyingImage, setCopyingImage] = useState(false);
+  const copyRemoteImage = () => {
+    if (!id || copyingImage) return;
+    setCopyingImage(true);
+    const image = api.clipboardImage(id);
+    const canWrite = window.isSecureContext && !!navigator.clipboard?.write && typeof ClipboardItem !== 'undefined';
+    const done = canWrite
+      ? navigator.clipboard.write([new ClipboardItem({ 'image/png': image })]).then(() => '已复制到本机剪贴板，可直接粘贴')
+      : image.then((blob) => {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = `应用图片-${Date.now()}.png`;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+          return '当前为 http 访问，浏览器不允许写剪贴板，已存为图片文件';
+        });
+    done
+      .then((msg) => toast(msg, 'ok'))
+      // 图片读取失败时 write 也会失败，优先报读取的原因（如「剪贴板里没有图片」）
+      .catch((e: any) => image.then(() => e, (readErr) => readErr).then((err: any) => toast(err?.message || '复制图片失败', 'error')))
+      .finally(() => setCopyingImage(false));
   };
 
   const restartInstance = async () => {
@@ -1800,6 +1839,9 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               </button>
               <button className="btn-text" style={{ alignSelf: 'flex-start', marginTop: 6 }} onClick={pullClipboardFromRemote}>
                 读取容器剪贴板到此框
+              </button>
+              <button className="btn-text" style={{ alignSelf: 'flex-start' }} disabled={copyingImage} onClick={copyRemoteImage}>
+                {copyingImage ? '正在读取图片…' : '复制应用里的图片到本机'}
               </button>
               <div className="files-hint">
                 局域网 http 访问时浏览器会禁用系统级剪贴板同步，故用此框中转：文本→容器剪贴板，再在应用里 Ctrl+V。

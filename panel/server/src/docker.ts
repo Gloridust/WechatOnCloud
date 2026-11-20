@@ -1,5 +1,6 @@
 import { hostname } from 'node:os';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { appendInstanceLog, deleteInstanceLog, appendPanelLog, readInstanceLog, readPanelLog, filterSince } from './logs.js';
 import http from 'node:http';
 import { PassThrough } from 'node:stream';
@@ -751,7 +752,14 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
   const existing = docker.getContainer(inst.containerName);
   const info: any = await existing.inspect().catch(() => null);
   const imageOverride: string | undefined = opts?.keepImage && info?.Image ? String(info.Image) : undefined;
-  // 沿用旧镜像重建时无需 ensureImage（镜像 id 一定在本地——容器刚在用它）；
+  // 容器在用的镜像不一定还在本机：Docker 29 默认的 containerd 镜像存储里，同名 tag 一旦指向新镜像（重新拉取、
+  // 本地重建同名镜像），旧镜像当场就没了，用它跑着的容器照常在跑。这时没法沿用它重建，先删后建会把实例删没
+  // （实测：自愈删掉旧容器后报 No such image，实例只剩数据卷）。改为原地重启这个容器，同样不换版本。
+  if (imageOverride && !(await docker.getImage(imageOverride).inspect().then(() => true, () => false))) {
+    await restartInPlace(inst, existing, imageOverride);
+    return;
+  }
+  // 沿用旧镜像重建时无需 ensureImage（上面已确认它在本地）；
   // 也避免"离线 + 本地无 :latest"时连重启都失败。
   // 必须先确保目标镜像在本地、再删旧容器：此前先删后拉，升级时拉不到新镜像（面板刚更新、本地只有旧版本号的镜像、
   // 网络又不通）就会把旧容器删掉却建不出新的，实例直接没了；现在拉取失败时旧容器原样保留。
@@ -839,6 +847,15 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
     }
     throw e;
   }
+}
+
+// 原地重启（镜像已不在本机、没法重建时用）。先清掉 X 显示锁：容器不重建，/tmp 原样保留，残留的锁可能让 Xvnc
+// 起不来（见镜像 woc-xlock.sh；老镜像没有这个启动钩子）。重启会先停掉 Xvnc，删它正在用的锁文件无妨。
+async function restartInPlace(inst: Instance, c: Docker.Container, image: string): Promise<void> {
+  appendInstanceLog(inst.id, `原镜像 ${image.replace(/^sha256:/, '').slice(0, 12)} 已不在本机（同名镜像被更新过），改为原地重启容器`);
+  await execCapture(inst, ['sh', '-c', 'rm -f /tmp/.X[0-9]*-lock'], 'root').catch(() => {});
+  await c.restart({ t: 10 });
+  appendInstanceLog(inst.id, '容器已原地重启');
 }
 
 // 确保实例容器在运行：缺失则按需创建（不会重建已有卷），停止则启动。
@@ -1353,7 +1370,11 @@ async function execCreate(c: any, opts: any): Promise<any> {
 
 // 在实例容器内执行命令，返回 stdout；若命令失败，把 stderr 透出给调用方。
 async function execCapture(inst: Instance, cmd: string[], user = 'abc'): Promise<string> {
-  const c = docker.getContainer(inst.containerName);
+  return execCaptureIn(docker.getContainer(inst.containerName), cmd, user);
+}
+
+// 同上，在任意容器里执行（整卷恢复要在临时辅助容器里执行）
+async function execCaptureIn(c: any, cmd: string[], user: string): Promise<string> {
   const exec = await execCreate(c, { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: user });
   const stream = await exec.start({ hijack: true, stdin: false });
   return await new Promise<string>((resolve, reject) => {
@@ -1405,6 +1426,12 @@ export interface WechatStatus {
 
 const DEFAULT_STATUS: WechatStatus = { phase: 'idle', percent: 0, installed: false, version: '', message: '未安装', updatedAt: 0 };
 
+// 读状态偶尔会失败（Docker 一时繁忙、exec 被拒）。这时把装好的实例报成「未安装」，桌面页会卸掉正连着的画面
+// （iframe 被删、过一会儿再新建，正是会把 Xvnc 卡死的「新旧连接并存」），管理员还会看到「下载安装」按钮。
+// 一分钟内沿用上次读到的状态。
+const STATUS_GRACE_MS = 60_000;
+const lastStatus = new Map<string, { st: WechatStatus; at: number }>();
+
 export async function wechatStatus(inst: Instance): Promise<WechatStatus> {
   try {
     // 兼容旧容器（无 /woc/app-ctl.sh）：有则按 appType 取状态，无则回退老的 wechat-ctl.sh（旧实例皆微信）。
@@ -1414,10 +1441,12 @@ export async function wechatStatus(inst: Instance): Promise<WechatStatus> {
       '-c',
       `if [ -x /woc/app-ctl.sh ]; then /woc/app-ctl.sh ${at} status; else /woc/wechat-ctl.sh status; fi`,
     ]);
-    const json = JSON.parse(raw.trim());
-    return { ...DEFAULT_STATUS, ...json };
+    const st: WechatStatus = { ...DEFAULT_STATUS, ...JSON.parse(raw.trim()) };
+    lastStatus.set(inst.id, { st, at: Date.now() });
+    return st;
   } catch {
-    return DEFAULT_STATUS;
+    const last = lastStatus.get(inst.id);
+    return last && Date.now() - last.at < STATUS_GRACE_MS ? last.st : DEFAULT_STATUS;
   }
 }
 
@@ -1847,7 +1876,10 @@ const UPLOAD_TMP_DIR = '/config/.woc-upload';
 
 // putArchive 的响应体是空的，读掉以释放连接
 async function putArchiveStream(inst: Instance, tar: NodeJS.ReadableStream, path: string): Promise<void> {
-  const res: any = await docker.getContainer(inst.containerName).putArchive(tar, { path });
+  await putArchiveTo(docker.getContainer(inst.containerName), tar, path);
+}
+async function putArchiveTo(c: any, tar: NodeJS.ReadableStream, path: string): Promise<void> {
+  const res: any = await c.putArchive(tar, { path });
   if (res && typeof res.resume === 'function') res.resume();
 }
 
@@ -1878,6 +1910,8 @@ function friendlyWriteError(e: any): Error {
   if (/is not running|container .* is restarting/i.test(msg)) return new Error('实例未运行，请先启动实例');
   if (/cannot overwrite directory|Is a directory/i.test(msg)) return new Error('目标位置已有同名文件夹');
   if (/File name too long/i.test(msg)) return new Error('文件名太长');
+  // 解包时某个路径建不出来（比如包里的链接指向不存在的位置），docker 报的是这句，看不出原因
+  if (/Could not find the file/i.test(msg)) return new Error('包里有写不进去的路径（比如链接指向了不存在的位置），写到一半中断了');
   return e instanceof Error ? e : new Error(msg);
 }
 
@@ -2257,6 +2291,26 @@ export async function pasteImageInInstance(inst: Instance, mime: string, content
   });
 }
 
+// 反方向：把应用里复制的图片（容器 X 剪贴板里的 image/png）读出来，交给前端写进本机剪贴板 / 存成文件。
+// 只读、不按键。打字借用的剪贴板若还没归还，先归还再读，否则读到的是刚打的字而不是用户复制的图。
+// execCapture 按 utf8 收 stdout，二进制会被破坏，故在容器内 base64 后再传出。
+export const CLIPBOARD_IMAGE_MAX = 64 * 1024 * 1024;
+export async function readClipboardImage(inst: Instance): Promise<Buffer> {
+  return withClipLock(inst.id, async () => {
+    if (cancelClipRestore(inst.id)) await restoreClipboard(inst);
+    const cmd = [
+      ...X_PRELUDE,
+      'timeout 1 xclip -o -selection clipboard -t TARGETS 2>/dev/null | grep -qxF image/png || { echo "应用剪贴板里没有图片：请先在应用里右键图片「复制」" >&2; exit 3; }',
+      `timeout 5 xclip -o -selection clipboard -t image/png 2>/dev/null | head -c ${CLIPBOARD_IMAGE_MAX + 1} | base64 -w0`,
+    ].join('\n');
+    const content = Buffer.from((await execCapture(inst, ['bash', '-c', cmd])).trim(), 'base64');
+    if (content.length > CLIPBOARD_IMAGE_MAX) throw new Error('图片超过 64 MiB');
+    const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    if (content.length < 8 || !content.subarray(0, 8).equals(PNG_SIG)) throw new Error('读取到的剪贴板图片无效');
+    return content;
+  });
+}
+
 // 通过 xdotool 在实例容器内模拟一次按键（如 Return / BackSpace）。
 // 用于「无感输入」模式：中文经 xclip 转发期间，把被截下的回车/退格按序送出，保证顺序、避免抢跑。
 // key 为 xdotool keysym 名，可带至多 3 个修饰键前缀（如 ctrl+v、ctrl+shift+Tab）；
@@ -2450,9 +2504,13 @@ export async function volBackupStream(inst: Instance): Promise<NodeJS.ReadableSt
 }
 
 // 整卷恢复：仅适用于本系统导出的备份（条目前缀 config/），解到容器根 → 落回 /config。
-// 写之前先停掉实例、写完再启动（原本在运行的话）：此前在微信运行时直接覆盖它正开着的数据库文件，
-// 容易把聊天库写坏，而且界面上只是提示「恢复后请重启」。停止期间 docker 照样能往卷里写（docker cp 同理）。
+// 是「还原」而不是「覆盖」：先把 /config 现有的内容挪进卷里的 .woc-restore-old-<时间>（同一个卷，只是改名，
+// 不多占空间），写完备份再删掉；写入失败就清掉写了一半的数据、把它挪回来。此前直接覆盖，备份里没有的文件原样
+// 留着，把用过一阵的实例回滚到旧备份时新旧数据库文件混在一起，聊天记录可能打不开。
+// 写之前先停掉实例、写完再启动（原本在运行的话）：在微信运行时覆盖它正开着的数据库容易写坏。实例停着时 exec
+// 不进去，挪文件、写备份都在一个临时辅助容器里做（--volumes-from 实例，挂的是同一个 /config）。
 // 与重启 / 升级 / 自愈共用同一把生命周期锁，恢复中途不会被别的操作把容器拉起来。
+const RESTORE_OLD_PREFIX = '.woc-restore-old-';
 export async function volRestoreArchive(
   inst: Instance,
   archivePath: string,
@@ -2463,26 +2521,33 @@ export async function volRestoreArchive(
     const c = docker.getContainer(inst.containerName);
     const state: any = await c.inspect().catch(() => null);
     if (!state) throw new Error('实例容器不存在：请先在卡片上启动一次实例，再恢复');
-    const wasRunning = !!state.State?.Running;
-    if (wasRunning) {
-      onStage('停止实例');
-      try {
-        await c.stop({ t: 10 } as any);
-      } catch (e: any) {
-        if (e?.statusCode !== 304) throw e; // 304 = 已经停了
-      }
-      appendInstanceLog(inst.id, '整卷恢复：已停止实例，开始写入备份');
-    }
-    const tar = openTarStream(archivePath, info.gzip);
+    const helper = await startRestoreHelper(inst, state.Image);
+    let wasRunning = false;
     try {
-      onStage('写入数据');
-      await putArchiveStream(inst, tar, '/');
-      appendInstanceLog(inst.id, '整卷恢复：备份已写入');
-    } catch (e) {
-      appendInstanceLog(inst.id, `整卷恢复失败：${(e as any)?.message || e}`);
-      throw friendlyWriteError(e);
+      // 旧数据要等备份写完才删，这段时间新旧两份同时在盘上。先查空间再停实例：不够就不必白停一次
+      onStage('检查空间');
+      const df = await execCaptureIn(helper, ['df', '-Pk', VOL_ROOT], '0').catch(() => '');
+      const freeKb = Number(df.trim().split('\n').pop()?.trim().split(/\s+/)[3]);
+      const need = info.bytes + 64 * 1024 ** 2; // 备份解开的大小，加一点余量
+      if (Number.isFinite(freeKb) && need > freeKb * 1024) {
+        throw Object.assign(
+          new Error(`实例数据盘空间不足：恢复时现有数据要等备份写完才删，需要约 ${fmtBytes(need)} 空闲，只剩 ${fmtBytes(freeKb * 1024)}`),
+          { statusCode: 507 },
+        );
+      }
+      if (state.State?.Running) {
+        onStage('停止实例');
+        try {
+          await c.stop({ t: 10 } as any);
+        } catch (e: any) {
+          if (e?.statusCode !== 304) throw e; // 304 = 已经停了
+        }
+        wasRunning = true;
+        appendInstanceLog(inst.id, '整卷恢复：已停止实例');
+      }
+      await restoreInHelper(inst, helper, archivePath, info, onStage);
     } finally {
-      tar.destroy();
+      await helper.remove({ force: true }).catch(() => {});
       if (wasRunning) {
         onStage('启动实例');
         await c.start().catch((e: any) => {
@@ -2491,6 +2556,169 @@ export async function volRestoreArchive(
       }
     }
   });
+}
+
+// 恢复用的辅助容器：实例自己的镜像（本地一定有），什么都不跑、不联网，只挂实例的数据卷
+async function startRestoreHelper(inst: Instance, image: string): Promise<any> {
+  const name = `woc-restore-${inst.id}`;
+  await docker.getContainer(name).remove({ force: true }).catch(() => {}); // 上次面板中途退出留下的
+  const h = await docker.createContainer({
+    name,
+    Image: image,
+    Entrypoint: ['sleep'],
+    Cmd: ['infinity'],
+    User: '0',
+    Labels: { 'woc.helper': 'restore' },
+    HostConfig: { VolumesFrom: [inst.containerName], NetworkMode: 'none' },
+  } as any);
+  try {
+    await h.start();
+  } catch (e) {
+    await h.remove({ force: true }).catch(() => {});
+    throw e;
+  }
+  return h;
+}
+
+// 在辅助容器里执行的几步（$1 = 旧数据目录名）。之前恢复中断留下的 .woc-restore-old-* 一律不碰
+const SH_MOVE_ASIDE = `set -e; cd ${VOL_ROOT}; mkdir -p -- "$1"; find . -mindepth 1 -maxdepth 1 ! -name '${RESTORE_OLD_PREFIX}*' -exec mv -t "$1" -- {} +`;
+// 把旧数据挪回 /config；$2=1 时先清掉写了一半的新数据
+const SH_MOVE_BACK = `set -e; cd ${VOL_ROOT}; [ -d "$1" ] || exit 0
+  if [ "$2" = 1 ]; then find . -mindepth 1 -maxdepth 1 ! -name '${RESTORE_OLD_PREFIX}*' -exec rm -rf -- {} +; fi
+  find "$1" -mindepth 1 -maxdepth 1 -exec mv -t . -- {} +
+  rmdir -- "$1"`;
+// 写完之后删旧数据。备份里没有设备标识（早期的备份）就沿用原来的：不然启动时会生成新的 machine-id，在微信看来像换了台设备
+const SH_FINISH = `cd ${VOL_ROOT}
+  if [ ! -e .woc-machine-id ] && [ -e "$1/.woc-machine-id" ]; then mv -- "$1/.woc-machine-id" . && echo kept; fi
+  rm -rf -- "$1"`;
+
+// 恢复进行到哪一步记在面板数据目录里。面板在恢复途中被重启（自更新、宿主重启、崩溃）时，下次启动先按它收尾，
+// 再拉起实例：挪到一半、写到一半就挪回原来的数据，写完了就把旧数据删掉。不然实例会带着半截数据被拉起来，
+// 设备标识文件也已被挪走、会被重新生成
+type RestorePhase = 'moving' | 'writing' | 'cleanup';
+const RESTORE_JOURNAL = `${dirname(process.env.PANEL_DATA || '/data/panel/accounts.json')}/restore-journal.json`;
+function readRestoreJournal(): Record<string, { old: string; phase: RestorePhase }> {
+  try {
+    return JSON.parse(readFileSync(RESTORE_JOURNAL, 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+function setRestorePhase(instId: string, entry: { old: string; phase: RestorePhase } | null): void {
+  const j = readRestoreJournal();
+  if (entry) j[instId] = entry;
+  else delete j[instId];
+  try {
+    if (!Object.keys(j).length) {
+      rmSync(RESTORE_JOURNAL, { force: true });
+      return;
+    }
+    writeFileSync(`${RESTORE_JOURNAL}.tmp`, JSON.stringify(j));
+    renameSync(`${RESTORE_JOURNAL}.tmp`, RESTORE_JOURNAL);
+  } catch {
+    /* 记不下来不影响这次恢复本身，只是中途被打断时没法自动收尾 */
+  }
+}
+
+async function restoreInHelper(
+  inst: Instance,
+  h: any,
+  archivePath: string,
+  info: { gzip: boolean; bytes: number },
+  onStage: (stage: string) => void,
+): Promise<void> {
+  const sh = (script: string, ...args: string[]) => execCaptureIn(h, ['sh', '-c', script, 'sh', ...args], '0');
+  const old = RESTORE_OLD_PREFIX + new Date().toISOString().replace(/[-:]/g, '').slice(0, 15); // .woc-restore-old-20261001T041700
+  const rollback = async (clean: boolean, cause: any): Promise<never> => {
+    const fe: any = friendlyWriteError(cause);
+    const why = fe.message;
+    onStage('恢复失败，正在挪回原来的数据');
+    try {
+      await sh(SH_MOVE_BACK, old, clean ? '1' : '0');
+    } catch (e: any) {
+      setRestorePhase(inst.id, null); // 交给人工处理，面板重启时不要再自动动它
+      appendInstanceLog(inst.id, `整卷恢复失败（${why}），原来的数据没能自动挪回，还在 /config/${old}：${e?.message || e}`);
+      throw Object.assign(new Error(`恢复失败：${why}。原来的数据没能自动挪回，还在数据卷的 ${old} 目录里，可以在「数据卷」里把里面的内容移回根目录`), {
+        statusCode: fe.statusCode,
+      });
+    }
+    setRestorePhase(inst.id, null);
+    appendInstanceLog(inst.id, `整卷恢复失败（${why}），已挪回原来的数据`);
+    throw Object.assign(new Error(`恢复失败：${why}。已还原成恢复前的数据`), { statusCode: fe.statusCode });
+  };
+
+  onStage('挪开现有数据');
+  setRestorePhase(inst.id, { old, phase: 'moving' });
+  try {
+    await sh(SH_MOVE_ASIDE, old);
+  } catch (e) {
+    await rollback(false, e); // 挪到一半：已挪走的挪回来（没有新数据要清）
+  }
+  appendInstanceLog(inst.id, `整卷恢复：原来的数据已挪到 /config/${old}，开始写入备份`);
+  onStage('写入数据');
+  setRestorePhase(inst.id, { old, phase: 'writing' });
+  const tar = openTarStream(archivePath, info.gzip);
+  try {
+    await putArchiveTo(h, tar, '/');
+  } catch (e) {
+    tar.destroy();
+    await rollback(true, e);
+  }
+  tar.destroy();
+  onStage('清理旧数据');
+  setRestorePhase(inst.id, { old, phase: 'cleanup' });
+  const kept = await sh(SH_FINISH, old).catch((e: any) => {
+    appendInstanceLog(inst.id, `整卷恢复：备份已写入，但删除旧数据 /config/${old} 失败，可以在「数据卷」里手动删除：${e?.message || e}`);
+    return null;
+  });
+  setRestorePhase(inst.id, null);
+  if (kept !== null) {
+    appendInstanceLog(inst.id, `整卷恢复：备份已写入，原来的数据已删除${kept.includes('kept') ? '（备份里没有设备标识，沿用原来的）' : ''}`);
+  }
+}
+
+// 面板启动时（此刻不可能有恢复在跑、实例还没被拉起）：清掉上次没来得及删的恢复辅助容器（不然一直占着实例的
+// 数据卷），再给被打断的恢复收尾
+export async function recoverInterruptedRestores(instances: Instance[]): Promise<void> {
+  let list: Docker.ContainerInfo[] = [];
+  try {
+    list = await docker.listContainers({ all: true, filters: { label: ['woc.helper=restore'] } });
+  } catch {
+    /* Docker 不可达：下面的收尾也做不了，留到下次启动 */
+    return;
+  }
+  for (const c of list) await docker.getContainer(c.Id).remove({ force: true }).catch(() => {});
+  for (const [id, e] of Object.entries(readRestoreJournal())) {
+    const inst = instances.find((i) => i.id === id);
+    if (!inst || !e?.old?.startsWith(RESTORE_OLD_PREFIX) || e.old.includes('/')) {
+      setRestorePhase(id, null);
+      continue;
+    }
+    const what = e.phase === 'cleanup' ? '删掉了旧数据，恢复已完成' : '挪回了恢复前的数据';
+    try {
+      const c = docker.getContainer(inst.containerName);
+      const st: any = await c.inspect();
+      if (st.State?.Running) {
+        try {
+          await c.stop({ t: 10 } as any);
+        } catch {
+          /* 已经停了 */
+        }
+      }
+      const h = await startRestoreHelper(inst, st.Image);
+      try {
+        if (e.phase === 'cleanup') await execCaptureIn(h, ['sh', '-c', SH_FINISH, 'sh', e.old], '0');
+        else await execCaptureIn(h, ['sh', '-c', SH_MOVE_BACK, 'sh', e.old, e.phase === 'writing' ? '1' : '0'], '0');
+      } finally {
+        await h.remove({ force: true }).catch(() => {});
+      }
+      appendPanelLog('WARN', `实例「${inst.name}」(id=${id}) 上次整卷恢复被面板重启打断，已${what}`);
+      appendInstanceLog(id, `整卷恢复被面板重启打断，已${what}`);
+    } catch (err: any) {
+      appendPanelLog('ERROR', `实例「${inst.name}」(id=${id}) 上次整卷恢复被面板重启打断，自动收尾失败：${err?.message || err}。恢复前的数据在它数据卷里的 ${e.old} 目录`);
+    }
+    setRestorePhase(id, null);
+  }
 }
 
 // ---------- 桌面壁纸 ----------

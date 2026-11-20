@@ -45,6 +45,7 @@ import {
   checkInstanceNetworks,
   watchInstanceNetwork,
   waitForDocker,
+  recoverInterruptedRestores,
   isFromInstanceNetwork,
   dockerProxySubnets,
   inspectSelf,
@@ -80,6 +81,7 @@ import {
   PASTE_IMAGE_PNG_MAX,
   instanceAcceptsLargePng,
   PASTE_IMAGE_PNG_TOO_BIG,
+  readClipboardImage,
   pasteTextInInstance,
   listOrphanVolumes,
   removeVolume,
@@ -1208,6 +1210,25 @@ app.post('/api/instances/:id/paste-image', async (req, reply) => {
   }
 });
 
+// 应用里复制的图片 → 本机（粘贴图片的反方向）：只读容器剪贴板、不往应用里送任何输入，故不占控制权，
+// 只读的一方也能把图片取走（与能看到桌面画面一致）。
+app.get('/api/instances/:id/clipboard-image', async (req, reply) => {
+  reply.header('Cache-Control', 'no-store');
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  try {
+    const png = await readClipboardImage(inst);
+    return reply.type('image/png').send(png);
+  } catch (e: any) {
+    const msg = String(e?.message || '');
+    return reply.code(/没有图片/.test(msg) ? 422 : 500).send({ error: msg || '读取应用剪贴板图片失败' });
+  }
+});
+
 // 本机剪贴板文字粘进应用：粘贴桥判断本机剪贴板比容器的新时走这里（在别处复制后回来直接 Ctrl+V、局域网 http 下
 // 浏览器不同步剪贴板）。与 /type 不同，贴完文字留在容器剪贴板里；长度上限按一次粘贴的合理大小给。
 app.post('/api/instances/:id/paste-text', { bodyLimit: 2 * 1024 * 1024 }, async (req, reply) => {
@@ -1746,21 +1767,48 @@ const stuckHealAt = new Map<string, number>();
 const stuckHealing = new Set<string>();
 
 async function onUpstreamHang(instId: string, what: string): Promise<void> {
-  const inst = findInstance(instId);
-  if (!inst) return;
+  if (!findInstance(instId)) return;
   const now = Date.now();
   const hangs = (upstreamHangs.get(instId) || []).filter((t) => now - t < STUCK_WINDOW_MS);
   hangs.push(now);
   upstreamHangs.set(instId, hangs);
   appendInstanceLog(instId, `[vnc] 实例 ${UPSTREAM_HANG_MS / 1000}s 未应答${what}，已断开本次请求（近 10 分钟第 ${hangs.length} 次）`);
-  if (!STUCK_HEAL || hangs.length < STUCK_HANGS || stuckHealing.has(instId) || upgradingIds.has(instId)) return;
-  if (now - (stuckHealAt.get(instId) || 0) < STUCK_HEAL_COOLDOWN_MS) return;
+  if (hangs.length < STUCK_HANGS) return;
+  if (await healStuck(instId, `桌面连接 10 分钟内 ${hangs.length} 次无应答（KasmVNC 卡死），自动重启实例（数据保留）`)) {
+    upstreamHangs.delete(instId);
+  }
+}
+
+// 桌面服务没在跑：容器和 nginx 都在，KasmVNC 却没监听，/websockify 立刻回 502。预热期里这是正常的（见上），过了预热期
+// 还接连如此，就是 Xvnc 起不来了：实测宿主断电 / Docker 被强杀后容器原样再起，残留的 X 显示锁可能让它一直起不来
+// （新镜像启动时会清，老镜像不会），noVNC 只会停在「连接中」，原来要等管理员手动重启。按卡死一样重建容器。
+const UPSTREAM_DOWN_FAILS = 4;
+const UPSTREAM_DOWN_WINDOW_MS = 3 * 60_000;
+const upstreamDowns = new Map<string, number[]>(); // 实例 id → 近期快速失败时间戳
+
+async function onUpstreamDown(instId: string, why: string): Promise<void> {
+  if (!findInstance(instId)) return;
+  const now = Date.now();
+  const fails = (upstreamDowns.get(instId) || []).filter((t) => now - t < UPSTREAM_DOWN_WINDOW_MS);
+  fails.push(now);
+  upstreamDowns.set(instId, fails);
+  if (fails.length < UPSTREAM_DOWN_FAILS) return;
+  if (await healStuck(instId, `桌面服务 3 分钟内 ${fails.length} 次连不上（${why}，KasmVNC 没在运行），自动重启实例（数据保留）`)) {
+    upstreamDowns.delete(instId);
+  }
+}
+
+// 卡死 / 起不来时沿用当前镜像重建实例。开关、冷却、预热期、升级中都在这里把关；真的开始重建返回 true。
+async function healStuck(instId: string, detail: string): Promise<boolean> {
+  const inst = findInstance(instId);
+  if (!inst || !STUCK_HEAL || stuckHealing.has(instId) || upgradingIds.has(instId)) return false;
+  const now = Date.now();
+  if (now - (stuckHealAt.get(instId) || 0) < STUCK_HEAL_COOLDOWN_MS) return false;
   const up = await instanceUptimeSec(inst);
-  if (up === null || up < STUCK_MIN_UPTIME_SEC) return; // 没在跑，或刚启动还在预热
+  if (up === null || up < STUCK_MIN_UPTIME_SEC) return false; // 没在跑，或刚启动还在预热
+  if (stuckHealing.has(instId)) return false; // 等容器信息期间另一路已经开始重建
   stuckHealing.add(instId);
   stuckHealAt.set(instId, now);
-  upstreamHangs.delete(instId);
-  const detail = `桌面连接 10 分钟内 ${hangs.length} 次无应答（KasmVNC 卡死），自动重启实例（数据保留）`;
   appendInstanceLog(instId, `[vnc] ${detail}`);
   appendPanelLog('WARN', `实例「${inst.name}」(id=${instId}) ${detail}`);
   try {
@@ -1770,6 +1818,7 @@ async function onUpstreamHang(instId: string, what: string): Promise<void> {
   } finally {
     stuckHealing.delete(instId);
   }
+  return true;
 }
 
 // 盯住一次转发到实例的请求：超时仍无任何响应 → 断开并记一次无应答。closeClient 用于 ws（让客户端别干等）。
@@ -1786,7 +1835,18 @@ function watchUpstream(proxyReq: ClientRequest, instId: string, what: string, do
   done.once('close', clear); // 客户端先走了（关页 / 自行放弃）
 }
 
+// 转发给实例前去掉浏览器带来的 Cookie：实例里的 nginx / KasmVNC 不认任何 cookie（凭据是上面注入的 Basic auth），
+// 原样转发有两个问题——
+// 1. Cookie 不按端口隔离：同一个 IP / 域名下别的服务（飞牛自己的界面、其它 NAS 应用）种的 cookie 都会发到面板来。
+//    面板（Node，请求头总长上限 16KB）收得下，实例 nginx 单个请求头上限 8KB，超了直接回
+//    「400 Request Header Or Cookie Too Large」，桌面打不开（#179 飞牛手机 App）。
+// 2. 面板的登录会话 cookie 没必要交给实例容器。
+function scrubUpstreamHeaders(proxyReq: ClientRequest) {
+  proxyReq.removeHeader('cookie');
+}
+
 proxy.on('proxyReq', (proxyReq, req, res) => {
+  scrubUpstreamHeaders(proxyReq);
   const auth = (req as any)._wocAuth;
   if (auth) proxyReq.setHeader('authorization', auth);
   // 只盯 noVNC 页面本身：它出不来 = 实例服务卡住。其余资源 / 音频长轮询不计。
@@ -1794,26 +1854,48 @@ proxy.on('proxyReq', (proxyReq, req, res) => {
   if (instId && (req.url || '').startsWith('/vnc/index.html')) watchUpstream(proxyReq, instId, '桌面页面', res);
 });
 proxy.on('proxyReqWs', (proxyReq, req, socket) => {
+  scrubUpstreamHeaders(proxyReq);
   const auth = (req as any)._wocAuth;
   if (auth) proxyReq.setHeader('authorization', auth);
   // 上游（实例 nginx → KasmVNC websockify）回 101 = ws 接收器接受了连接，桌面真正连上。
   // 卡死时这条不会出现（接收器停止 accept），即可定位"卡在面板→实例之间还是实例内部"。
   const instId = (req as any)._wocInstId;
   if (instId) {
-    proxyReq.on('upgrade', (_res, proxySocket: Socket) => {
+    // 只盯 VNC 连接本身（/websockify）；音频桥等其它 ws 不计
+    const isVnc = (req.url || '').startsWith('/websockify');
+    proxyReq.on('upgrade', (_res: IncomingMessage, proxySocket: Socket) => {
       trackActiveVncSocket(instId, req.socket as Socket);
       appendInstanceLog(instId, '[vnc] 上游已接受(101) · 桌面连接建立');
       // 客户端这侧一断，上游这侧跟着断。http-proxy 只在客户端「正常结束 / 出错」时才关上游，客户端套接字被
       // destroy（keepalive 判死、单连接接管时面板主动断开）时上游原样留着——实例里的 Xvnc 照旧当它在线：
       // 旧镜像（-AlwaysShared）上就是两条连接并存，正是要避免的泄漏 / 卡死条件
       (req.socket as Socket).once('close', () => proxySocket.destroy());
+      if (isVnc) watchGreeting(proxySocket, socket as Socket, instId);
     });
-    // 只盯 VNC 连接本身（/websockify）；音频桥等其它 ws 不计
-    if ((req.url || '').startsWith('/websockify')) {
+    if (isVnc) {
       watchUpstream(proxyReq, instId, '桌面连接（websocket 升级）', socket, () => socket.destroy());
+      proxyReq.once('response', (res: IncomingMessage) => {
+        if ((res.statusCode || 0) >= 500) void onUpstreamDown(instId, `HTTP ${res.statusCode}`);
+      });
     }
   }
 });
+
+// 升级成功后 KasmVNC 会立刻发来 RFB 版本号（健康实例几毫秒内就到）。websocket 握手由它单独的线程完成，
+// 主循环卡住时照样回 101，接着就再没有任何数据，noVNC 一直停在「连接中」——这种卡死上面的升级超时看不到，
+// 也按无应答处理（断开、计数、够数后自愈）。
+function watchGreeting(proxySocket: Socket, clientSocket: Socket, instId: string) {
+  const timer = setTimeout(() => {
+    proxySocket.destroy();
+    clientSocket.destroy();
+    void onUpstreamHang(instId, '桌面连接（升级后没有任何数据）');
+  }, UPSTREAM_HANG_MS);
+  const clear = () => clearTimeout(timer);
+  proxySocket.once('data', clear);
+  proxySocket.once('close', clear);
+  clientSocket.once('close', clear);
+}
+
 // 上游（面板→实例）套接字 TCP keepalive：客户端断网/切网（WiFi→4G、NAS 休眠）时 TCP 不会主动通知，
 // 半开死连接可挂数小时——对 KasmVNC 表现为"幽灵会话"占坑，与新连接并存是历史上 Xvnc 卡死的诱因之一。
 // 30s 探测让死连接分钟级被回收，而不是小时级。
@@ -2032,11 +2114,14 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) =>
   socket.on('close', () => appendInstanceLog(inst.id, `[vnc] 连接关闭（持续 ${Math.round((Date.now() - t0) / 1000)}s）`));
   proxy.ws(req, socket, head, { target: instanceTarget(inst) }, (err: any) => {
     appendInstanceLog(inst.id, `[vnc] 连接失败：${err?.message || err}`);
+    if (err?.code === 'ECONNREFUSED' && (req.url || '').startsWith('/websockify')) void onUpstreamDown(inst.id, '拒绝连接');
   });
 });
 
 // 下面的启动步骤都要连 Docker：socket-proxy 加固部署下代理可能比面板晚几秒就绪，先等它
 await waitForDocker();
+// 上次整卷恢复被面板重启打断的，先收尾再拉起实例
+await recoverInterruptedRestores(listInstances());
 // 版本兜底：若面板偏好的「同版本实例镜像 tag」不可达则回退 :latest（见 docker.ts）。
 // 须在实例检测/升级/启动之前解析好，否则升级指示器会因指向不存在的 tag 而恒空。
 await resolveInstanceImage().catch(() => {});
