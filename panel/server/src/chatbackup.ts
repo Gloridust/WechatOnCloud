@@ -178,7 +178,7 @@ async function packStream(inst: Instance, files: FileRec[]): Promise<NodeJS.Read
   const manifest = files.map((f) => f.p).join('\n') + '\n';
   await putTextInContainer(inst, listFile, manifest);
   const exec = await execCreate(docker.getContainer(inst.containerName), {
-    Cmd: ['tar', '-czf', '-', '-C', '/config', '--no-recursion', '-T', listFile],
+    Cmd: ['tar', '-czf', '-', '-C', '/config', '--no-recursion', '--ignore-failed-read', '-T', listFile],
     AttachStdout: true,
     AttachStderr: true,
     Tty: false,
@@ -214,11 +214,22 @@ async function packStream(inst: Instance, files: FileRec[]): Promise<NodeJS.Read
       }
     }
   });
-  raw.on('end', () => {
+  raw.on('end', async () => {
     // 清理容器里的清单文件（best-effort）
     execCapture(inst, ['rm', '-f', listFile], 'root').catch(() => undefined);
-    if (stderr.trim()) out.destroy(new Error(`打包失败：${stderr.trim().slice(0, 300)}`));
-    else out.end();
+    // 用 tar 退出码判成败，不看 stderr：--ignore-failed-read 会让冻结瞬间消失的 WAL 等瞬态文件
+    // 只产生 warning（stderr 非空）但仍成功退出。只有真正非零退出才算失败。
+    try {
+      const info = await exec.inspect();
+      if (info.ExitCode && info.ExitCode !== 0) {
+        out.destroy(new Error(`打包失败（tar 退出码 ${info.ExitCode}）：${stderr.trim().slice(0, 300) || '无错误输出'}`));
+      } else {
+        if (stderr.trim()) appendInstanceLog(inst.id, `聊天备份打包告警（已忽略）：${stderr.trim().slice(0, 300)}`);
+        out.end();
+      }
+    } catch (e) {
+      out.destroy(e as Error);
+    }
   });
   raw.on('error', (e) => out.destroy(e as Error));
   out.on('close', () => raw.destroy?.());
@@ -261,6 +272,7 @@ export async function runBackup(
   if (runtime !== 'running') throw new Error('实例未运行（备份需要 docker exec，请先启动实例）');
   onStage('冻结应用（一致快照）');
   const froze = await freezeApp(inst);
+  let pendingFile: string | null = null; // 已落盘但还没写进 chain 的包；失败时清理，避免残留 GB 级垃圾
   try {
     onStage('枚举聊天文件');
     const recs = await enumerateFiles(inst);
@@ -275,6 +287,7 @@ export async function runBackup(
     const file = `${id}.tar.gz`;
     const dest = join(dir, file);
     onStage(`打包 ${include.length} 个文件`);
+    pendingFile = dest;
     const stream = await packStream(inst, include);
     await pipeline(stream, createWriteStream(dest));
     const bytes = statSync(dest).size;
@@ -292,6 +305,7 @@ export async function runBackup(
     chain.appType = instanceAppType(inst);
     chain.entries.push(entry);
     writeChain(inst.id, chain);
+    pendingFile = null; // 已纳入 chain，归 chain 的保留策略管理
     appendInstanceLog(inst.id, `聊天备份完成：${id}（${kind}，${entry.fileCount} 文件，${(bytes / 1048576).toFixed(1)} MB）`);
 
     // 保留策略：KEEP = 额外保留的「旧轮次」条目数（默认 0 = 只保留当前轮次）。
@@ -309,6 +323,10 @@ export async function runBackup(
     }
     return { entry, skipped: false };
   } finally {
+    // 失败且包未纳入 chain 时删除半成品，避免每次失败残留 GB 级文件。
+    if (pendingFile) {
+      try { unlinkSync(pendingFile); } catch { /* 文件可能不存在 */ }
+    }
     // 无论成功失败都必须解冻应用；否则用户微信会一直卡住（这是最严重的事故）。
     onStage('恢复应用运行');
     await froze.resume().catch((e) => appendInstanceLog(inst.id, `聊天备份后恢复应用失败：${(e as any)?.message || e}`));
