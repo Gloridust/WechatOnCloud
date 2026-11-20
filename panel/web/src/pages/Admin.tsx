@@ -1574,6 +1574,151 @@ function InstanceIconEditor({ inst, onClose, onDone }: { inst: InstanceWithStatu
   );
 }
 
+// 聊天消息备份（全量 + 增量）：只备份聊天数据（微信 xwechat_files/.xwechat/machine-id/Desktop；QQ .config/QQ），
+// 不含程序本体与 core dump。备份前会短暂停止实例合并 WAL，完成后自动恢复运行。
+function ChatBackupPanel({ instId, disabled }: { instId: string; disabled: boolean }) {
+  const { toast, confirm } = useUI();
+  const [chain, setChain] = useState<import('../api').ChatChain | null>(null);
+  const [loadErr, setLoadErr] = useState('');
+  const [busy, setBusy] = useState('');
+
+  const load = async () => {
+    try {
+      setChain(await api.chatBackupList(instId));
+      setLoadErr('');
+    } catch (e: any) {
+      setLoadErr(e?.message || '读取备份列表失败');
+    }
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [instId]);
+
+  // 轮询后台任务进度
+  const waitJob = async (job: string): Promise<any> => {
+    for (let i = 0; i < 900; i++) {
+      const r = await api.chatBackupJob(instId, job);
+      if (r.state === 'done') return r.result;
+      if (r.state === 'error') throw new Error(r.error || '任务失败');
+      if (r.stage) setBusy(`${r.stage}…`);
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+    throw new Error('任务超时，请在备份列表查看结果');
+  };
+
+  const runBackup = async (mode: 'full' | 'inc') => {
+    if (mode === 'inc' && chain && chain.entries.length === 0) {
+      toast('请先执行一次全量备份', 'error');
+      return;
+    }
+    const ok = await confirm({
+      title: mode === 'full' ? '执行全量聊天备份？' : '执行增量聊天备份？',
+      body: '备份期间会短暂冻结应用（约几秒，暂停写入以保证聊天库快照一致），随后自动恢复，桌面不重启。产物保存在 NAS 面板数据目录，可随时下载。',
+      confirmText: mode === 'full' ? '开始全量备份' : '开始增量备份',
+    });
+    if (!ok) return;
+    setBusy(mode === 'full' ? '准备全量备份…' : '准备增量备份…');
+    try {
+      const { job } = await api.chatBackupRun(instId, mode);
+      await waitJob(job);
+      toast(mode === 'full' ? '全量备份完成' : '增量备份完成', 'ok');
+      await load();
+    } catch (e: any) {
+      toast(e?.message || '备份失败', 'error');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const doRestore = async (e: import('../api').ChatBackupEntry) => {
+    const ok = await confirm({
+      title: '恢复到此备份？',
+      body: `将恢复到 ${fmtDate(e.createdAt)} 的${e.kind === 'full' ? '全量' : '增量'}备份${
+        e.kind === 'inc' ? '（会从其全量基线依次回放增量）' : ''
+      }。当前聊天数据会被覆盖，不可撤销；恢复期间实例会停止后自动启动。`,
+      danger: true,
+      confirmText: '覆盖恢复',
+    });
+    if (!ok) return;
+    setBusy('恢复中…');
+    try {
+      const { job } = await api.chatBackupRestore(instId, e.id);
+      await waitJob(job);
+      toast('恢复完成，实例已重新启动', 'ok');
+    } catch (err: any) {
+      toast(err?.message || '恢复失败', 'error');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const doDelete = async (e: import('../api').ChatBackupEntry) => {
+    const ok = await confirm({
+      title: '删除此备份？',
+      body: `删除 ${fmtDate(e.createdAt)} 的备份文件。注意：若其它增量依赖它作为基线，那些增量将无法单独恢复。`,
+      danger: true,
+      confirmText: '删除',
+    });
+    if (!ok) return;
+    setBusy('删除中…');
+    try {
+      await api.chatBackupDelete(instId, e.id);
+      toast('已删除', 'ok');
+      await load();
+    } catch (err: any) {
+      toast(err?.message || '删除失败', 'error');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const entries = chain?.entries || [];
+  const offline = disabled || !!busy;
+
+  return (
+    <div className="vol-sec">
+      <div className="vol-section-label">聊天消息备份（全量 / 增量）</div>
+      <div className="vol-topbar">
+        <button className="btn" disabled={offline} onClick={() => runBackup('full')}>全量备份</button>
+        <button className="btn" disabled={offline || entries.length === 0} onClick={() => runBackup('inc')}>增量备份</button>
+        <button className="btn" disabled={!!busy} onClick={load}>刷新列表</button>
+      </div>
+      <div className="vol-hint">
+        只备份聊天数据（聊天库 / 资源 / 收到的文件 / 解密机器 ID），不含程序本体。库为加密格式，需在原 WOC 环境恢复才可解密阅读。
+      </div>
+      {busy && <div className="vol-busy">{busy}</div>}
+      {loadErr && <div className="vol-warn">{loadErr}</div>}
+      {entries.length > 0 && (
+        <ul className="entry-table no-av" aria-label="聊天备份列表">
+          {[...entries].reverse().map((e) => (
+            <li key={e.id} className="entry">
+              <div className="entry-main">
+                <div className="entry-body">
+                  <span className="entry-name mono">
+                    <span className={`chatbk-tag ${e.kind}`}>{e.kind === 'full' ? '全量' : '增量'}</span>
+                    {fmtDate(e.createdAt)}
+                  </span>
+                  <div className="entry-meta">
+                    <span>{fmtBytes(e.bytes)}</span>
+                    <span>{e.fileCount} 个文件</span>
+                  </div>
+                </div>
+              </div>
+              <div className="entry-state">
+                <span className={`tag ${e.kind === 'full' ? 'tag-busy' : 'tag-muted'}`}>{e.kind === 'full' ? '基线' : `基于 ${e.base?.slice(0, 13) || '—'}`}</span>
+              </div>
+              <div className="entry-act">
+                <a className="btn entry-btn" href={api.chatBackupDownloadUrl(instId, e.id)} target="_blank" rel="noreferrer">下载</a>
+                <button className="btn entry-btn" disabled={offline} onClick={() => doRestore(e)}>恢复</button>
+                <button className="btn entry-btn chatbk-del" disabled={offline} onClick={() => doDelete(e)}>删除</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {!loadErr && entries.length === 0 && <div className="vol-hint">暂无备份。先执行一次全量备份。</div>}
+    </div>
+  );
+}
+
 // 数据卷管理（仅管理员）：整卷备份/恢复 + 文件浏览器（浏览/上传/解压/下载/改名/移动/删除）。
 // 主要场景：把 PC 微信数据迁移上来、跨实例迁移、离线备份。文件浏览在「运行中」的实例上操作
 // （浏览/改名/删除靠 docker exec，需容器运行）。整卷恢复会覆盖数据，强提示；服务端校验通过后自动停止→写入→启动实例。
@@ -1720,6 +1865,8 @@ function VolumeManager({ inst, onClose, onChanged }: { inst: InstanceWithStatus;
           </div>
           <div className="vol-hint">整卷含聊天记录，用于跨实例迁移 / 离线备份。</div>
         </div>
+
+        <ChatBackupPanel instId={inst.id} disabled={disabled} />
 
         {busy && <div className="vol-busy">{busy}</div>}
 

@@ -101,6 +101,22 @@ export interface VolEntry {
   mtime: number; // epoch ms
 }
 
+export interface ChatBackupEntry {
+  id: string;
+  kind: 'full' | 'inc';
+  file: string;
+  createdAt: number;
+  bytes: number;
+  fileCount: number;
+  base?: string;
+  removed?: string[];
+}
+export interface ChatChain {
+  version: number;
+  appType: string;
+  entries: ChatBackupEntry[];
+}
+
 export interface VersionInfo {
   current: string; // 当前构建版本（如 v1.2.0 / dev-<sha>）
   latest: string | null; // 仓库上最新发布版（如 v1.2.1）；查不到为 null
@@ -439,6 +455,21 @@ export const api = {
   volumeDownloadUrl: (id: string, path: string) =>
     `/api/admin/instances/${id}/volume/download?path=${encodeURIComponent(path)}`,
   volumeBackupUrl: (id: string) => `/api/admin/instances/${id}/volume/backup`,
+
+  // 聊天消息备份（全量 + 增量，仅管理员）
+  chatBackupList: (id: string) => req<ChatChain>(`/api/admin/instances/${id}/chat-backup`),
+  chatBackupRun: (id: string, mode: 'full' | 'inc') =>
+    req<{ ok: boolean; job: string }>(`/api/admin/instances/${id}/chat-backup`, { method: 'POST', body: JSON.stringify({ mode }) }),
+  chatBackupRestore: (id: string, entryId: string) =>
+    req<{ ok: boolean; job: string }>(`/api/admin/instances/${id}/chat-backup/${encodeURIComponent(entryId)}/restore`, { method: 'POST' }),
+  chatBackupDelete: (id: string, entryId: string) =>
+    req(`/api/admin/instances/${id}/chat-backup/${encodeURIComponent(entryId)}`, { method: 'DELETE' }),
+  chatBackupDownloadUrl: (id: string, entryId: string) =>
+    `/api/admin/instances/${id}/chat-backup/${encodeURIComponent(entryId)}/download`,
+  chatBackupJob: (id: string, job: string) =>
+    req<{ state: 'running' | 'done' | 'error'; stage: string; error: string | null; result: any }>(
+      `/api/admin/instances/${id}/chat-backup/jobs/${encodeURIComponent(job)}`,
+    ),
   volumeUpload: async (id: string, path: string, file: File, onProgress?: UploadProgress) => {
     assertUploadSize(file, UPLOAD_LIMITS.volumeFile);
     return rawUpload(

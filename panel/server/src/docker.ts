@@ -1348,7 +1348,7 @@ async function probeManifest(ref: { registry: string; repo: string; tag: string 
 // 创建 exec 实例。容器 init 未完成时，linuxserver 基镜像的 'abc' 用户可能还没建好，docker 会以
 // 400「unable to find user abc: no matching entries in passwd file」直接拒绝创建 exec（见 issue #74）。
 // 对这种"用户未就绪"错误短暂重试，给容器 init 一点时间；超时则抛清晰的中文错误，而非透传难懂的 docker 400。
-async function execCreate(c: any, opts: any): Promise<any> {
+export async function execCreate(c: any, opts: any): Promise<any> {
   let lastErr: any;
   for (let i = 0; i < 8; i++) {
     try {
@@ -1364,7 +1364,7 @@ async function execCreate(c: any, opts: any): Promise<any> {
 }
 
 // 在实例容器内执行命令，返回 stdout；若命令失败，把 stderr 透出给调用方。
-async function execCapture(inst: Instance, cmd: string[], user = 'abc'): Promise<string> {
+export async function execCapture(inst: Instance, cmd: string[], user = 'abc'): Promise<string> {
   const c = docker.getContainer(inst.containerName);
   const exec = await execCreate(c, { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: user });
   const stream = await exec.start({ hijack: true, stdin: false });
@@ -1858,7 +1858,7 @@ function safeMediaName(name: string): boolean {
 const UPLOAD_TMP_DIR = '/config/.woc-upload';
 
 // putArchive 的响应体是空的，读掉以释放连接
-async function putArchiveStream(inst: Instance, tar: NodeJS.ReadableStream, path: string): Promise<void> {
+export async function putArchiveStream(inst: Instance, tar: NodeJS.ReadableStream, path: string): Promise<void> {
   const res: any = await docker.getContainer(inst.containerName).putArchive(tar, { path });
   if (res && typeof res.resume === 'function') res.resume();
 }

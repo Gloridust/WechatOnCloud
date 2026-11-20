@@ -3390,3 +3390,28 @@ select.input {
     animation-iteration-count: infinite !important;
   }
 }
+
+/* ---------- 聊天消息备份 ---------- */
+.chatbk-tag {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 8px;
+  border-radius: var(--r-pill, 999px);
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.chatbk-tag.full {
+  background: rgba(51 102 204 / 0.18);
+  color: var(--info, #4a86e8);
+}
+.chatbk-tag.inc {
+  background: rgba(128 138 157 / 0.14);
+  color: var(--muted, #6b7280);
+}
+.btn.entry-btn.chatbk-del {
+  color: var(--danger, #d64545);
+}
+.btn.entry-btn.chatbk-del:hover:not(:disabled) {
+  background: var(--danger-tint, rgba(214 69 69 / 0.12));
+}

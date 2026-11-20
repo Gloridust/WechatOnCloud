@@ -59,6 +59,10 @@ services:
       - PANEL_ALLOWED_HOSTS=${PANEL_ALLOWED_HOSTS:-}
       # 反代不在本机（比如路由器、另一台机器上的 nginx）时，把它的地址填进来，登录限速才按真实来源计数（见 .env.example）
       - WOC_TRUSTED_PROXIES=${WOC_TRUSTED_PROXIES:-}
+      # 聊天消息自动备份（默认关闭；详见 doc/聊天消息备份使用说明.md）。手动备份无需这些变量。
+      - WOC_CHAT_BACKUP_AUTO=${WOC_CHAT_BACKUP_AUTO:-}
+      - WOC_CHAT_BACKUP_CRON_MIN=${WOC_CHAT_BACKUP_CRON_MIN:-360}
+      - WOC_CHAT_BACKUP_KEEP=${WOC_CHAT_BACKUP_KEEP:-0}
 
     volumes:
       # 面板账号数据（用户、实例元信息、密码哈希）

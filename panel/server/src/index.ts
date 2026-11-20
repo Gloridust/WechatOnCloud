@@ -5,6 +5,7 @@ import httpProxy from 'http-proxy';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { BlockList, isIP } from 'node:net';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
@@ -123,6 +124,15 @@ import {
   isLoopbackHost,
 } from './host-guard.js';
 import { CURRENT_VERSION, versionInfo, ensureChecked, checkForUpdate, startUpdateChecker } from './version.js';
+import {
+  runBackup,
+  listBackups,
+  backupFilePath,
+  deleteBackup,
+  restoreBackup,
+  startChatBackupScheduler,
+  type BackupKind,
+} from './chatbackup.js';
 import { triggerSelfUpdate } from './self-update.js';
 import { GiB, MiB, readBody, receiveFile, spoolUpload, cleanSpoolDir, type Spooled } from './upload.js';
 import { appendInstanceLog, readInstanceLog, appendPanelLog, readPanelLog, pruneOldLogs, filterSince, rangeToMs, DIAG_RANGES } from './logs.js';
@@ -1559,6 +1569,100 @@ app.post('/api/admin/instances/:id/volume/restore', async (req, reply) => {
   return { ok: true, job: job.id };
 });
 
+// ---------- 聊天消息备份（全量 + 增量，仅管理员） ----------
+// 备份含完整聊天数据（等同凭据），所有端点 requireAdmin。产物落面板 data-panel 卷，不占实例数据卷。
+interface ChatJob {
+  id: string;
+  instId: string;
+  kind: 'backup' | 'restore';
+  state: 'running' | 'done' | 'error';
+  stage: string;
+  error?: string;
+  result?: any;
+  endedAt?: number;
+}
+const chatJobs = new Map<string, ChatJob>();
+const chatBusy = new Set<string>();
+function startChatJob(
+  instId: string,
+  kind: ChatJob['kind'],
+  work: (stage: (s: string) => void) => Promise<any>,
+): ChatJob {
+  const now = Date.now();
+  for (const [k, j] of chatJobs) if (j.endedAt && now - j.endedAt > 60 * 60 * 1000) chatJobs.delete(k);
+  const job: ChatJob = { id: randomUUID(), instId, kind, state: 'running', stage: '准备中' };
+  chatJobs.set(job.id, job);
+  work((s) => { job.stage = s; })
+    .then(
+      (r) => { job.state = 'done'; job.result = r ?? null; },
+      (e: any) => { job.state = 'error'; job.error = e?.message || String(e); },
+    )
+    .finally(() => { job.endedAt = Date.now(); chatBusy.delete(instId); });
+  return job;
+}
+
+app.get('/api/admin/instances/:id/chat-backup/jobs/:job', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const job = chatJobs.get((req.params as any).job);
+  if (!job || job.instId !== (req.params as any).id) return reply.code(404).send({ error: '任务不存在（面板可能重启过）' });
+  return { state: job.state, stage: job.stage, error: job.error || null, result: job.result ?? null };
+});
+
+// 列出备份链
+app.get('/api/admin/instances/:id/chat-backup', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  if (!findInstance((req.params as any).id)) return reply.code(404).send({ error: '实例不存在' });
+  return listBackups((req.params as any).id);
+});
+
+// 触发备份：body { mode: 'full' | 'inc' }
+app.post('/api/admin/instances/:id/chat-backup', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  if (chatBusy.has(inst.id)) return reply.code(409).send({ error: '该实例还有一个备份/恢复在进行，请等它完成' });
+  const body = (req.body as any) || {};
+  const mode: BackupKind = body.mode === 'full' ? 'full' : 'inc';
+  chatBusy.add(inst.id);
+  const job = startChatJob(inst.id, 'backup', (stage) => runBackup(inst, mode, stage));
+  appendPanelLog('INFO', `实例「${inst.name}」(id=${inst.id}) 触发${mode === 'full' ? '全量' : '增量'}聊天备份`);
+  return { ok: true, job: job.id };
+});
+
+// 下载某个备份包
+app.get('/api/admin/instances/:id/chat-backup/:entryId/download', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const p = backupFilePath((req.params as any).id, (req.params as any).entryId);
+  if (!p) return reply.code(404).send({ error: '备份文件不存在' });
+  const name = `${(req.params as any).entryId}.tar.gz`;
+  reply.header('content-type', 'application/gzip');
+  reply.header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+  const stream = createReadStream(p);
+  stream.on('error', () => { /* 客户端断开或文件被删；不需要额外处理 */ });
+  return reply.send(stream);
+});
+
+// 删除某个备份
+app.delete('/api/admin/instances/:id/chat-backup/:entryId', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const ok = deleteBackup((req.params as any).id, (req.params as any).entryId);
+  if (!ok) return reply.code(404).send({ error: '备份记录不存在' });
+  return { ok: true };
+});
+
+// 恢复到某个备份（后台任务，停/启实例）
+app.post('/api/admin/instances/:id/chat-backup/:entryId/restore', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  if (chatBusy.has(inst.id)) return reply.code(409).send({ error: '该实例还有一个备份/恢复在进行，请等它完成' });
+  chatBusy.add(inst.id);
+  const entryId = (req.params as any).entryId;
+  const job = startChatJob(inst.id, 'restore', (stage) => restoreBackup(inst, entryId, stage));
+  appendPanelLog('WARN', `实例「${inst.name}」(id=${inst.id}) 触发聊天备份恢复 → ${entryId}`);
+  return { ok: true, job: job.id };
+});
+
 // 该实例的微信安装状态（有访问权限即可看）
 app.get('/api/instances/:id/wechat/status', async (req, reply) => {
   const u = requireAuth(req, reply);
@@ -2227,6 +2331,8 @@ await app.listen({ port: PORT, host: HOST });
 console.log(`[panel] 监听 http://${HOST}:${PORT}  （多实例反代已就绪）· 版本 ${CURRENT_VERSION}`);
 appendPanelLog('INFO', `面板启动 · 版本 ${CURRENT_VERSION} · 监听 ${HOST}:${PORT}`);
 startUpdateChecker(); // 后台检测新版（best-effort，失败静默）
+// 聊天备份自动增量调度（默认关闭；WOC_CHAT_BACKUP_AUTO=1 启用）
+startChatBackupScheduler(listInstances, (s) => appendPanelLog('INFO', s));
 // 日志保留期清理：启动后跑一次 + 每 24h 一次，删除超过一年的日志行（unref 不阻止退出）。
 pruneOldLogs();
 setInterval(() => pruneOldLogs(), 24 * 60 * 60 * 1000).unref();
