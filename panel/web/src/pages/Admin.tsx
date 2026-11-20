@@ -82,7 +82,7 @@ function EmptyState({ icon, title, sub, action }: { icon: JSX.Element; title: st
   );
 }
 
-const RELEASES_URL = 'https://github.com/Gloridust/WechatOnCloud/releases';
+const RELEASES_URL = 'https://github.com/zsunny6658/WechatOnCloud/releases';
 
 const DIAG_RANGE_OPTIONS = [
   { key: '24h', label: '24 小时' },

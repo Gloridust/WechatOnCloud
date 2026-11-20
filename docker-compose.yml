@@ -14,6 +14,9 @@ services:
       - PORT=8080
       # 新建微信实例时使用的镜像（多架构，amd64/arm64 自动匹配）；前缀同样跟随 WOC_IMAGE_PREFIX。
       - WOC_WECHAT_IMAGE=${WOC_IMAGE_PREFIX:-docker.io/gloridust}/wechat-on-cloud:${WOC_VERSION:-latest}
+      # 版本检查源：auto=按镜像所在 registry 就近选（默认）；ghcr/dockerhub=只查指定源。
+      # 定制版指向自有 GHCR 时设 ghcr，避免官方 Docker Hub 新版本混进来误报"有新版"。
+      - WOC_VERSION_SOURCE=${WOC_VERSION_SOURCE:-auto}
       # 透传给每个微信实例容器（KasmVNC 基础镜像用它们降权运行）
       - PUID=${WOC_PUID:-1000}
       - PGID=${WOC_PGID:-1000}

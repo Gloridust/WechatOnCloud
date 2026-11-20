@@ -15,14 +15,21 @@ export interface VersionInfo {
   error: string | null; // 检查失败原因（两个源都拉不到时）
 }
 
-// 镜像命名空间：从 WOC_WECHAT_IMAGE 推断（面板与实例镜像同账号）。
-// 例 docker.io/gloridust/wechat-on-cloud:latest → gloridust；ghcr.io/gloridust/... 同理。
-function imageOwner(): string {
+// 镜像命名空间与 registry：从 WOC_WECHAT_IMAGE 推断（面板与实例镜像同账号、同源）。
+// 例 docker.io/gloridust/wechat-on-cloud:latest → { owner: gloridust, registry: docker.io }
+//     ghcr.io/zsunny6658/wechat-on-cloud:1.6.1 → { owner: zsunny6658, registry: ghcr.io }
+// 定制版把 WOC_IMAGE_PREFIX 指向自有 GHCR 后，版本检查只查自有源，不会被官方新版本误报。
+function imageRef(): { owner: string; registry: string } {
   const img = (process.env.WOC_WECHAT_IMAGE || 'docker.io/gloridust/wechat-on-cloud').split('@')[0];
   const segs = img.split('/'); // [registry?, owner, image[:tag]]
-  return segs.length >= 2 ? segs[segs.length - 2] : 'gloridust';
+  if (segs.length >= 3) return { registry: segs[0].toLowerCase(), owner: segs[segs.length - 2] };
+  return { registry: 'docker.io', owner: segs.length >= 2 ? segs[0] : 'gloridust' };
 }
 const PANEL_REPO = process.env.WOC_PANEL_REPO || 'woc-panel';
+// 版本检查源策略：
+//   auto（默认）—— 兼容上游行为，Docker Hub + GHCR 两源合并取最大。
+//   ghcr / dockerhub —— 只查指定源。定制版设 ghcr，杜绝官方 Docker Hub 版本混入。
+const VERSION_SOURCE = (process.env.WOC_VERSION_SOURCE || 'auto').trim().toLowerCase();
 
 function parseSemver(s: string): [number, number, number] | null {
   const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(s.trim());
@@ -79,16 +86,24 @@ export function versionInfo(): VersionInfo {
 export function checkForUpdate(): Promise<VersionInfo> {
   if (inflight) return inflight; // 合并并发请求，避免重复外呼
   inflight = (async () => {
-    const owner = imageOwner();
+    const { owner, registry } = imageRef();
+    // 选源：显式策略优先；否则按镜像所在 registry 就近选（ghcr.io→只查 GHCR，其余→只查 Docker Hub）。
+    // 这样定制版指向自有 GHCR 后，即使官方 Docker Hub 发了更高版本也不会被误报为"有新版"。
+    const hubEnabled = VERSION_SOURCE === 'auto' ? registry !== 'ghcr.io' : VERSION_SOURCE === 'dockerhub';
+    const ghcrEnabled = VERSION_SOURCE === 'auto' ? registry === 'ghcr.io' : VERSION_SOURCE === 'ghcr';
     const sources: string[] = [];
     const tags: string[] = [];
-    const [hub, ghcr] = await Promise.allSettled([dockerHubTags(owner), ghcrTags(owner)]);
-    if (hub.status === 'fulfilled' && hub.value.length) {
-      tags.push(...hub.value);
+    const jobs: Array<Promise<string[]>> = [];
+    if (hubEnabled) jobs.push(dockerHubTags(owner));
+    if (ghcrEnabled) jobs.push(ghcrTags(owner));
+    const results = await Promise.allSettled(jobs);
+    if (hubEnabled && results[0]?.status === 'fulfilled' && results[0].value.length) {
+      tags.push(...results[0].value);
       sources.push('dockerhub');
     }
-    if (ghcr.status === 'fulfilled' && ghcr.value.length) {
-      tags.push(...ghcr.value);
+    const ghcrIdx = hubEnabled ? 1 : 0;
+    if (ghcrEnabled && results[ghcrIdx]?.status === 'fulfilled' && results[ghcrIdx].value.length) {
+      tags.push(...results[ghcrIdx].value);
       sources.push('ghcr');
     }
     const latestBare = maxSemver(tags);
@@ -103,7 +118,7 @@ export function checkForUpdate(): Promise<VersionInfo> {
       isDev: IS_DEV,
       checkedAt: Date.now(),
       source: sources.join('+') || null,
-      error: tags.length ? null : '无法连接镜像仓库（Docker Hub / GHCR）',
+      error: tags.length ? null : `无法连接镜像仓库（${sources.length ? sources.join('+') : 'Docker Hub / GHCR'}）`,
     };
     return cache;
   })().finally(() => {
