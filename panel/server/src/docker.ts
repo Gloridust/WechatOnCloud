@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { appendInstanceLog, deleteInstanceLog, appendPanelLog, readInstanceLog, readPanelLog, filterSince } from './logs.js';
 import http from 'node:http';
 import { PassThrough } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 import zlib from 'node:zlib';
 import { randomBytes } from 'node:crypto';
 import Docker from 'dockerode';
@@ -1369,13 +1370,19 @@ export async function execCapture(inst: Instance, cmd: string[], user = 'abc'): 
   const exec = await execCreate(c, { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: user });
   const stream = await exec.start({ hijack: true, stdin: false });
   return await new Promise<string>((resolve, reject) => {
+    // 用 StringDecoder 累积：多字节 UTF-8 字符（中文文件名等）可能被 docker 流切成跨 chunk 的两半，
+    // 直接 b.toString('utf8') 会把每半截各自解成 U+FFFD，污染路径 → 备份清单里文件名损坏。
+    const outDec = new StringDecoder('utf8');
+    const errDec = new StringDecoder('utf8');
     let out = '';
     let err = '';
-    const stdout = { write: (b: Buffer) => { out += b.toString('utf8'); } } as any;
-    const stderr = { write: (b: Buffer) => { err += b.toString('utf8'); } } as any;
+    const stdout = { write: (b: Buffer) => { out += outDec.write(b); } } as any;
+    const stderr = { write: (b: Buffer) => { err += errDec.write(b); } } as any;
     docker.modem.demuxStream(stream, stdout, stderr);
     stream.on('end', async () => {
       try {
+        out += outDec.end();
+        err += errDec.end();
         const info = await exec.inspect();
         if (info.ExitCode && info.ExitCode !== 0) {
           reject(new Error((err || out || `命令执行失败，退出码 ${info.ExitCode}`).trim()));

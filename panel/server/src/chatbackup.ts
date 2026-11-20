@@ -178,7 +178,7 @@ async function packStream(inst: Instance, files: FileRec[]): Promise<NodeJS.Read
   const manifest = files.map((f) => f.p).join('\n') + '\n';
   await putTextInContainer(inst, listFile, manifest);
   const exec = await execCreate(docker.getContainer(inst.containerName), {
-    Cmd: ['tar', '-czf', '-', '-C', '/config', '-T', listFile, '--no-recursion'],
+    Cmd: ['tar', '-czf', '-', '-C', '/config', '--no-recursion', '-T', listFile],
     AttachStdout: true,
     AttachStderr: true,
     Tty: false,
