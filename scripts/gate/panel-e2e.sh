@@ -27,12 +27,13 @@ api() { curl -s -b "$JAR" -H 'content-type: application/json' "$@"; }       # �
 act() { curl -s -b "$JAR" -o /dev/null -w '%{http_code}' "$@"; }            # 不带请求体（带 JSON 头会被 Fastify 400）
 
 cleanup() {
+  # 先经接口删（顺带清 WOC_DATA_ROOT 的宿主目录），再停掉面板（它可能还在后台建实例），最后强制清残留
+  for id in "${IDS[@]}"; do act -X DELETE "$U/api/admin/instances/$id?purge=1" >/dev/null 2>&1 || true; done
+  docker container rm -f "$NAME" >/dev/null 2>&1 || true
   for id in "${IDS[@]}"; do
-    act -X DELETE "$U/api/admin/instances/$id?purge=1" >/dev/null 2>&1 || true
     docker container rm -f "woc-wx-$id" >/dev/null 2>&1 || true
     docker volume rm "woc-data-$id" >/dev/null 2>&1 || true
   done
-  docker container rm -f "$NAME" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   rm -rf "$WORK" 2>/dev/null || true
 }
@@ -53,11 +54,8 @@ start_panel() { # start_panel [额外 -e 参数...]
     "$U/api/auth/login" | grep -q '"username":"admin"'
 }
 
-create_instance() { # create_instance <名字> → 打印实例 id
-  local id
-  id=$(api -d "{\"name\":\"$1\",\"appType\":\"chromium\"}" "$U/api/admin/instances" | sed -n 's/.*"instance":{"id":"\([0-9a-f]*\)".*/\1/p')
-  [ -n "$id" ] && IDS+=("$id")
-  echo "$id"
+create_instance() { # create_instance <名字> → 打印实例 id（在 $(...) 里调用，登记进 IDS 由调用方做）
+  api -d "{\"name\":\"$1\",\"appType\":\"chromium\"}" "$U/api/admin/instances" | sed -n 's/.*"instance":{"id":"\([0-9a-f]*\)".*/\1/p'
 }
 
 wait_running() { # wait_running <id> <秒>
@@ -77,6 +75,7 @@ echo "面板端到端：面板 $PANEL_IMG · 实例 $INST_IMG"
 if start_panel; then note "面板启动并登录"; else bad "面板没起来或登录失败"; docker logs "$NAME" 2>&1 | tail -30; exit 1; fi
 
 ID=$(create_instance e2e)
+[ -n "$ID" ] && IDS+=("$ID")
 if [ -n "$ID" ] && wait_running "$ID" 120; then note "新建 Chromium 实例 $ID 并运行"; else
   bad "新建实例失败"; api "$U/api/instances" | head -c 600; echo; exit 1
 fi
@@ -126,16 +125,35 @@ sleep 1
 curl -s -b "$JAR" -o "$WORK/got.png" "$U/api/instances/$ID/clipboard-image"
 cmp -s "$WORK/t.png" "$WORK/got.png" && note "取回的图片与原图逐字节一致" || bad "取回的图片与原图不一致"
 
-# --- 重启实例：旧容器里的应用正常退出，而不是被 SIGKILL ---
+# --- 重启实例：旧容器里的应用正常退出，而不是被 SIGKILL 或随 Xvnc 消失而崩溃 ---
+# 应用退出得快时，「先停 Xvnc 再等应用」这种错也可能碰巧不出事。为了让检查是确定的：发重启前先冻结 Chromium，
+# 等面板写下上一容器的日志快照（紧接着就停容器）后再过 1.5 秒才放开，模拟它退出得慢。正确的实现会等它退完
+# 再停 Xvnc；错误的实现在它醒来前就把显示停掉了，必然崩溃。
 for _ in $(seq 1 60); do docker exec "$C" test -f /config/chromium/Default/Preferences 2>/dev/null && break; sleep 1; done
 sleep 5
+LOG="$WORK/data/logs/$ID.log"
+snaps() { grep -c '保留上一容器最后日志' "$LOG" 2>/dev/null || true; }
+n0=$(snaps)
+CPID=$(docker exec "$C" pgrep -o -x chromium)
+docker exec "$C" kill -STOP "$CPID"
 act -X POST "$U/api/admin/instances/$ID/restart" > "$WORK/restart.code" &
+RSPID=$!
+froze=0
+for _ in $(seq 1 300); do # 最多 30 秒：等面板开始重建
+  if [ "$(snaps)" != "$n0" ]; then froze=1; break; fi
+  sleep 0.1
+done
+sleep 1.5
+docker exec "$C" kill -CONT "$CPID" 2>/dev/null
+[ "$froze" = 1 ] && note "停容器时 Chromium 处于冻结（模拟退出慢）" || bad "没等到面板开始重建，重启检查不可信"
 seen=""
 t0=$(date +%s)
 while [ $(( $(date +%s) - t0 )) -lt 30 ]; do
   v=$(prefs_exit_type "$ID")
   case " $seen " in *" $v "*) ;; *) seen="$seen $v" ;; esac
   case "$v" in Normal|SessionEnded) break ;; esac
+  # 重启接口已返回（新容器已启动，新 Chromium 还要几秒才起来）：这一次读到的仍是旧进程留下的状态，可以停了
+  kill -0 "$RSPID" 2>/dev/null || break
 done
 wait
 code=$(cat "$WORK/restart.code")
@@ -155,6 +173,7 @@ else note "删除实例后容器和数据卷都已清掉"; fi
 # --- WOC_DATA_ROOT 填错：新建实例明确失败，而不是悄悄改用 Docker 卷（#133） ---
 start_panel -e WOC_DATA_ROOT=E:/e2e-not-docker-desktop || bad "带 WOC_DATA_ROOT 的面板没起来"
 ID2=$(create_instance e2e-dataroot)
+[ -n "$ID2" ] && IDS+=("$ID2")
 prov=""
 for _ in $(seq 1 30); do
   prov=$(api "$U/api/instances" | grep -o '"provision":{[^}]*}' | head -1)
