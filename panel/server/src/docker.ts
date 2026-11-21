@@ -607,7 +607,8 @@ function provisionError(stage: ProvisionStage, e: any, image = WECHAT_IMAGE): Pr
       advice = pullTips;
     }
   } else if (stage === 'volume') {
-    advice = `检查 .env 里 WOC_DATA_ROOT 指向的宿主目录是否存在、可写，改正后 docker compose up -d 重建面板，${retry}。`;
+    if (/^WOC_DATA_ROOT=/.test(raw)) reason = raw;
+    advice = `改正 .env（或 NAS 的 Compose 环境变量）里的 WOC_DATA_ROOT，不需要自定义目录就留空；改完 docker compose up -d 重建面板，${retry}。${DATA_ROOT_HINT}。`;
   } else if (/minimum memory limit/.test(m)) {
     reason = 'WOC_INSTANCE_MEM_GB 设得太小';
     advice = `把 .env 里的 WOC_INSTANCE_MEM_GB 调大（建议 3~4）或留空，docker compose up -d 重建面板后点「重试创建」。`;
@@ -647,25 +648,76 @@ function parseDataRoot(raw: string | undefined): string {
   const v = (raw || '').trim().replace(/\/+$/, '');
   if (!v) return '';
   // 只接受干净的绝对路径：会被拼进辅助容器的 shell 命令与卷的 device 参数
-  if (!/^\/[A-Za-z0-9._\-\/]+$/.test(v) || v.split('/').includes('..')) {
-    console.error(`[data-root] 忽略非法的 WOC_DATA_ROOT：${v}（需为不含空格与 .. 的宿主绝对路径）`);
-    return '';
-  }
+  if (!/^\/[A-Za-z0-9._\-\/]+$/.test(v) || v.split('/').includes('..')) return '';
   return v;
 }
-const DATA_ROOT = parseDataRoot(process.env.WOC_DATA_ROOT);
+
+// 用户填的 WOC_DATA_ROOT 不能用时，以前只在面板 stdout 打一行就忽略、新实例照旧落在 Docker 卷里——
+// 用户看到的是「设置了，宿主目录却一直是空的」，日志里也找不到原因（#133：Windows Docker Desktop 填 E:/wechatkevin）。
+// 现在：填了但用不了 → 新建实例在「准备数据目录」一步失败，卡片上写明原因和怎么改；已有实例不受影响。
+//
+// Windows（Docker Desktop）：compose 里写 E:/xxx 能用，是因为 Docker Desktop 的 CLI / API 会把绑定挂载的 Windows
+// 路径翻译成它虚拟机里的路径；而本项目用的是 local 驱动的「绑定型具名卷」，device 参数原样交给虚拟机里的 mount，
+// 不会翻译，必须给虚拟机里的路径。Docker Desktop 把 Windows 各盘挂在虚拟机的 /run/desktop/mnt/host/<盘符>
+// （WSL2 后端），较老的 Hyper-V 后端是 /host_mnt/<盘符>；两个都试，以实际存在的为准。
+const DATA_ROOT_RAW = (process.env.WOC_DATA_ROOT || '').trim();
+const DATA_ROOT_HINT = '需为宿主上的绝对路径：Linux / NAS 如 /vol1/1000/woc；Windows 的 Docker Desktop 如 E:/woc。只能包含字母、数字和 . _ - /，不能有空格、中文或 ..';
+let DATA_ROOT = parseDataRoot(DATA_ROOT_RAW);
+let dataRootError = DATA_ROOT_RAW && !DATA_ROOT && !winDrivePath(DATA_ROOT_RAW) ? `WOC_DATA_ROOT=${DATA_ROOT_RAW} 不是可用的路径（${DATA_ROOT_HINT}）` : '';
+let dataRootResolving: Promise<void> | null = null;
+if (dataRootError) appendPanelLog('ERROR', `${dataRootError}；新建实例会失败，改正或留空后 docker compose up -d 重建面板`);
+
+// E:/foo/bar、E:\foo\bar → { drive: 'e', rest: 'foo/bar' }
+function winDrivePath(raw: string): { drive: string; rest: string } | null {
+  const m = raw.replace(/\\/g, '/').replace(/\/+$/, '').match(/^([A-Za-z]):(?:\/(.*))?$/);
+  if (!m || (!m[2] && !/^[A-Za-z]:[\\/]/.test(raw))) return null; // 「E:」不带斜杠是盘上的当前目录，不算绝对路径
+  const rest = m[2] || '';
+  if (rest && (!/^[A-Za-z0-9._\-\/]+$/.test(rest) || rest.split('/').includes('..'))) return null;
+  return { drive: m[1].toLowerCase(), rest };
+}
+
+// 新建实例前确定 DATA_ROOT（Windows 路径要先问 Docker 才知道翻译成什么）。结果缓存，只解析一次。
+async function resolveDataRoot(image: string): Promise<void> {
+  if (DATA_ROOT || dataRootError || !DATA_ROOT_RAW) return;
+  dataRootResolving ??= (async () => {
+    const win = winDrivePath(DATA_ROOT_RAW)!;
+    const info: any = await docker.info().catch(() => ({}));
+    if (!/docker desktop/i.test(String(info?.OperatingSystem || ''))) {
+      dataRootError =
+        `WOC_DATA_ROOT=${DATA_ROOT_RAW} 是 Windows 路径，但当前 Docker 不是 Docker Desktop（${info?.OperatingSystem || '未知'}），` +
+        `请改成 Docker 所在系统上的绝对路径（如 /vol1/1000/woc）`;
+    } else {
+      for (const base of [`/run/desktop/mnt/host/${win.drive}`, `/host_mnt/${win.drive}`]) {
+        // 只读挂虚拟机根目录来查，不会顺手在虚拟机里建出空目录（直接绑一个不存在的路径，Docker 会替你建一个）
+        const ok = await runDataRootHelper('/', image, `test -d /woc-root${base}`, true).then(() => true, () => false);
+        if (ok) {
+          DATA_ROOT = win.rest ? `${base}/${win.rest}` : base;
+          break;
+        }
+      }
+      if (!DATA_ROOT) {
+        dataRootError =
+          `WOC_DATA_ROOT=${DATA_ROOT_RAW}：Docker Desktop 里找不到 ${win.drive.toUpperCase()} 盘` +
+          `（Docker Desktop 设置 → Resources → File sharing 里确认该盘已共享）`;
+      }
+    }
+    if (DATA_ROOT) appendPanelLog('INFO', `WOC_DATA_ROOT=${DATA_ROOT_RAW} → Docker Desktop 虚拟机里的 ${DATA_ROOT}`);
+    else appendPanelLog('ERROR', `${dataRootError}；新建实例会失败，改正或留空后 docker compose up -d 重建面板`);
+  })();
+  await dataRootResolving;
+}
 const VOLUME_NAME_RE = /^woc-data-[0-9a-z]+$/;
 const SAFE_ID = (v: string) => (/^\d+$/.test(v) ? v : '1000');
 
 // 以 root 跑一次性辅助容器，把宿主 root 目录挂到 /woc-root 执行一段脚本（面板容器本身看不到宿主路径）
-async function runDataRootHelper(root: string, image: string, script: string): Promise<void> {
+async function runDataRootHelper(root: string, image: string, script: string, readOnly = false): Promise<void> {
   const c = await docker.createContainer({
     Image: image,
     Entrypoint: ['sh', '-c'],
     Cmd: [script],
     User: '0',
     Labels: { 'woc.helper': 'data-root' },
-    HostConfig: { Binds: [`${root}:/woc-root`] },
+    HostConfig: { Binds: [`${root}:/woc-root${readOnly ? ':ro' : ''}`], NetworkMode: 'none' },
   } as any);
   try {
     await c.start();
@@ -677,18 +729,22 @@ async function runDataRootHelper(root: string, image: string, script: string): P
 }
 
 async function ensureInstanceVolume(inst: Instance, image: string): Promise<void> {
-  if (!DATA_ROOT || !VOLUME_NAME_RE.test(inst.volumeName)) return;
+  if (!DATA_ROOT_RAW || !VOLUME_NAME_RE.test(inst.volumeName)) return;
   try {
     await docker.getVolume(inst.volumeName).inspect();
     return; // 卷已存在（老实例 / 重启 / 自愈）：绝不改动
   } catch {
     /* 不存在 → 按 WOC_DATA_ROOT 新建 */
   }
+  await resolveDataRoot(image);
+  if (!DATA_ROOT) throw new Error(dataRootError || `WOC_DATA_ROOT=${DATA_ROOT_RAW} 不可用`);
   const dir = `${DATA_ROOT}/${inst.volumeName}`;
+  // Windows 盘（Docker Desktop 经文件共享挂进来）上 chown 可能不被支持，也不需要：权限由 Docker Desktop 映射
+  const chown = `chown ${SAFE_ID(PUID)}:${SAFE_ID(PGID)} /woc-root/${inst.volumeName}`;
   await runDataRootHelper(
     DATA_ROOT,
     image,
-    `mkdir -p /woc-root/${inst.volumeName} && chown ${SAFE_ID(PUID)}:${SAFE_ID(PGID)} /woc-root/${inst.volumeName}`,
+    `mkdir -p /woc-root/${inst.volumeName} && ${winDrivePath(DATA_ROOT_RAW) ? `{ ${chown} 2>/dev/null || true; }` : chown}`,
   );
   await docker.createVolume({
     Name: inst.volumeName,
@@ -1748,6 +1804,7 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
   sys += ` · GPU=${ENABLE_GPU ? '开' : '关(软件渲染)'}`;
   // 宿主禁用 IPv6 而没去掉实例 nginx 的 `listen [::]` 时，nginx 起不来、桌面永远「未就绪」（#134）
   sys += ` · 实例 nginx 仅 IPv4=${NO_IPV6 ? '是' : '否'}${process.env.WOC_DISABLE_IPV6 ? '（WOC_DISABLE_IPV6 强制）' : ''}\n`;
+  sys += `实例数据目录 WOC_DATA_ROOT: ${DATA_ROOT_RAW ? `${DATA_ROOT_RAW}${DATA_ROOT && DATA_ROOT !== DATA_ROOT_RAW ? ` → ${DATA_ROOT}` : ''}${dataRootError ? `（不可用：${dataRootError}）` : DATA_ROOT ? '' : '（Windows 路径，新建实例时解析）'}` : '未设（Docker 卷）'}\n`;
   sys += `内存自愈阈值(MiB): soft=${process.env.WOC_INSTANCE_MEM_SOFT_MB || '1500'} · hard=${process.env.WOC_INSTANCE_MEM_HARD_MB || '2500'}\n`;
   sys += `\n实例数: ${instances.length}\n`;
   entries.push({ name: 'system.txt', content: sys });
