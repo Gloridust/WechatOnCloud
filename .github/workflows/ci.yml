@@ -1,0 +1,76 @@
+name: ci
+
+# PR 与 main / pre-release 推送时的回归检查（发版另走 release.yml）。
+# 此前 PR 上没有任何自动检查，1.6.0 的 #175 回归（升级 KasmVNC 后桌面卡在蓝色背景）就是发出去后才被用户发现的。
+#   check：面板前后端类型检查 + 前端构建（面板镜像里后端由 tsx 直接运行，不做类型检查，类型错误只能在这里拦）
+#   gate ：构建面板和实例镜像（amd64），跑发布门禁的实例镜像探针和面板端到端回归（scripts/gate/）
+on:
+  pull_request:
+  push:
+    branches: [main, pre-release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            panel/server/package-lock.json
+            panel/web/package-lock.json
+      - name: Server typecheck
+        working-directory: panel/server
+        run: npm ci && npx tsc --noEmit
+      - name: Web typecheck + build
+        working-directory: panel/web
+        run: npm ci && npx tsc --noEmit && npm run build
+      - name: Shell syntax
+        run: |
+          for f in docker/*.sh docker/autostart scripts/*.sh scripts/gate/*.sh; do bash -n "$f" || exit 1; done
+
+  gate:
+    runs-on: ubuntu-latest
+    needs: check
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # 实例镜像：复用 release.yml 的构建缓存（同一 scope），docker/ 没改时基本全部命中缓存
+      - name: Build instance image (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: woc-ci/wechat-on-cloud:ci
+          cache-from: type=gha,scope=wechat-amd64
+
+      - name: Build panel image (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./panel
+          file: ./panel/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: woc-ci/woc-panel:ci
+          build-args: WOC_VERSION=dev-${{ github.sha }}
+          cache-from: type=gha,scope=panel-amd64
+
+      - name: Instance image probes
+        run: scripts/gate/instance-probes.sh woc-ci/wechat-on-cloud:ci
+
+      - name: Panel end-to-end
+        run: scripts/gate/panel-e2e.sh woc-ci/woc-panel:ci woc-ci/wechat-on-cloud:ci
