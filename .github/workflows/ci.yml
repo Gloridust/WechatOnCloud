@@ -3,7 +3,7 @@ name: ci
 # PR 与 main / pre-release 推送时的回归检查（发版另走 release.yml）。
 # 此前 PR 上没有任何自动检查，1.6.0 的 #175 回归（升级 KasmVNC 后桌面卡在蓝色背景）就是发出去后才被用户发现的。
 #   check：面板前后端类型检查 + 前端构建（面板镜像里后端由 tsx 直接运行，不做类型检查，类型错误只能在这里拦）
-#   gate ：构建面板和实例镜像（amd64），跑发布门禁的实例镜像探针和面板端到端回归（scripts/gate/）
+#   gate ：构建面板和实例镜像（amd64 / arm64 各一份），跑发布门禁的实例镜像探针和面板端到端回归（scripts/gate/）
 on:
   pull_request:
   push:
@@ -40,7 +40,15 @@ jobs:
           for f in docker/*.sh docker/autostart scripts/*.sh scripts/gate/*.sh; do bash -n "$f" || exit 1; done
 
   gate:
-    runs-on: ubuntu-latest
+    # 两个架构都在原生 runner 上跑（arm64 NAS 用户不少，此前 arm64 只在发版时构建、从没运行过）
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    name: gate (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     needs: check
     timeout-minutes: 60
     steps:
@@ -48,26 +56,26 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       # 实例镜像：复用 release.yml 的构建缓存（同一 scope），docker/ 没改时基本全部命中缓存
-      - name: Build instance image (amd64)
+      - name: Build instance image
         uses: docker/build-push-action@v6
         with:
           context: ./docker
           file: ./docker/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           load: true
           tags: woc-ci/wechat-on-cloud:ci
-          cache-from: type=gha,scope=wechat-amd64
+          cache-from: type=gha,scope=wechat-${{ matrix.arch }}
 
-      - name: Build panel image (amd64)
+      - name: Build panel image
         uses: docker/build-push-action@v6
         with:
           context: ./panel
           file: ./panel/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           load: true
           tags: woc-ci/woc-panel:ci
           build-args: WOC_VERSION=dev-${{ github.sha }}
-          cache-from: type=gha,scope=panel-amd64
+          cache-from: type=gha,scope=panel-${{ matrix.arch }}
 
       - name: Instance image probes
         run: scripts/gate/instance-probes.sh woc-ci/wechat-on-cloud:ci
