@@ -876,6 +876,8 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
     Hostname: realisticHostname(inst.id),
     Env: envList(inst),
     ExposedPorts: { '3000/tcp': {} },
+    // 宿主关机、Docker 重启时按这个超时停容器（默认 10 秒）：给实例里的应用留足正常退出的时间，见 STOP_GRACE_SEC
+    StopTimeout: STOP_GRACE_SEC,
     HostConfig: hostConfig,
   };
   // 自定义网络时，MAC 须写到对应 endpoint 上（新版 docker 弃用顶层 MacAddress）；默认网络则用顶层。
@@ -1084,9 +1086,10 @@ export async function regenInstanceMachineId(inst: Instance): Promise<void> {
 // 先正常停止容器，再删除。直接 remove({ force: true }) 等于对容器里所有进程 SIGKILL：应用来不及把数据写完、
 // 也来不及正常退出——实测 Chromium 每次重建后都记为「崩溃」（Preferences 里 exit_type=Crashed，下次打开弹
 // 「Restore pages? Chromium didn't shut down correctly」）；微信同样是被直接杀掉。重启、升级、各种自愈都走重建，
-// 所以这是每次都会发生的。docker stop 先发 SIGTERM，s6 依次停服务，Chromium 正常退出（exit_type=SessionEnded），
-// 实测约 3 秒。超时（Xvnc / 应用卡死不响应）才由 Docker 补 SIGKILL，和以前一样能删掉。
-const STOP_GRACE_SEC = 10;
+// 所以这是每次都会发生的。docker stop 先发 SIGTERM，s6 依次停服务；新实例镜像的桌面会话会先让应用正常退出、
+// 再让 s6 去停 Xvnc（docker/woc-startwm.sh，s6 最多等 S6_SERVICES_GRACETIME=10 秒），实测约 5 秒。
+// 超时（应用卡死不响应）才由 Docker 补 SIGKILL，和以前一样能删掉。超时须比 S6_SERVICES_GRACETIME 长。
+const STOP_GRACE_SEC = 15;
 async function stopGracefully(c: Docker.Container): Promise<void> {
   try {
     await c.stop({ t: STOP_GRACE_SEC } as any);
