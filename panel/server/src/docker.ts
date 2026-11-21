@@ -824,6 +824,7 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
     try {
       // 删除前先把旧容器最后日志快照进持久日志，否则随容器删除就看不到"上次为何停/崩"。
       await snapshotContainerLog(inst, '容器重建（重启/升级/自愈），保留上一容器最后日志');
+      await stopGracefully(existing);
       await existing.remove({ force: true });
     } catch {
       /* 已被移走，正常 */
@@ -1080,10 +1081,24 @@ export async function regenInstanceMachineId(inst: Instance): Promise<void> {
   await runInstance(inst, { keepImage: true }); // 重置身份=恢复类操作，幂等：不隐式换镜像（R10）
 }
 
+// 先正常停止容器，再删除。直接 remove({ force: true }) 等于对容器里所有进程 SIGKILL：应用来不及把数据写完、
+// 也来不及正常退出——实测 Chromium 每次重建后都记为「崩溃」（Preferences 里 exit_type=Crashed，下次打开弹
+// 「Restore pages? Chromium didn't shut down correctly」）；微信同样是被直接杀掉。重启、升级、各种自愈都走重建，
+// 所以这是每次都会发生的。docker stop 先发 SIGTERM，s6 依次停服务，Chromium 正常退出（exit_type=SessionEnded），
+// 实测约 3 秒。超时（Xvnc / 应用卡死不响应）才由 Docker 补 SIGKILL，和以前一样能删掉。
+const STOP_GRACE_SEC = 10;
+async function stopGracefully(c: Docker.Container): Promise<void> {
+  try {
+    await c.stop({ t: STOP_GRACE_SEC } as any);
+  } catch {
+    /* 已停止 / 不存在：照常往下删 */
+  }
+}
+
 // 停止实例容器（保留容器与数据卷，可再启动）。
 export async function stopInstance(inst: Instance): Promise<void> {
   try {
-    await docker.getContainer(inst.containerName).stop({ t: 5 } as any);
+    await docker.getContainer(inst.containerName).stop({ t: STOP_GRACE_SEC } as any);
     appendInstanceLog(inst.id, '容器已停止');
   } catch {
     /* 已停止或不存在 */
@@ -1093,6 +1108,7 @@ export async function stopInstance(inst: Instance): Promise<void> {
 export async function removeInstance(inst: Instance, purgeVolume: boolean): Promise<void> {
   try {
     const c = docker.getContainer(inst.containerName);
+    if (!purgeVolume) await stopGracefully(c); // 数据卷还要留着用：让应用把数据写完再走
     await c.remove({ force: true });
   } catch {
     /* 容器可能已不存在 */
