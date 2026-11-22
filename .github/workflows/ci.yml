@@ -3,7 +3,8 @@ name: ci
 # PR 与 main / pre-release 推送时的回归检查（发版另走 release.yml）。
 # 此前 PR 上没有任何自动检查，1.6.0 的 #175 回归（升级 KasmVNC 后桌面卡在蓝色背景）就是发出去后才被用户发现的。
 #   check：面板前后端类型检查 + 前端构建（面板镜像里后端由 tsx 直接运行，不做类型检查，类型错误只能在这里拦）
-#   gate ：构建面板和实例镜像（amd64 / arm64 各一份），跑发布门禁的实例镜像探针和面板端到端回归（scripts/gate/）
+#   gate ：构建面板和实例镜像（amd64 / arm64 各一份），跑发布门禁的实例镜像探针、面板端到端回归、
+#          WOC_DATA_ROOT 模拟 Docker Desktop 回归（scripts/gate/）
 on:
   pull_request:
   push:
@@ -82,3 +83,6 @@ jobs:
 
       - name: Panel end-to-end
         run: scripts/gate/panel-e2e.sh woc-ci/woc-panel:ci woc-ci/wechat-on-cloud:ci
+
+      - name: WOC_DATA_ROOT on simulated Docker Desktop
+        run: scripts/gate/data-root-desktop.sh woc-ci/woc-panel:ci woc-ci/wechat-on-cloud:ci
