@@ -187,5 +187,12 @@ RUN chmod 755 /custom-cont-init.d/02-woc-app
 COPY woc-xlock.sh /custom-cont-init.d/03-woc-xlock
 RUN chmod 755 /custom-cont-init.d/03-woc-xlock
 
+# 桌面会话入口：停止容器时先让应用（Chromium / 微信 / QQ）正常退出，再让 s6 去停 Xvnc（见 woc-startwm.sh）。
+# 不这样做，应用常在 Xvnc 先退出后因显示连接断开而直接崩掉。S6_SERVICES_GRACETIME 是 s6 停服务时最多等多久
+# （默认 3 秒），给应用正常退出留足时间；面板停容器的超时（STOP_GRACE_SEC）要比它长。
+COPY woc-startwm.sh /defaults/startwm.sh
+RUN chmod 755 /defaults/startwm.sh && grep -q graceful_stop /defaults/startwm.sh
+ENV S6_SERVICES_GRACETIME=10000
+
 # 3000 = HTTP web 客户端, 3001 = HTTPS
 EXPOSE 3000 3001
