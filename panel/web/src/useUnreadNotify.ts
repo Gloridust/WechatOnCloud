@@ -6,12 +6,17 @@ import { api } from './api';
 
 export interface UnreadNotifyState {
   enabled: boolean; // 后端总开关
+  byEnv: boolean; // 开关是否来自 .env 默认值（未设置过）
+  pollSec: number; // 当前轮询间隔
   muted: boolean; // 本实例是否静音
   hasUnread: boolean; // 当前是否有未读
   supported: boolean; // 浏览器是否支持桌面通知
   grant: () => Promise<void>; // 请求桌面通知权限
   toggleMute: () => void;
   check: () => Promise<void>; // 手动检查一次
+  setEnabled: (on: boolean) => Promise<void>; // 管理员切换总开关（即时生效）
+  setPollSec: (sec: number) => Promise<void>; // 管理员调整轮询间隔
+  refresh: () => void; // 重新读取开关/重订阅
 }
 
 const muteKey = (id: string | undefined) => `woc_unread_muted_${id || ''}`;
@@ -19,6 +24,9 @@ const baseTitle = typeof document !== 'undefined' ? document.title : '';
 
 export function useUnreadNotify(id: string | undefined, instName: string): UnreadNotifyState {
   const [enabled, setEnabled] = useState(false);
+  const [byEnv, setByEnv] = useState(true);
+  const [pollSec, setPollSecState] = useState(30);
+  const [version, setVersion] = useState(0); // 递增触发重读配置/重订阅
   const [muted, setMuted] = useState(() => {
     try { return window.localStorage.getItem(muteKey(id)) === '1'; } catch { return false; }
   });
@@ -85,8 +93,11 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
     let alive = true;
     api.unreadConfig(id)
       .then((cfg) => {
-        if (!alive || !cfg.enabled) return;
-        setEnabled(true);
+        if (!alive) return;
+        setEnabled(!!cfg.enabled);
+        setByEnv(!!cfg.byEnv);
+        setPollSecState(cfg.pollSec);
+        if (!cfg.enabled) return;
         setHasUnread(cfg.hasUnread);
         if (cfg.hasUnread) startBlink();
         es = new EventSource(`/api/instances/${id}/unread/events`);
@@ -107,7 +118,7 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
       stopBlink();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, muted, instName]);
+  }, [id, muted, instName, version]);
 
   // 标签页重新获得焦点时，停止闪烁（用户已经看到）。
   useEffect(() => {
@@ -144,6 +155,28 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
       else stopBlink();
     } catch { /* ignore */ }
   };
+  const applyEnabled = async (on: boolean) => {
+    try {
+      const cfg = await api.unreadSetEnabled(on);
+      setEnabled(!!cfg.enabled);
+      setByEnv(!!cfg.byEnv);
+      setPollSecState(cfg.pollSec);
+      if (!cfg.enabled) stopBlink();
+      // version 递增 → 上面的 effect 清理旧订阅并按新开关重订阅；关闭时不再订阅。
+      setVersion((v) => v + 1);
+    } catch { /* ignore */ }
+  };
+  const applyPollSec = async (sec: number) => {
+    try {
+      const cfg = await api.unreadSetEnabled(enabled, sec);
+      setPollSecState(cfg.pollSec);
+      setByEnv(!!cfg.byEnv);
+    } catch { /* ignore */ }
+  };
+  const refresh = () => setVersion((v) => v + 1);
 
-  return { enabled, muted, hasUnread, supported: supported && perm !== 'denied', grant, toggleMute, check };
+  return {
+    enabled, byEnv, pollSec, muted, hasUnread, supported: supported && perm !== 'denied',
+    grant, toggleMute, check, setEnabled: applyEnabled, setPollSec: applyPollSec, refresh,
+  };
 }

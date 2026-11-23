@@ -73,6 +73,11 @@ export interface Settings {
   desktopDark?: boolean;
   // AI 代回配置：按实例 id 存放。含 API Key，accounts.json 权限 0600，接口一律脱敏回传。
   autoReply?: Record<string, Record<string, unknown>>;
+  // 总开关（1.6.7）：从 .env 常量改为面板可切换、持久化到 accounts.json。
+  // 未设置过时回退到 env（WOC_UNREAD_NOTIFY / WOC_AUTO_REPLY），保证老部署行为不变。
+  // 一旦用户在面板点过开关，就以这里的布尔值为准，无需重启面板/改 .env。
+  unreadNotify?: { enabled?: boolean; pollSec?: number };
+  autoReplyEnabled?: boolean;
 }
 
 interface Data {
@@ -164,6 +169,47 @@ export function setDesktopDark(v: boolean) {
 
 /** 设置已原地修改后显式落盘（AI 代回等动态配置用）。 */
 export function persistSettings() {
+  persist();
+}
+
+// ---------- 未读通知 / AI 代回 总开关（面板可切换） ----------
+// env 只作为「从未在面板设置过」时的默认值；面板一旦设置即持久化并优先生效。
+const ENV_UNREAD_ON = process.env.WOC_UNREAD_NOTIFY === '1';
+const ENV_UNREAD_POLL = Math.max(10, Number(process.env.WOC_UNREAD_POLL_SEC) || 30);
+const ENV_AUTO_REPLY_ON = process.env.WOC_AUTO_REPLY === '1';
+
+export function getUnreadNotifyConfig(): { enabled: boolean; pollSec: number; byEnv: boolean } {
+  const s = getSettings();
+  const cfg = s.unreadNotify || {};
+  const byEnv = typeof cfg.enabled !== 'boolean';
+  return {
+    enabled: byEnv ? ENV_UNREAD_ON : !!cfg.enabled,
+    pollSec: typeof cfg.pollSec === 'number' ? Math.max(10, Math.min(3600, Math.round(cfg.pollSec))) : ENV_UNREAD_POLL,
+    byEnv,
+  };
+}
+
+export function setUnreadNotifyEnabled(v: boolean) {
+  const s = getSettings();
+  s.unreadNotify = { ...(s.unreadNotify || {}), enabled: !!v };
+  persist();
+}
+
+export function setUnreadPollSec(n: number) {
+  const s = getSettings();
+  const sec = Math.max(10, Math.min(3600, Math.round(Number(n) || 30)));
+  s.unreadNotify = { ...(s.unreadNotify || {}), pollSec: sec };
+  persist();
+}
+
+export function getAutoReplyEnabled(): { enabled: boolean; byEnv: boolean } {
+  const s = getSettings();
+  const byEnv = typeof s.autoReplyEnabled !== 'boolean';
+  return { enabled: byEnv ? ENV_AUTO_REPLY_ON : !!s.autoReplyEnabled, byEnv };
+}
+
+export function setAutoReplyEnabled(v: boolean) {
+  getSettings().autoReplyEnabled = !!v;
   persist();
 }
 

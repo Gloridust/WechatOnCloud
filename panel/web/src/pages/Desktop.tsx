@@ -779,6 +779,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const [aiDraft, setAiDraft] = useState<AutoReplyDraft | null>(null);
   const [aiManual, setAiManual] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
+  const [notifyBusy, setNotifyBusy] = useState(false);
   const loadAiCfg = useCallback(async () => {
     if (!isAdmin || !id) return;
     try {
@@ -2246,7 +2247,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 <div className="settings-panel ai-reply-panel">
                   <div className="files-hint">
                     参考 CowAgent / wechat-bot 的低风险做法：不碰协议与 Hook，只读当前会话截图，经多模态模型生成草稿，
-                    再用剪贴板中文直贴。<strong>默认关闭</strong>；自动发送需服务端设置 <code>WOC_AUTO_REPLY=1</code> 并重启面板。
+                    再用剪贴板中文直贴。<strong>默认关闭</strong>；总开关与模式均可在面板切换，即时生效。
                   </div>
                   {!isAdmin ? (
                     <div className="files-hint">模型与规则配置仅管理员可见。你可直接使用下方「生成草稿」。</div>
@@ -2266,8 +2267,25 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                           <option value="auto">自动回复（未读触发）</option>
                         </select>
                       </div>
+                      <div className="ai-row">
+                        <span>自动回复总开关</span>
+                        <button
+                          className={'btn ' + (aiCfg.enabledByEnv ? 'btn-primary' : '')}
+                          disabled={aiBusy}
+                          onClick={async () => {
+                            setAiBusy(true);
+                            try {
+                              void await api.autoReplySetEnabled(!aiCfg.enabledByEnv);
+                              await loadAiCfg();
+                              toast(aiCfg.enabledByEnv ? '自动回复总开关已关闭' : '自动回复总开关已开启', 'ok');
+                            } catch (e: any) {
+                              toast(e?.message || '切换失败', 'error');
+                            } finally { setAiBusy(false); }
+                          }}
+                        >{aiCfg.enabledByEnv ? '已开启（点击关闭）' : '已关闭（点击开启）'}</button>
+                      </div>
                       {aiCfg.mode === 'auto' && !aiCfg.enabledByEnv && (
-                        <div className="files-hint">服务端未开启自动轮询：设置 <code>WOC_AUTO_REPLY=1</code> 并重启面板后生效。</div>
+                        <div className="files-hint">自动回复总开关未开启：点上方开关即可启用，无需重启面板。</div>
                       )}
                       {aiCfg.mode === 'auto' && !aiCfg.whitelist.length && (
                         <div className="files-hint">自动模式不会替你切换会话，必须先填白名单；只有识别到的联系人/群命中白名单才会发送。</div>
@@ -2349,16 +2367,40 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
 
               {settingsTab === 'notify' && (
                 <div className="settings-panel">
+                  <div className="files-hint" style={{ marginBottom: 8 }}>
+                    定时检测微信会话列表的未读红点；有新消息时标签闪烁、提示音，并可发桌面通知。
+                    只检测"有新消息"，不读取聊天内容。开关在面板即可切换，即时生效。
+                  </div>
+                  {isAdmin && (
+                    <>
+                      <div className="ai-row">
+                        <span>未读提醒总开关</span>
+                        <button
+                          className={'btn ' + (unread.enabled ? 'btn-primary' : '')}
+                          disabled={notifyBusy}
+                          onClick={async () => {
+                            setNotifyBusy(true);
+                            await unread.setEnabled(!unread.enabled);
+                            setNotifyBusy(false);
+                            toast(unread.enabled ? '未读提醒已关闭' : '未读提醒已开启', 'ok');
+                          }}
+                        >{unread.enabled ? '已开启（点击关闭）' : '已关闭（点击开启）'}</button>
+                        {unread.byEnv && <span className="muted small">当前来自 .env 默认值</span>}
+                      </div>
+                      <div className="ai-row">
+                        <span>检测间隔（秒）</span>
+                        <input className="input" type="number" min={10} max={3600} defaultValue={unread.pollSec}
+                          key={unread.pollSec}
+                          onBlur={(e) => { const n = Number(e.target.value); if (n >= 10) void unread.setPollSec(n); }} />
+                      </div>
+                    </>
+                  )}
                   {!unread.enabled ? (
                     <div className="files-hint">
-                      未读提醒未启用。需在服务端设置 <code>WOC_UNREAD_NOTIFY=1</code> 并重启面板后才能使用。
+                      {isAdmin ? '点击上方开关即可开启未读提醒。' : '未读提醒未启用，请联系管理员在桌面设置中开启。'}
                     </div>
                   ) : (
                     <>
-                      <div className="files-hint" style={{ marginBottom: 8 }}>
-                        定时检测微信会话列表的未读红点；有新消息时标签闪烁、提示音，并可发桌面通知。
-                        只检测"有新消息"，不读取聊天内容。
-                      </div>
                       {unread.supported ? (
                         <button className="btn btn-primary files-upload" onClick={unread.grant}>
                           开启桌面通知权限

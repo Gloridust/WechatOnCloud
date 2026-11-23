@@ -37,6 +37,11 @@ import {
   getDesktopDark,
   setDesktopDark,
   persistSettings,
+  getUnreadNotifyConfig,
+  setUnreadNotifyEnabled,
+  setUnreadPollSec,
+  getAutoReplyEnabled,
+  setAutoReplyEnabled,
   APP_TYPES,
   type AppType,
   type User,
@@ -141,8 +146,6 @@ import {
   currentUnread,
   pollOnce,
   startUnreadPoller,
-  unreadNotifyEnabled,
-  unreadPollSec,
 } from './unreadNotify.js';
 import {
   getPublicAutoReplyConfig,
@@ -1333,7 +1336,25 @@ app.get('/api/instances/:id/unread/config', async (req, reply) => {
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
-  return { enabled: unreadNotifyEnabled, pollSec: unreadPollSec, hasUnread: currentUnread(id) };
+  const cfg = getUnreadNotifyConfig();
+  return { enabled: cfg.enabled, pollSec: cfg.pollSec, byEnv: cfg.byEnv, hasUnread: currentUnread(id) };
+});
+
+// 面板总开关：未读通知（管理员）。动态生效，无需重启/改 .env。
+app.post('/api/admin/unread-notify', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const body = ((req.body as any) ?? {}) as Record<string, unknown>;
+  if (typeof body.enabled === 'boolean') setUnreadNotifyEnabled(body.enabled);
+  if (body.pollSec !== undefined) setUnreadPollSec(Number(body.pollSec));
+  return getUnreadNotifyConfig();
+});
+
+// 面板总开关：AI 代回（管理员）。动态生效。
+app.post('/api/admin/auto-reply-enabled', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const body = ((req.body as any) ?? {}) as Record<string, unknown>;
+  if (typeof body.enabled === 'boolean') setAutoReplyEnabled(body.enabled);
+  return getAutoReplyEnabled();
 });
 
 // 手动检查一次未读（不依赖后台轮询，供用户点"检查未读"触发）。

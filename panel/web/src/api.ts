@@ -544,7 +544,16 @@ export const api = {
 
   // 未读消息通知（1.6.6）
   unreadConfig: (id: string) =>
-    req<{ enabled: boolean; pollSec: number; hasUnread: boolean }>(`/api/instances/${id}/unread/config`),
+    req<{ enabled: boolean; pollSec: number; byEnv?: boolean; hasUnread: boolean }>(`/api/instances/${id}/unread/config`),
+  // 总开关（1.6.7）：面板切换、即时生效，管理员
+  unreadSetEnabled: (enabled: boolean, pollSec?: number) =>
+    req<{ enabled: boolean; pollSec: number; byEnv: boolean }>('/api/admin/unread-notify', {
+      method: 'POST', body: JSON.stringify(pollSec !== undefined ? { enabled, pollSec } : { enabled }),
+    }),
+  autoReplySetEnabled: (enabled: boolean) =>
+    req<{ enabled: boolean; byEnv: boolean }>('/api/admin/auto-reply-enabled', {
+      method: 'POST', body: JSON.stringify({ enabled }),
+    }),
   // AI 代回微信
   autoReplyConfig: (id: string) => req<AutoReplyConfigPublic>(`/api/instances/${id}/auto-reply/config`),
   autoReplySaveConfig: (id: string, patch: Partial<AutoReplyConfigPublic> & { apiKey?: string; clearApiKey?: boolean }) =>

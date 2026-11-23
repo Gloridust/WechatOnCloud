@@ -10,7 +10,7 @@
 //   auto   自动：后台轮询未读红点增量，命中规则后自动生成并发送
 //
 // 隐私：截图只裁右侧聊天区，不落盘；API Key 只存在 accounts.json（0600），接口一律脱敏回传。
-import { getSettings, type Instance } from './store.js';
+import { getSettings, getAutoReplyEnabled, type Instance } from './store.js';
 import { execCaptureBinary, typeInInstance, keyInInstance, activeWindowClass } from './docker.js';
 import { appendInstanceLog } from './logs.js';
 import { probeUnread } from './unreadProbe.js';
@@ -34,6 +34,7 @@ export interface AutoReplyConfig {
 
 export type PublicAutoReplyConfig = Omit<AutoReplyConfig, 'apiKey'> & {
   apiKeySet: boolean;
+  // 总开关是否生效（面板设置优先，env 仅默认值）。前端据此显示"已开启/待开启"。
   enabledByEnv: boolean;
 };
 
@@ -77,8 +78,6 @@ const DEFAULTS: AutoReplyConfig = {
   pollSec: 30,
 };
 
-const ENABLED_BY_ENV = process.env.WOC_AUTO_REPLY === '1';
-
 type StoreConfig = Partial<AutoReplyConfig>;
 function bucket(): Record<string, StoreConfig> {
   const s = getSettings();
@@ -119,7 +118,7 @@ export function getAutoReplyConfig(id: string): AutoReplyConfig {
 export function getPublicAutoReplyConfig(id: string): PublicAutoReplyConfig {
   const c = getAutoReplyConfig(id);
   const { apiKey, ...rest } = c;
-  return { ...rest, apiKeySet: !!apiKey, enabledByEnv: ENABLED_BY_ENV };
+  return { ...rest, apiKeySet: !!apiKey, enabledByEnv: getAutoReplyEnabled().enabled };
 }
 
 export function saveAutoReplyConfig(id: string, patch: Record<string, unknown>): PublicAutoReplyConfig {
@@ -272,6 +271,7 @@ export async function autoReplyTick(
 ): Promise<TickResult> {
   const cfg = getAutoReplyConfig(inst.id);
   if (cfg.mode !== 'auto' && !force) return { ran: false, skipped: '自动模式未开启' };
+  if (!getAutoReplyEnabled().enabled && !force) return { ran: false, skipped: '总开关未开启（桌面设置 → AI 代回）' };
   // 自动模式不会替用户切换会话（切错群比不回更糟），因此必须指定白名单：模型识别出的
   // 联系人/群名命中白名单才发。assist 模式由用户亲自打开会话，不受此限制。
   if (cfg.mode === 'auto' && !cfg.whitelist.length) return { ran: false, skipped: '自动模式需先配置白名单' };
@@ -320,11 +320,18 @@ export function startAutoReplyPoller(
   listInstances: () => Instance[],
   isUserActive: (id: string) => boolean,
 ): void {
-  if (!ENABLED_BY_ENV) return;
+  // 定时器始终存在；总开关与实例模式都在 tick 内动态读取，面板切换后立即生效。
+  const lastRun = new Map<string, number>();
   const tick = async () => {
+    if (!getAutoReplyEnabled().enabled) return;
+    const now = Date.now();
     for (const inst of listInstances()) {
       if ((inst.appType || 'wechat') !== 'wechat') continue;
-      if (getAutoReplyConfig(inst.id).mode !== 'auto') continue;
+      const cfg = getAutoReplyConfig(inst.id);
+      if (cfg.mode !== 'auto') continue;
+      const last = lastRun.get(inst.id) || 0;
+      if (now - last < cfg.pollSec * 1000) continue;
+      lastRun.set(inst.id, now);
       try {
         await autoReplyTick(inst, isUserActive);
       } catch {
@@ -332,9 +339,7 @@ export function startAutoReplyPoller(
       }
     }
   };
-  // 固定 15s 心跳，各实例用自己的 pollSec 决定跳过（避免动态改间隔要重建定时器）。
-  setInterval(() => void tick(), 15_000).unref();
+  // 固定 5s 心跳，各实例用自己的 pollSec 决定跳过（避免动态改间隔要重建定时器）。
+  setInterval(() => void tick(), 5_000).unref();
   setTimeout(() => void tick(), 20_000).unref();
 }
-
-export const autoReplyEnabledByEnv = ENABLED_BY_ENV;

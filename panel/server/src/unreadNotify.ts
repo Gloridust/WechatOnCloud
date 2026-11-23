@@ -1,9 +1,10 @@
 // 未读通知：轮询各微信实例的未读红点，状态变化（无→有）时经 SSE 推送给前端。
-// 默认关闭（WOC_UNREAD_NOTIFY=1 开启），轮询间隔可配（WOC_UNREAD_POLL_SEC，默认 30s）。
+// 默认关闭（WOC_UNREAD_NOTIFY=1 作为老部署默认值）；1.6.7 起总开关可由面板切换并持久化，
+// 轮询器始终运行、每轮动态读开关——面板点一下即生效，无需重启。
 // 只推送"有未读了"这个布尔信号 + 红点数，不含任何聊天内容。
 import type { FastifyReply } from 'fastify';
 import { probeUnread } from './unreadProbe.js';
-import type { Instance } from './store.js';
+import { getUnreadNotifyConfig, type Instance } from './store.js';
 
 interface SseClient {
   id: string;
@@ -14,8 +15,17 @@ const clients = new Set<SseClient>();
 // 每个实例上次观测到的未读状态，用于检测"无→有"的跳变。
 const lastState = new Map<string, boolean>();
 
-const ENABLED = process.env.WOC_UNREAD_NOTIFY === '1';
-const POLL_SEC = Math.max(10, Number(process.env.WOC_UNREAD_POLL_SEC) || 30);
+/** 当前是否开启未读检测（动态读面板设置，env 仅作默认值）。 */
+export function isUnreadEnabled(): boolean {
+  return getUnreadNotifyConfig().enabled;
+}
+/** 当前轮询间隔秒数（动态）。 */
+export function currentPollSec(): number {
+  return getUnreadNotifyConfig().pollSec;
+}
+// 兼容旧引用（index.ts 曾用常量）；现在返回读取时的当前值。
+export const unreadNotifyEnabled = new Proxy({}, { get: () => isUnreadEnabled() }) as unknown as boolean;
+export const unreadPollSec = new Proxy({}, { get: () => currentPollSec() }) as unknown as number;
 
 function sseWrite(c: SseClient, event: string, data: unknown) {
   try {
@@ -54,14 +64,22 @@ export async function pollOnce(inst: Instance): Promise<{ hasUnread: boolean; ba
   return { hasUnread: r.hasUnread, badges: r.badges, error: r.error };
 }
 
-/** 启动后台轮询。只对"微信"实例检测（QQ/浏览器界面未读样式不同，暂不支持）。 */
+/**
+ * 启动后台轮询。定时器始终存在，但每轮动态判断开关——面板开/关即时生效。
+ * 间隔也动态读取：用 5s 基础心跳 + 距上次实际探测的累计时间决定是否跑，
+ * 这样面板改 pollSec 无需重建定时器。只对"微信"实例检测。
+ */
 export function startUnreadPoller(listInstances: () => Instance[]) {
-  if (!ENABLED) {
-    return;
-  }
+  const lastRun = new Map<string, number>();
   const tick = async () => {
+    if (!isUnreadEnabled()) return;
+    const pollSec = currentPollSec();
+    const now = Date.now();
     for (const inst of listInstances()) {
       if ((inst.appType || 'wechat') !== 'wechat') continue;
+      const last = lastRun.get(inst.id) || 0;
+      if (now - last < pollSec * 1000) continue;
+      lastRun.set(inst.id, now);
       try {
         await pollOnce(inst);
       } catch {
@@ -69,10 +87,7 @@ export function startUnreadPoller(listInstances: () => Instance[]) {
       }
     }
   };
-  setInterval(() => void tick(), POLL_SEC * 1000).unref();
+  setInterval(() => void tick(), 5_000).unref();
   // 启动后延迟一轮再开始，避开面板启动高峰。
   setTimeout(() => void tick(), 15_000).unref();
 }
-
-export const unreadNotifyEnabled = ENABLED;
-export const unreadPollSec = POLL_SEC;
