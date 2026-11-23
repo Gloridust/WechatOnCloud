@@ -1,11 +1,15 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, appProfile, fmtUploadSize, provisionProgressText, VIEWER_ID, type Superseded } from '../api';
 import { browserImageCodec, fitPasteImage, pasteImageWithFallback } from '../pasteImage';
 import { useUI } from '../ui';
 import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
-import { IcFolder, IcKeyboard, IcClipboard, IcVolume, IcVolumeOff, IcMic, IcImage, IcRestart, IcUpload, IcDownload, IcClose, IcCheck } from '../icons';
+import {
+  IcFolder, IcKeyboard, IcClipboard, IcVolume, IcVolumeOff, IcMic, IcImage, IcRestart, IcUpload, IcDownload,
+  IcClose, IcCheck, IcFile, IcVideo, IcAudio, IcArchive, IcSearch, IcTrash, IcEye,
+} from '../icons';
 import { VncAudio } from '../vncAudio';
 import { RowMenu, type RowMenuItem } from '../parts';
 
@@ -429,12 +433,57 @@ function shouldPasteLocal(st: ClipState, text: string, localIsFresh: boolean, do
 interface TFile {
   name: string;
   size: number;
+  mtime?: number;
 }
+
+// 文件面板：类型归类（按扩展名），用于图标与配色。纯前端，不改后端/不改语义。
+type FileKind = 'image' | 'video' | 'audio' | 'archive' | 'doc' | 'file';
+const FILE_KIND_EXT: Record<Exclude<FileKind, 'file'>, string[]> = {
+  image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic', 'tif', 'tiff'],
+  video: ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'm4v'],
+  audio: ['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'wma'],
+  archive: ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'tgz'],
+  doc: ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'csv', 'rtf'],
+};
+function fileKind(name: string): FileKind {
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  for (const k of Object.keys(FILE_KIND_EXT) as Exclude<FileKind, 'file'>[]) {
+    if (FILE_KIND_EXT[k].includes(ext)) return k;
+  }
+  return 'file';
+}
+const FILE_KIND_ICON: Record<FileKind, ReactNode> = {
+  image: <IcImage size={20} />,
+  video: <IcVideo size={20} />,
+  audio: <IcAudio size={20} />,
+  archive: <IcArchive size={20} />,
+  doc: <IcFile size={20} />,
+  file: <IcFile size={20} />,
+};
+const FILE_KIND_LABEL: Record<FileKind, string> = {
+  image: '图片', video: '视频', audio: '音频', archive: '压缩包', doc: '文档', file: '文件',
+};
 function humanSize(n: number) {
   if (n < 1024) return n + ' B';
   if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
   if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
   return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+// 后端已返回 mtime（秒）；显示成相对时间，贴合「刚在微信里另存到桌面 → 马上来下载」的用法。
+function relTime(sec?: number) {
+  if (!sec) return '';
+  const diff = Date.now() - sec * 1000;
+  if (diff < 60_000 && diff > -60_000) return '刚刚';
+  if (diff < 3_600_000 && diff > 0) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000 && diff > 0) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  const d = new Date(sec * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const today = new Date();
+  if (d.toDateString() === today.toDateString()) return `今天 ${hhmm}`;
+  const yest = new Date(today.getTime() - 86_400_000);
+  if (d.toDateString() === yest.toDateString()) return `昨天 ${hhmm}`;
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hhmm}`;
 }
 
 // KasmVNC/noVNC 客户端 bundle 偶发未捕获异常（如断线后报 "Cannot read properties of undefined
@@ -575,6 +624,11 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const [dragging, setDragging] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
   const [files, setFiles] = useState<TFile[]>([]);
+  const [fileQuery, setFileQuery] = useState('');       // 按文件名过滤
+  const [fileSort, setFileSort] = useState<'mtime' | 'size' | 'name'>('mtime');
+  const [fileSelMode, setFileSelMode] = useState(false); // 批量选择模式
+  const [fileSel, setFileSel] = useState<Set<string>>(new Set());
+  const [filePreview, setFilePreview] = useState<string | null>(null); // 图片预览文件名
   const [showClip, setShowClip] = useState(false);
   const [clipText, setClipText] = useState('');
   // 中文输入模式：'forward'=底部输入条转发（默认，最稳）；'seamless'=无感（直接在微信里打，提交后转发）。
@@ -654,6 +708,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const [imeSending, setImeSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadPct, setUploadPct] = useState(''); // 进行中的上传进度文案（「37%」「(2/5) 80%」）
+  const [uploadPctNum, setUploadPctNum] = useState(0); // 进度条百分比
   const uploadQueue = useRef<File[]>([]);
   const uploadBusy = useRef(false);
   const [starting, setStarting] = useState(false);
@@ -701,6 +756,10 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     setLoadStuck(false);
     setShowFiles(false);
     setFiles([]);
+    setFileQuery('');
+    setFileSelMode(false);
+    setFileSel(new Set());
+    setFilePreview(null);
     setShowClip(false);
     setClipText('');
     setImeText('');
@@ -725,6 +784,14 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     const t = window.setInterval(poll, 5000);
     return () => window.clearInterval(t);
   }, [showFiles, id]);
+
+  // 图片预览：Esc / 关闭按钮收起；打开时阻止页面滚动干扰
+  useEffect(() => {
+    if (!filePreview) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFilePreview(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [filePreview]);
 
   // 桌面久未加载出来 → 判为"无响应"，把无限转圈换成可操作的重试/重启，不让用户干等。
   // （实测容器跑久了会 I/O/服务 stall，进程没死、显示在线，但读不出 VNC 文件而永远连接中。）
@@ -1159,6 +1226,27 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     }
   };
 
+  // 文件面板的展示列表：搜索 + 排序，不影响原始 files（自动刷新直接覆盖）
+  const visibleFiles = useMemo(() => {
+    const q = fileQuery.trim().toLowerCase();
+    const list = q ? files.filter((f) => f.name.toLowerCase().includes(q)) : files.slice();
+    if (fileSort === 'mtime') list.sort((a, b) => (b.mtime || 0) - (a.mtime || 0) || a.name.localeCompare(b.name));
+    else if (fileSort === 'size') list.sort((a, b) => b.size - a.size || a.name.localeCompare(b.name));
+    else list.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    return list;
+  }, [files, fileQuery, fileSort]);
+  const fileStats = useMemo(() => ({
+    count: files.length,
+    size: files.reduce((s, f) => s + (f.size || 0), 0),
+  }), [files]);
+  const toggleFileSel = (name: string) => {
+    setFileSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  };
+
   // 逐个上传；上传途中再拖进 / 粘贴 / 选择的文件排进队列，由正在跑的这一轮接着传（此前会另起一轮并发上传）
   const uploadFiles = async (list: FileList | File[]) => {
     uploadQueue.current.push(...Array.from(list));
@@ -1174,10 +1262,13 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
         const total = done + 1 + uploadQueue.current.length;
         const prefix = total > 1 ? `(${done + 1}/${total}) ` : '';
         setUploadPct(`${prefix}0%`);
+        setUploadPctNum(0);
         try {
-          await api.uploadFile(id, f, (loaded, size) =>
-            setUploadPct(loaded < size ? `${prefix}${Math.floor((loaded / size) * 100)}%` : `${prefix}写入中`),
-          );
+          await api.uploadFile(id, f, (loaded, size) => {
+            const pct = size > 0 ? Math.min(100, Math.floor((loaded / size) * 100)) : 0;
+            setUploadPctNum(pct);
+            setUploadPct(loaded < size ? `${prefix}${pct}%` : `${prefix}写入中`);
+          });
           ok++;
           okNames.push(f.name);
         } catch (e: any) {
@@ -1189,6 +1280,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       uploadBusy.current = false;
       setUploading(false);
       setUploadPct('');
+      setUploadPctNum(0);
     }
     if (ok) {
       // 【优化】把最后上传的文件路径写进容器剪贴板：用户在应用输入框按一次 Ctrl+V 就可能直接拿到文件，
@@ -1226,6 +1318,28 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     } catch (e: any) {
       toast(e.message || '删除失败', 'error');
     }
+  };
+
+  // 批量删除：逐个调用既有删除接口（后端无批量端点，保持行为一致），失败项单独提示、不中断其余。
+  const delSelected = async () => {
+    const names = Array.from(fileSel);
+    if (!names.length) return;
+    if (!(await confirm({
+      title: `删除选中的 ${names.length} 个文件？`,
+      body: '将从桌面（~/Desktop）移除这些文件，不可恢复。',
+      danger: true,
+      confirmText: '删除',
+    }))) return;
+    let ok = 0;
+    const failed: string[] = [];
+    for (const name of names) {
+      try { await api.deleteFile(id, name); ok++; } catch { failed.push(name); }
+    }
+    if (ok) toast(`已删除 ${ok} 个文件`, 'ok');
+    if (failed.length) toast(`${failed.length} 个删除失败：${failed.slice(0, 3).join('、')}`, 'error');
+    setFileSel(new Set());
+    setFileSelMode(false);
+    refreshFiles();
   };
 
   // ---------- 桌面壁纸 ----------
@@ -1817,29 +1931,152 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 <IcUpload size={18} />
                 {uploading ? `上传中 ${uploadPct}` : '选择文件上传'}
               </button>
-              <div className="files-hint">也可直接把文件拖进来。下方为桌面（~/Desktop）里的文件，应用收到的文件另存到桌面后会自动出现在这里；可逐个下载，或点「打包下载」一次全部取走。</div>
+              {uploading && (
+                <div className="files-progress" role="progressbar" aria-valuenow={uploadPctNum} aria-valuemin={0} aria-valuemax={100}>
+                  <div className="files-progress-fill" style={{ width: `${uploadPctNum}%` }} />
+                </div>
+              )}
+              <div className="files-toolbar">
+                <label className="files-search">
+                  <IcSearch size={15} />
+                  <input
+                    value={fileQuery}
+                    onChange={(e) => setFileQuery(e.target.value)}
+                    placeholder="搜索文件名"
+                    aria-label="搜索文件名"
+                  />
+                  {fileQuery && (
+                    <button className="files-search-clear" title="清除搜索" aria-label="清除搜索" onClick={() => setFileQuery('')}>
+                      <IcClose size={13} />
+                    </button>
+                  )}
+                </label>
+                <select
+                  className="files-sort"
+                  value={fileSort}
+                  onChange={(e) => setFileSort(e.target.value as 'mtime' | 'size' | 'name')}
+                  title="排序方式"
+                  aria-label="排序方式"
+                >
+                  <option value="mtime">最近修改</option>
+                  <option value="size">大小</option>
+                  <option value="name">名称</option>
+                </select>
+                <button
+                  className={'btn-text btn-text-sm' + (fileSelMode ? ' on' : '')}
+                  title="批量选择与删除"
+                  onClick={() => { setFileSelMode((v) => !v); setFileSel(new Set()); }}
+                >
+                  {fileSelMode ? '退出选择' : '多选'}
+                </button>
+              </div>
+              {fileSelMode && (
+                <div className="files-bulkbar">
+                  <span>已选 {fileSel.size} 项</span>
+                  <button className="btn-text btn-text-sm" onClick={() => setFileSel(new Set(visibleFiles.map((f) => f.name)))}>全选</button>
+                  <button className="btn-text btn-text-sm" onClick={() => setFileSel(new Set())}>清空</button>
+                  <button className="btn-text btn-text-sm danger" disabled={!fileSel.size} onClick={delSelected}>删除所选</button>
+                </div>
+              )}
+              <div className="files-hint">
+                共 {fileStats.count} 个文件 · {humanSize(fileStats.size)}。拖进来即可上传；微信收到的文件另存到桌面后会自动出现在这里。图片可点眼睛预览。
+              </div>
               <div className="files-list">
-                {files.length === 0 && (
+                {visibleFiles.length === 0 && (
                   <div className="muted small" style={{ padding: '10px 2px' }}>
-                    暂无文件
+                    {files.length === 0 ? '暂无文件' : '没有匹配的文件'}
                   </div>
                 )}
-                {files.map((f) => (
-                  <div key={f.name} className="files-item">
-                    <a className="files-dl" href={api.downloadFileUrl(id, f.name)} download={f.name} title="下载">
-                      <span className="files-name">{f.name}</span>
-                      <span className="files-size">
-                        {humanSize(f.size)}
-                        <IcDownload size={14} />
-                      </span>
-                    </a>
-                    <button className="files-del" title="删除" aria-label={`删除 ${f.name}`} onClick={() => delFile(f.name)}>
-                      <IcClose size={16} />
-                    </button>
-                  </div>
-                ))}
+                {visibleFiles.map((f) => {
+                  const kind = fileKind(f.name);
+                  const checked = fileSel.has(f.name);
+                  return (
+                    <div
+                      key={f.name}
+                      className={'files-item' + (checked ? ' sel' : '')}
+                      onClick={fileSelMode ? () => toggleFileSel(f.name) : undefined}
+                    >
+                      {fileSelMode ? (
+                        <button
+                          className={'files-check' + (checked ? ' on' : '')}
+                          onClick={(e) => { e.stopPropagation(); toggleFileSel(f.name); }}
+                          aria-label={checked ? '取消选择' : '选择'}
+                        >
+                          {checked && <IcCheck size={14} />}
+                        </button>
+                      ) : (
+                        <span className={`files-kind kind-${kind}`} title={FILE_KIND_LABEL[kind]}>
+                          {FILE_KIND_ICON[kind]}
+                        </span>
+                      )}
+                      <div className="files-meta">
+                        <span className="files-name" title={f.name}>{f.name}</span>
+                        <span className="files-sub">
+                          {FILE_KIND_LABEL[kind]} · {humanSize(f.size)}{f.mtime ? ` · ${relTime(f.mtime)}` : ''}
+                        </span>
+                      </div>
+                      {!fileSelMode && (
+                        <div className="files-actions">
+                          {kind === 'image' && (
+                            <button
+                              className="files-act"
+                              title="预览图片"
+                              aria-label={`预览 ${f.name}`}
+                              onClick={(e) => { e.stopPropagation(); setFilePreview(f.name); }}
+                            >
+                              <IcEye size={16} />
+                            </button>
+                          )}
+                          <a
+                            className="files-act"
+                            href={api.downloadFileUrl(id, f.name)}
+                            download={f.name}
+                            title="下载"
+                            aria-label={`下载 ${f.name}`}
+                          >
+                            <IcDownload size={16} />
+                          </a>
+                          <button
+                            className="files-del"
+                            title="删除"
+                            aria-label={`删除 ${f.name}`}
+                            onClick={(e) => { e.stopPropagation(); delFile(f.name); }}
+                          >
+                            <IcTrash size={16} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
+          )}
+
+          {/* 图片预览灯箱：挂到 body，避免被桌面的 VNC 容器层级/变换影响；下载接口带 cookie 鉴权，img 标签可直接渲染 */}
+          {filePreview && createPortal(
+            <div className="file-preview-mask" onClick={() => setFilePreview(null)}>
+              <div className="file-preview-card" onClick={(e) => e.stopPropagation()}>
+                <div className="file-preview-top">
+                  <span className="file-preview-name" title={filePreview}>{filePreview}</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <a
+                      className="btn-text btn-text-sm"
+                      href={api.downloadFileUrl(id, filePreview)}
+                      download={filePreview}
+                      style={{ textDecoration: 'none' }}
+                    >
+                      下载原图
+                    </a>
+                    <button className="btn-text btn-text-sm" onClick={() => setFilePreview(null)}>关闭</button>
+                  </span>
+                </div>
+                <div className="file-preview-body">
+                  <img src={api.downloadFileUrl(id, filePreview)} alt={filePreview} />
+                </div>
+              </div>
+            </div>,
+            document.body,
           )}
 
           {showClip && (
