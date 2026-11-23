@@ -36,6 +36,7 @@ import {
   publicInstance,
   getDesktopDark,
   setDesktopDark,
+  persistSettings,
   APP_TYPES,
   type AppType,
   type User,
@@ -84,6 +85,7 @@ import {
   PASTE_IMAGE_PNG_TOO_BIG,
   pasteTextInInstance,
   pasteFilePathInInstance,
+  sendFilesToInstance,
   listOrphanVolumes,
   removeVolume,
   listOrphanContainers,
@@ -134,6 +136,22 @@ import {
   type BackupKind,
 } from './chatbackup.js';
 import { triggerSelfUpdate } from './self-update.js';
+import {
+  addSseClient,
+  currentUnread,
+  pollOnce,
+  startUnreadPoller,
+  unreadNotifyEnabled,
+  unreadPollSec,
+} from './unreadNotify.js';
+import {
+  getPublicAutoReplyConfig,
+  saveAutoReplyConfig,
+  draftReply,
+  sendDraft,
+  autoReplyTick,
+  startAutoReplyPoller,
+} from './autoReply.js';
 import { GiB, MiB, readBody, receiveFile, spoolUpload, cleanSpoolDir, type Spooled } from './upload.js';
 import { appendInstanceLog, readInstanceLog, appendPanelLog, readPanelLog, pruneOldLogs, filterSince, rangeToMs, DIAG_RANGES } from './logs.js';
 
@@ -1257,21 +1275,35 @@ app.post('/api/instances/:id/paste-text', { bodyLimit: 2 * 1024 * 1024 }, async 
 });
 
 // 【优化】把已上传到桌面的文件路径写进容器剪贴板（text/uri-list），用户在应用里按一次 Ctrl+V 即可取用，
-// 省去在文件选择器里翻找 ~/Desktop。只写剪贴板、不自动按键（按键落点不可控）。文件须确实存在于中转目录。
+// 省去在文件选择器里翻找 ~/Desktop。1.6.6：支持多文件（names）+ 焦点校验后自动粘贴（autoPaste）。
+// 文件须确实存在于中转目录；自动粘贴仅在活动窗口确为聊天应用时执行，避免把路径当消息发出去。
 app.post('/api/instances/:id/paste-path', async (req, reply) => {
   const u = requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
-  const { name } = (req.body as any) ?? {};
-  if (!name || typeof name !== 'string') return reply.code(400).send({ error: '文件名无效' });
+  const body = (req.body as any) ?? {};
+  const names: string[] = Array.isArray(body.names)
+    ? body.names.filter((n: any) => typeof n === 'string')
+    : typeof body.name === 'string'
+      ? [body.name]
+      : [];
+  if (!names.length) return reply.code(400).send({ error: '文件名无效' });
+  const autoPaste = body.autoPaste === true;
   const busy = claimControl(u, id, req);
   if (busy) return reply.code(409).send(busy);
   try {
-    const files = await listInstanceFiles(findInstance(id)!);
-    if (!files.some((f) => f.name === name)) return reply.code(404).send({ error: '文件不在桌面中转目录' });
-    await pasteFilePathInInstance(findInstance(id)!, name);
-    return { ok: true };
+    const inst = findInstance(id)!;
+    const files = await listInstanceFiles(inst);
+    const present = new Set(files.map((f) => f.name));
+    const valid = names.filter((n) => present.has(n));
+    if (!valid.length) return reply.code(404).send({ error: '文件不在桌面中转目录' });
+    if (autoPaste) {
+      const r = await sendFilesToInstance(inst, valid, inst.appType || 'wechat');
+      return { ok: true, autoPasted: r.autoPasted, activeClass: r.activeClass, names: valid };
+    }
+    await pasteFilePathInInstance(inst, valid);
+    return { ok: true, autoPasted: false, names: valid };
   } catch (e: any) {
     return reply.code(500).send({ error: e?.message || '写入路径失败' });
   }
@@ -1292,6 +1324,119 @@ app.post('/api/instances/:id/key', async (req, reply) => {
   } catch (e: any) {
     return reply.code(500).send({ error: e?.message || '按键失败' });
   }
+});
+
+// ---------- 未读消息通知（1.6.6，默认关闭） ----------
+// 配置查询：前端据此决定是否订阅 SSE、显示开关。
+app.get('/api/instances/:id/unread/config', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  return { enabled: unreadNotifyEnabled, pollSec: unreadPollSec, hasUnread: currentUnread(id) };
+});
+
+// 手动检查一次未读（不依赖后台轮询，供用户点"检查未读"触发）。
+app.post('/api/instances/:id/unread/check', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  return await pollOnce(inst);
+});
+
+// ---------- AI 代回微信（1.6.6，默认关闭） ----------
+// 配置含 API Key，仅管理员可见/可改；普通用户可用「生成草稿 / 填入 / 发送」。
+app.get('/api/instances/:id/auto-reply/config', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  if (!findInstance(id)) return reply.code(404).send({ error: '实例不存在' });
+  return getPublicAutoReplyConfig(id);
+});
+
+app.post('/api/instances/:id/auto-reply/config', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  if (!findInstance(id)) return reply.code(404).send({ error: '实例不存在' });
+  const body = ((req.body as any) ?? {}) as Record<string, unknown>;
+  const cfg = saveAutoReplyConfig(id, body);
+  persistSettings();
+  return cfg;
+});
+
+// 生成草稿：不传 userMessage 时截取当前会话聊天区交给多模态模型；传入时走纯文本模型也可。
+app.post('/api/instances/:id/auto-reply/draft', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  const raw = ((req.body as any) ?? {}) as { userMessage?: string };
+  const userMessage = typeof raw.userMessage === 'string' ? raw.userMessage.trim().slice(0, 2000) : undefined;
+  try {
+    return await draftReply(inst, userMessage || undefined);
+  } catch (e: any) {
+    return reply.code(500).send({ error: e?.message || '生成失败' });
+  }
+});
+
+// 把草稿写入输入框；withEnter=true 时直接发送。焦点不在微信会拒绝，避免发错窗口。
+app.post('/api/instances/:id/auto-reply/send', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  const busy = claimControl(u, id, req);
+  if (busy) return reply.code(409).send(busy);
+  const body = ((req.body as any) ?? {}) as { text?: string; withEnter?: boolean };
+  try {
+    return await sendDraft(inst, String(body.text || ''), body.withEnter === true);
+  } catch (e: any) {
+    return reply.code(500).send({ error: e?.message || '发送失败' });
+  }
+});
+
+// 手动跑一次自动回复（用于验证规则，不受后台开关影响，但仍要求已配置 Key）。
+app.post('/api/instances/:id/auto-reply/check', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  try {
+    return await autoReplyTick(inst, () => false, true);
+  } catch (e: any) {
+    return reply.code(500).send({ error: e?.message || '检查失败' });
+  }
+});
+
+// SSE 事件流：有未读时推 event: unread。cookie(httpOnly) 由 EventSource 自动携带，复用现有鉴权。
+app.get('/api/instances/:id/unread/events', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  reply.hijack();
+  const raw = reply.raw;
+  raw.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  raw.write(': connected\n\n');
+  const remove = addSseClient(id, reply, currentUnread(id));
+  // 心跳：每 25s 一条注释，防止反代/浏览器因空闲断开。
+  const beat = setInterval(() => {
+    try { raw.write(': beat\n\n'); } catch { /* ignore */ }
+  }, 25_000);
+  const cleanup = () => { clearInterval(beat); remove(); };
+  raw.on('close', cleanup);
+  (req.raw as any).on('close', cleanup);
 });
 
 // 查看实例容器日志（仅管理员）：排查"无法进入/未安装/卡死"等。inline 文本，浏览器可直接看/另存。
@@ -2333,6 +2478,13 @@ appendPanelLog('INFO', `面板启动 · 版本 ${CURRENT_VERSION} · 监听 ${HO
 startUpdateChecker(); // 后台检测新版（best-effort，失败静默）
 // 聊天备份自动增量调度（默认关闭；WOC_CHAT_BACKUP_AUTO=1 启用）
 startChatBackupScheduler(listInstances, (s) => appendPanelLog('INFO', s));
+// 未读红点通知轮询（默认关闭；WOC_UNREAD_NOTIFY=1 启用，间隔 WOC_UNREAD_POLL_SEC）
+startUnreadPoller(listInstances);
+// AI 代回：仅在 WOC_AUTO_REPLY=1 且实例配置为 auto 时后台运行；用户正在操作桌面时自动让行。
+startAutoReplyPoller(listInstances, (id) => {
+  const h = controlHolders.get(id);
+  return !!h && Date.now() - h.at <= CONTROL_TTL;
+});
 // 日志保留期清理：启动后跑一次 + 每 24h 一次，删除超过一年的日志行（unref 不阻止退出）。
 pruneOldLogs();
 setInterval(() => pruneOldLogs(), 24 * 60 * 60 * 1000).unref();

@@ -71,6 +71,8 @@ export interface Settings {
   // 实例桌面深色模式：由面板顶栏的主题开关统一控制（管理员）。true=实例内应用走深色。
   // 既作为新建/重启实例的初始明暗（经容器环境 WOC_DARK 下发），也用于对运行中实例实时切换。
   desktopDark?: boolean;
+  // AI 代回配置：按实例 id 存放。含 API Key，accounts.json 权限 0600，接口一律脱敏回传。
+  autoReply?: Record<string, Record<string, unknown>>;
 }
 
 interface Data {
@@ -157,6 +159,11 @@ export function getDesktopDark(): boolean {
 
 export function setDesktopDark(v: boolean) {
   getSettings().desktopDark = !!v;
+  persist();
+}
+
+/** 设置已原地修改后显式落盘（AI 代回等动态配置用）。 */
+export function persistSettings() {
   persist();
 }
 

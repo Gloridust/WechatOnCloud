@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, appProfile, fmtUploadSize, provisionProgressText, VIEWER_ID, type Superseded } from '../api';
+import {
+  api, appProfile, fmtUploadSize, provisionProgressText, VIEWER_ID,
+  type Superseded, type AutoReplyConfigPublic, type AutoReplyDraft,
+} from '../api';
 import { browserImageCodec, fitPasteImage, pasteImageWithFallback } from '../pasteImage';
 import { useUI } from '../ui';
 import { useAuth } from '../auth';
@@ -12,6 +15,7 @@ import {
 } from '../icons';
 import { VncAudio } from '../vncAudio';
 import { RowMenu, type RowMenuItem } from '../parts';
+import { useUnreadNotify } from '../useUnreadNotify';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
 // ws 地址带上本页的查看者标识（noVNC 先解码 path 再拼进地址），面板据此做「同一实例只在一处显示」，转发前会去掉。
@@ -20,6 +24,47 @@ function desktopUrl(id: string) {
     `/desktop/${id}/vnc/index.html?autoconnect=1&path=desktop/${id}/websockify%3Fwoc_viewer%3D${VIEWER_ID}&resize=remote` +
     '&reconnect=true&reconnect_delay=2000&clipboard_up=true&clipboard_down=true&clipboard_seamless=true'
   );
+}
+
+// 串流画质模式（1.6.6）：KasmVNC 客户端从同源 localStorage 读这些设置，iframe 加载前写好即生效。
+// 实测镜像默认值偏低（framerate=24 上限 60、compression=2、enable_threading=false、enable_webp=false），
+// 是「略微卡」的主因。三档按「网络/CPU → 画质」权衡，用户可自己切换（切换走整页重载，避免新旧两条 ws 并存把 Xvnc 卡死）。
+type QualityMode = 'smooth' | 'balanced' | 'sharp';
+interface QualityPreset {
+  label: string;
+  quality: number; // JPEG 质量 0-9，越高越清晰、越费带宽
+  compression: number; // 压缩等级 0-9，越高越省带宽、越费 CPU
+  framerate: number; // 帧率 1-120（KasmVNC dr.MIN=24 / MAX=60）
+  videoQuality: number; // 视频流质量
+  threading: boolean; // 多线程编解码
+  webp: boolean; // WebP 编码（通常比 JPEG 更高效，但个别客户端兼容性略差）
+}
+const QUALITY_PRESETS: Record<QualityMode, QualityPreset> = {
+  smooth: { label: '流畅优先', quality: 4, compression: 7, framerate: 60, videoQuality: 30, threading: true, webp: true },
+  balanced: { label: '均衡（推荐）', quality: 6, compression: 5, framerate: 48, videoQuality: 43, threading: true, webp: true },
+  sharp: { label: '清晰优先', quality: 8, compression: 2, framerate: 30, videoQuality: 60, threading: true, webp: false },
+};
+function readQualityMode(): QualityMode {
+  try {
+    const v = window.localStorage.getItem('woc_quality_mode');
+    if (v === 'smooth' || v === 'sharp') return v;
+  } catch { /* ignore */ }
+  return 'balanced';
+}
+// iframe 加载前把当前档位的 KasmVNC 参数写进 localStorage（与 enable_ime 同源同机制）。
+function applyQualitySettings(mode: QualityMode) {
+  const p = QUALITY_PRESETS[mode];
+  try {
+    window.localStorage.setItem('woc_quality_mode', mode);
+    window.localStorage.setItem('quality', String(p.quality));
+    window.localStorage.setItem('compression', String(p.compression));
+    window.localStorage.setItem('framerate', String(p.framerate));
+    window.localStorage.setItem('framerate_image_mode', String(p.framerate));
+    window.localStorage.setItem('framerate_streaming_mode', String(p.framerate));
+    window.localStorage.setItem('video_quality', String(p.videoQuality));
+    window.localStorage.setItem('enable_threading', p.threading ? 'true' : 'false');
+    window.localStorage.setItem('enable_webp', p.webp ? 'true' : 'false');
+  } catch { /* 隐私模式禁用 localStorage：忽略 */ }
 }
 
 // 「无感输入」钩子：装进同源 iframe，让用户直接在微信里打中文。
@@ -715,8 +760,72 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const [control, setControl] = useState<{ free: boolean; mine: boolean; holder: string | null } | null>(null);
   // 本页面已被别处打开的页面接管（同一实例同一时间只在一处显示）：不再显示桌面，等用户点「在这里继续使用」
   const [superseded, setSuperseded] = useState<Superseded | null>(null);
+  // 未读消息通知（1.6.6）：后端开启时订阅 SSE，标题闪烁 + 桌面通知 + 提示音。
+  const unread = useUnreadNotify(id, instances.find((i) => i.id === id)?.name || '微信');
+
+  // 串流画质模式（1.6.6）：进入桌面前把参数写进 localStorage；切换走整页重载让新连接读到。
+  const [qualityMode, setQualityMode] = useState<QualityMode>(() => readQualityMode());
+  const changeQuality = (m: QualityMode) => {
+    if (m === qualityMode) return;
+    applyQualitySettings(m);
+    window.location.reload();
+  };
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'bg' | 'font'>('bg');
+  const [settingsTab, setSettingsTab] = useState<'bg' | 'font' | 'quality' | 'notify' | 'ai'>('bg');
+
+  // AI 代回微信（1.6.6）：配置仅管理员可读写；草稿/发送所有有实例权限的人都能用。
+  const [aiCfg, setAiCfg] = useState<AutoReplyConfigPublic | null>(null);
+  const [aiKey, setAiKey] = useState('');
+  const [aiDraft, setAiDraft] = useState<AutoReplyDraft | null>(null);
+  const [aiManual, setAiManual] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const loadAiCfg = useCallback(async () => {
+    if (!isAdmin || !id) return;
+    try {
+      setAiCfg(await api.autoReplyConfig(id));
+    } catch (e: any) {
+      toast(e?.message || '读取 AI 代回配置失败', 'error');
+    }
+  }, [id, isAdmin, toast]);
+  useEffect(() => {
+    if (showSettings && settingsTab === 'ai') void loadAiCfg();
+  }, [showSettings, settingsTab, loadAiCfg]);
+  const saveAiCfg = async (patch: Partial<AutoReplyConfigPublic> & { apiKey?: string; clearApiKey?: boolean }) => {
+    if (!id) return;
+    try {
+      setAiCfg(await api.autoReplySaveConfig(id, patch));
+      setAiKey('');
+      toast('AI 代回配置已保存', 'ok');
+    } catch (e: any) {
+      toast(e?.message || '保存失败', 'error');
+    }
+  };
+  const genAiDraft = async (manual?: string) => {
+    if (!id) return;
+    setAiBusy(true);
+    try {
+      const d = await api.autoReplyDraft(id, manual);
+      setAiDraft(d);
+      if (!d.shouldReply) toast(d.reason || '模型判断无需回复', 'info');
+    } catch (e: any) {
+      toast(e?.message || '生成草稿失败', 'error');
+    } finally {
+      setAiBusy(false);
+    }
+  };
+  const sendAiDraft = async (withEnter: boolean) => {
+    if (!id || !aiDraft?.reply) return;
+    setAiBusy(true);
+    try {
+      const r = await api.autoReplySend(id, aiDraft.reply, withEnter);
+      toast(withEnter ? '已发送到当前微信会话' : '已填入输入框，请检查后手动发送', 'ok');
+      if (r.activeClass) setAiDraft({ ...aiDraft, reason: `焦点窗口：${r.activeClass}` });
+    } catch (e: any) {
+      toast(e?.message || '发送失败', 'error');
+    } finally {
+      setAiBusy(false);
+    }
+  };
   const [bgList, setBgList] = useState<string[]>([]);
   const [fontList, setFontList] = useState<string[]>([]);
   const [bgUploading, setBgUploading] = useState(false);
@@ -968,6 +1077,11 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       /* 隐私模式等禁用 localStorage：忽略 */
     }
   }, [id, inputMode]);
+
+  // 串流画质：iframe 同源共享 localStorage，加载前写好当前档位的 KasmVNC 参数即生效。
+  useEffect(() => {
+    applyQualitySettings(qualityMode);
+  }, [id, qualityMode]);
 
   // 本机图片粘贴桥（issue #91）：两种输入模式都生效
   const pastingImage = useRef(false);
@@ -1283,19 +1397,20 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       setUploadPctNum(0);
     }
     if (ok) {
-      // 【优化】把最后上传的文件路径写进容器剪贴板：用户在应用输入框按一次 Ctrl+V 就可能直接拿到文件，
-      // 省去在文件选择器里翻找桌面。失败静默（不影响上传本身，用户仍可按老办法取用），给出可照做的提示。
-      let pathReady = false;
+      // 【1.6.6 文件直达会话】把全部上传文件路径写进容器剪贴板；若当前焦点在微信/QQ 就自动按 Ctrl+V
+      // 送入当前会话，省去「另存桌面→在微信里点+→翻目录选文件」。焦点不在聊天应用时只备剪贴板并提示手动粘贴，
+      // 绝不把路径误发到别处。失败静默（不影响上传本身，用户仍可从 ~/Desktop 取用）。
+      let autoPasted = false;
       try {
-        await api.pasteFilePath(id, okNames[okNames.length - 1]);
-        pathReady = true;
+        const r = await api.pasteFilePath(id, okNames, true);
+        autoPasted = !!r?.autoPasted;
       } catch {
         /* 路径写入失败不影响上传结果，保持原有取用方式 */
       }
       toast(
-        pathReady
-          ? `已上传 ${ok} 个文件到桌面；路径已备好，到应用输入框按 Ctrl+V 可直接取用`
-          : `已上传 ${ok} 个文件到桌面，应用里可从 ~/Desktop 取用`,
+        autoPasted
+          ? `已上传 ${ok} 个文件，并已送入当前聊天窗口（如未出现，请在输入框按 Ctrl+V）`
+          : `已上传 ${ok} 个文件；到聊天输入框按 Ctrl+V 即可取用`,
         'ok',
       );
       refreshFiles();
@@ -1596,6 +1711,13 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const moreItems: RowMenuItem[] = [
     { label: '剪贴板', onClick: () => setShowClip((v) => !v) },
     { label: soundOn ? '声音：开（点击关闭）' : '声音：关（点击开启）', onClick: toggleSound },
+    ...(unread.enabled ? [{ label: '检查未读消息', onClick: unread.check }] : []),
+    { group: '串流画质' },
+    ...(Object.keys(QUALITY_PRESETS) as QualityMode[]).map((m) => ({
+      label: QUALITY_PRESETS[m].label,
+      onClick: () => changeQuality(m),
+      badge: m === qualityMode ? <IcCheck size={14} /> : undefined,
+    })),
     ...(soundOn ? [{ label: micOn ? '麦克风：开（点击关闭）' : '麦克风：关（点击开启）', onClick: toggleMic }] : []),
     ...(isAdmin
       ? [
@@ -2115,7 +2237,173 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               <div className="settings-tabs">
                 <button className={'settings-tab' + (settingsTab === 'bg' ? ' on' : '')} onClick={() => setSettingsTab('bg')}>壁纸</button>
                 <button className={'settings-tab' + (settingsTab === 'font' ? ' on' : '')} onClick={() => setSettingsTab('font')}>字体</button>
+                <button className={'settings-tab' + (settingsTab === 'quality' ? ' on' : '')} onClick={() => setSettingsTab('quality')}>画质</button>
+                <button className={'settings-tab' + (settingsTab === 'notify' ? ' on' : '')} onClick={() => setSettingsTab('notify')}>通知</button>
+                <button className={'settings-tab' + (settingsTab === 'ai' ? ' on' : '')} onClick={() => setSettingsTab('ai')}>AI 代回</button>
               </div>
+
+              {settingsTab === 'ai' && (
+                <div className="settings-panel ai-reply-panel">
+                  <div className="files-hint">
+                    参考 CowAgent / wechat-bot 的低风险做法：不碰协议与 Hook，只读当前会话截图，经多模态模型生成草稿，
+                    再用剪贴板中文直贴。<strong>默认关闭</strong>；自动发送需服务端设置 <code>WOC_AUTO_REPLY=1</code> 并重启面板。
+                  </div>
+                  {!isAdmin ? (
+                    <div className="files-hint">模型与规则配置仅管理员可见。你可直接使用下方「生成草稿」。</div>
+                  ) : !aiCfg ? (
+                    <div className="files-hint">正在读取配置…</div>
+                  ) : (
+                    <>
+                      <div className="ai-row">
+                        <span>模式</span>
+                        <select
+                          className="input"
+                          value={aiCfg.mode}
+                          onChange={(e) => void saveAiCfg({ mode: e.target.value as AutoReplyConfigPublic['mode'] })}
+                        >
+                          <option value="off">关闭</option>
+                          <option value="assist">人工确认（只生成草稿）</option>
+                          <option value="auto">自动回复（未读触发）</option>
+                        </select>
+                      </div>
+                      {aiCfg.mode === 'auto' && !aiCfg.enabledByEnv && (
+                        <div className="files-hint">服务端未开启自动轮询：设置 <code>WOC_AUTO_REPLY=1</code> 并重启面板后生效。</div>
+                      )}
+                      {aiCfg.mode === 'auto' && !aiCfg.whitelist.length && (
+                        <div className="files-hint">自动模式不会替你切换会话，必须先填白名单；只有识别到的联系人/群命中白名单才会发送。</div>
+                      )}
+                      <div className="ai-row">
+                        <span>接口地址</span>
+                        <input className="input" value={aiCfg.baseURL} onChange={(e) => setAiCfg({ ...aiCfg, baseURL: e.target.value })}
+                          onBlur={(e) => void saveAiCfg({ baseURL: e.target.value })} placeholder="OpenAI 兼容 /v1" />
+                      </div>
+                      <div className="ai-row">
+                        <span>模型</span>
+                        <input className="input" value={aiCfg.model} onChange={(e) => setAiCfg({ ...aiCfg, model: e.target.value })}
+                          onBlur={(e) => void saveAiCfg({ model: e.target.value })} placeholder="qwen3-vl-plus" />
+                      </div>
+                      <div className="ai-row">
+                        <span>API Key</span>
+                        <input className="input" type="password" value={aiKey} onChange={(e) => setAiKey(e.target.value)}
+                          placeholder={aiCfg.apiKeySet ? '已配置，留空则保留' : '粘贴 API Key'} />
+                        <button className="btn-text" disabled={!aiKey.trim()} onClick={() => void saveAiCfg({ apiKey: aiKey })}>保存</button>
+                        {aiCfg.apiKeySet && <button className="btn-text danger" onClick={() => void saveAiCfg({ clearApiKey: true })}>清除</button>}
+                      </div>
+                      <div className="ai-row">
+                        <span>白名单</span>
+                        <input className="input" defaultValue={aiCfg.whitelist.join('、')}
+                          onBlur={(e) => void saveAiCfg({ whitelist: e.target.value.split(/[,，、\n]/).map((s) => s.trim()).filter(Boolean) })}
+                          placeholder="留空=不限，多个用顿号分隔" />
+                      </div>
+                      <div className="ai-row">
+                        <span>触发前缀</span>
+                        <input className="input" defaultValue={aiCfg.triggerPrefix}
+                          onBlur={(e) => void saveAiCfg({ triggerPrefix: e.target.value })} placeholder="留空=所有消息" />
+                      </div>
+                      <div className="ai-row">
+                        <span>停止词</span>
+                        <input className="input" defaultValue={aiCfg.stopWords.join('、')}
+                          onBlur={(e) => void saveAiCfg({ stopWords: e.target.value.split(/[,，、\n]/).map((s) => s.trim()).filter(Boolean) })}
+                          placeholder="命中则不回，例如：人工、别回" />
+                      </div>
+                      <div className="ai-row">
+                        <span>冷却秒</span>
+                        <input className="input" type="number" min={0} defaultValue={aiCfg.cooldownSec}
+                          onBlur={(e) => void saveAiCfg({ cooldownSec: Number(e.target.value) })} />
+                        <span>每小时上限</span>
+                        <input className="input" type="number" min={1} defaultValue={aiCfg.maxPerHour}
+                          onBlur={(e) => void saveAiCfg({ maxPerHour: Number(e.target.value) })} />
+                      </div>
+                    </>
+                  )}
+
+                  <div className="files-hint" style={{ marginTop: 8 }}>
+                    生成草稿时先点进微信会话输入框；模型只识别最底部一条靠左的新消息。
+                    若截图识别不准，可在下方直接填写对方消息（走纯文本，不传截图）。
+                  </div>
+                  <input className="input" value={aiManual} onChange={(e) => setAiManual(e.target.value)}
+                    placeholder="可选：直接填写对方消息，留空则读截图" />
+                  <button className="btn btn-primary files-upload" disabled={aiBusy}
+                    onClick={() => void genAiDraft(aiManual.trim() || undefined)}>
+                    {aiBusy ? '生成中…' : '生成回复草稿'}
+                  </button>
+                  {aiDraft && (
+                    <div className="ai-draft">
+                      <div className="muted small">
+                        {aiDraft.contact || '当前会话'} · {aiDraft.shouldReply ? '建议回复' : '无需回复'} · {aiDraft.elapsedMs}ms
+                        {aiDraft.reason ? ` · ${aiDraft.reason}` : ''}
+                      </div>
+                      {aiDraft.message && <div className="ai-quote">对方：{aiDraft.message}</div>}
+                      <textarea className="input ai-reply-text" value={aiDraft.reply}
+                        onChange={(e) => setAiDraft({ ...aiDraft, reply: e.target.value })} rows={3} />
+                      <div className="ai-actions">
+                        <button className="btn btn-primary" disabled={aiBusy || !aiDraft.reply.trim()}
+                          onClick={() => void sendAiDraft(true)}>发送到当前会话</button>
+                        <button className="btn" disabled={aiBusy || !aiDraft.reply.trim()}
+                          onClick={() => void sendAiDraft(false)}>只填入输入框</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {settingsTab === 'notify' && (
+                <div className="settings-panel">
+                  {!unread.enabled ? (
+                    <div className="files-hint">
+                      未读提醒未启用。需在服务端设置 <code>WOC_UNREAD_NOTIFY=1</code> 并重启面板后才能使用。
+                    </div>
+                  ) : (
+                    <>
+                      <div className="files-hint" style={{ marginBottom: 8 }}>
+                        定时检测微信会话列表的未读红点；有新消息时标签闪烁、提示音，并可发桌面通知。
+                        只检测"有新消息"，不读取聊天内容。
+                      </div>
+                      {unread.supported ? (
+                        <button className="btn btn-primary files-upload" onClick={unread.grant}>
+                          开启桌面通知权限
+                        </button>
+                      ) : (
+                        <div className="muted small">当前浏览器不支持或被拒绝桌面通知，仍会用标签闪烁+提示音提醒。</div>
+                      )}
+                      <button className="btn-text" style={{ alignSelf: 'flex-start' }} onClick={unread.toggleMute}>
+                        {unread.muted ? '本实例已静音（点击恢复）' : '本实例静音（点击关闭提醒）'}
+                      </button>
+                      <button className="btn-text" style={{ alignSelf: 'flex-start' }} onClick={unread.check}>
+                        立即检查一次
+                      </button>
+                      <div className="muted small">当前状态：{unread.hasUnread ? '检测到未读消息' : '暂无未读'}。</div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {settingsTab === 'quality' && (
+                <div className="settings-panel">
+                  <div className="files-hint" style={{ marginBottom: 10 }}>
+                    调节画面流畅度与清晰度的权衡。切换后会自动重连桌面（当前操作不受影响，聊天记录保留）。
+                  </div>
+                  {(Object.keys(QUALITY_PRESETS) as QualityMode[]).map((m) => {
+                    const p = QUALITY_PRESETS[m];
+                    return (
+                      <button
+                        key={m}
+                        className={'quality-option' + (m === qualityMode ? ' on' : '')}
+                        onClick={() => changeQuality(m)}
+                      >
+                        <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                          <span className="quality-option-name">{p.label}</span>
+                          <span className="quality-option-desc">
+                            帧率 {p.framerate} · 质量 {p.quality} · 压缩 {p.compression}
+                            {p.threading ? ' · 多线程' : ''}
+                          </span>
+                        </span>
+                        {m === qualityMode && <IcCheck size={16} />}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
 
               {settingsTab === 'bg' && (
                 <div className="settings-panel">

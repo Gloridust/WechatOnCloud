@@ -1397,6 +1397,36 @@ export async function execCapture(inst: Instance, cmd: string[], user = 'abc'): 
   });
 }
 
+// 与 execCapture 同样执行命令，但原样收集二进制 stdout（AI 代回要把容器内截图送进模型，
+// 不能经过 UTF-8 字符串解码）。stderr 仍按文本读，退出码非 0 时抛错。
+export async function execCaptureBinary(inst: Instance, cmd: string[], user = 'abc'): Promise<Buffer> {
+  const c = docker.getContainer(inst.containerName);
+  const exec = await execCreate(c, { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: user });
+  const stream = await exec.start({ hijack: true, stdin: false });
+  return await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let err = '';
+    const errDec = new StringDecoder('utf8');
+    const stdout = { write: (b: Buffer) => { chunks.push(Buffer.from(b)); } } as any;
+    const stderr = { write: (b: Buffer) => { err += errDec.write(b); } } as any;
+    docker.modem.demuxStream(stream, stdout, stderr);
+    stream.on('end', async () => {
+      try {
+        err += errDec.end();
+        const info = await exec.inspect();
+        if (info.ExitCode && info.ExitCode !== 0) {
+          reject(new Error((err || `命令执行失败，退出码 ${info.ExitCode}`).trim()));
+          return;
+        }
+        resolve(Buffer.concat(chunks));
+      } catch (e) {
+        reject(e);
+      }
+    });
+    stream.on('error', reject);
+  });
+}
+
 // 触发下载/安装（detached，立即返回，后台下载）。按实例 appType 分发：app-ctl.sh wechat → 委托回
 // wechat-ctl.sh；telegram 等各自实现。兼容旧容器（升级前镜像里没有 /woc/app-ctl.sh）：有则用之，无则
 // 回退老的 wechat-ctl.sh（旧实例都是微信）。appType 取值受 instanceAppType 约束，可安全内插进 shell。
@@ -2244,22 +2274,61 @@ export async function pasteTextInInstance(inst: Instance, text: string): Promise
 // 甚至把路径当消息发出去。这里只备好剪贴板，由用户主动到应用输入框粘贴，安全且可回退。
 // 是否真正得到文件取决于应用（微信 Linux 版）对 text/uri-list 的支持；不支持时用户仍可用文件选择器，
 // 体验不比原来差。uri-list 不在 Xvnc 的 DLP_ClipTypes（text/html,image/png）里，不会触发大图 INCR 卡死。
-export async function pasteFilePathInInstance(inst: Instance, fileName: string): Promise<void> {
-  assertSafeName(fileName);
-  const name = `woc-uri-${Date.now()}.txt`;
+export async function pasteFilePathInInstance(inst: Instance, fileNames: string[] | string): Promise<void> {
+  const names = Array.isArray(fileNames) ? fileNames : [fileNames];
+  if (!names.length) return;
+  names.forEach(assertSafeName);
+  const tmp = `woc-uri-${Date.now()}.txt`;
   // file:// + encodeURI：中文/空格路径按 URI 规则转义；路径固定指向桌面中转目录，文件名经 safeName 校验。
-  const uri = `file://${TRANSFER_DIR}/${encodeURIComponent(fileName)}\r\n`;
+  const uris = names.map((n) => `file://${TRANSFER_DIR}/${encodeURIComponent(n)}`).join('\r\n') + '\r\n';
   await withClipLock(inst.id, async () => {
     cancelClipRestore(inst.id);
-    await docker.getContainer(inst.containerName).putArchive(tarSingleFile(name, Buffer.from(uri, 'utf8')), { path: '/tmp' });
+    await docker.getContainer(inst.containerName).putArchive(tarSingleFile(tmp, Buffer.from(uris, 'utf8')), { path: '/tmp' });
     const cmd = [
       ...X_PRELUDE,
       CLIP_DISCARD,
-      `xclip -selection clipboard -t text/uri-list -i /tmp/${name} >/dev/null 2>&1`,
-      `rm -f /tmp/${name}`,
+      `xclip -selection clipboard -t text/uri-list -i /tmp/${tmp} >/dev/null 2>&1`,
+      `rm -f /tmp/${tmp}`,
     ].join('\n');
     await execCapture(inst, ['bash', '-c', cmd]);
   });
+}
+
+// 【1.6.6 文件直达会话】探测容器内 X server 当前活动窗口的类名，用于判断能否安全自动粘贴。
+// 上传动作发生在面板父页面（宿主浏览器），不改变容器内 X 的 _NET_ACTIVE_WINDOW；
+// 用户最后一次在 VNC 里点击的目标（微信/QQ）仍是 active，据此可确认焦点落点。
+// 返回小写类名（如 'wechat' / 'qq'），拿不到返回空串。
+export async function activeWindowClass(inst: Instance): Promise<string> {
+  const cmd = [
+    'display="${DISPLAY:-}"',
+    'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
+    'export DISPLAY="${display:-:1}"',
+    'wid=$(xprop -root _NET_ACTIVE_WINDOW 2>/dev/null | sed -n "s/.*# //p")',
+    '[ -z "$wid" ] && exit 0',
+    'xprop -id "$wid" WM_CLASS 2>/dev/null | sed -n "s/.*= *\"\\([^\"]*\\)\".*/\\1/p" | tr "[:upper:]" "[:lower:]"',
+  ].join('\n');
+  try {
+    return (await execCapture(inst, ['sh', '-c', cmd])).trim().split('\n')[0] || '';
+  } catch {
+    return '';
+  }
+}
+
+// 【1.6.6】把文件上传路径写进剪贴板后，若活动窗口确为微信/QQ，自动按 Ctrl+V 送入当前会话；
+// 否则只备好剪贴板（用户可手动到输入框粘贴）。返回是否真的自动按了键，供前端给出准确提示。
+// 刻意不写「已送达」——微信是否把 uri-list 识别为文件取决于应用本身，这里只保证按键落在正确的应用窗口。
+export async function sendFilesToInstance(
+  inst: Instance,
+  fileNames: string[],
+  appType: string,
+): Promise<{ autoPasted: boolean; activeClass: string }> {
+  await pasteFilePathInInstance(inst, fileNames);
+  const cls = await activeWindowClass(inst);
+  const wechatLike = /wechat|weixin|qq/.test(cls) || (!cls && /wechat|qq/.test(appType));
+  if (!wechatLike) return { autoPasted: false, activeClass: cls };
+  // 焦点在聊天应用：自动粘贴。复用 xdoKey 先松修饰键，避免修饰键残留导致误发。
+  await execCapture(inst, ['bash', '-c', [...X_PRELUDE, xdoKey('ctrl+v')].join('\n')]);
+  return { autoPasted: true, activeClass: cls };
 }
 
 // 把本机剪贴板里的图片（截图等）粘进应用（issue #91）：写入容器的 X 剪贴板（目标类型即图片 MIME），

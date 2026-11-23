@@ -65,6 +65,32 @@ export interface MemLimits {
   watchdogEnabled: boolean;
   intervalSec: number;
 }
+// AI 代回微信（1.6.6）。API Key 永不回传明文，只用 apiKeySet 表示已配置。
+export interface AutoReplyConfigPublic {
+  mode: 'off' | 'assist' | 'auto';
+  baseURL: string;
+  model: string;
+  prompt: string;
+  whitelist: string[];
+  triggerPrefix: string;
+  stopWords: string[];
+  cooldownSec: number;
+  maxPerHour: number;
+  maxChars: number;
+  pollSec: number;
+  apiKeySet: boolean;
+  enabledByEnv: boolean;
+}
+export interface AutoReplyDraft {
+  shouldReply: boolean;
+  reason: string;
+  contact: string;
+  message: string;
+  reply: string;
+  usedScreenshot: boolean;
+  elapsedMs: number;
+}
+
 export interface InstanceWithStatus extends PanelInstance {
   runtime: RuntimeState;
   wechat: WechatStatus;
@@ -502,11 +528,44 @@ export const api = {
   // 本机剪贴板文字粘进应用（粘贴桥判断本机比容器新时用；贴完留在容器剪贴板）
   pasteText: (id: string, text: string) =>
     req(`/api/instances/${id}/paste-text`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ text }) }),
-  // 【优化】把已上传到桌面的文件路径以 uri-list 写进容器剪贴板，用户在应用里 Ctrl+V 直接取用（不自动按键）
-  pasteFilePath: (id: string, name: string) =>
-    req(`/api/instances/${id}/paste-path`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ name }) }),
+  // 【优化】把已上传的文件路径写进容器剪贴板；1.6.6 支持多文件 + 焦点校验后自动粘贴。
+  // 返回 autoPasted=true 表示已确认焦点在聊天应用并按了 Ctrl+V；false 表示仅备好剪贴板需手动粘贴。
+  pasteFilePath: (id: string, names: string[] | string, autoPaste = false) =>
+    req<{ ok: boolean; autoPasted?: boolean; activeClass?: string; names?: string[] }>(
+      `/api/instances/${id}/paste-path`,
+      {
+        method: 'POST',
+        headers: viewerHeader,
+        body: JSON.stringify(Array.isArray(names) ? { names, autoPaste } : { name: names, autoPaste }),
+      },
+    ),
   keyInInstance: (id: string, key: string) =>
     req(`/api/instances/${id}/key`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ key }) }),
+
+  // 未读消息通知（1.6.6）
+  unreadConfig: (id: string) =>
+    req<{ enabled: boolean; pollSec: number; hasUnread: boolean }>(`/api/instances/${id}/unread/config`),
+  // AI 代回微信
+  autoReplyConfig: (id: string) => req<AutoReplyConfigPublic>(`/api/instances/${id}/auto-reply/config`),
+  autoReplySaveConfig: (id: string, patch: Partial<AutoReplyConfigPublic> & { apiKey?: string; clearApiKey?: boolean }) =>
+    req<AutoReplyConfigPublic>(`/api/instances/${id}/auto-reply/config`, { method: 'POST', body: JSON.stringify(patch) }),
+  autoReplyDraft: (id: string, userMessage?: string) =>
+    req<AutoReplyDraft>(`/api/instances/${id}/auto-reply/draft`, {
+      method: 'POST',
+      body: JSON.stringify(userMessage ? { userMessage } : {}),
+    }),
+  autoReplySend: (id: string, text: string, withEnter: boolean) =>
+    req<{ sent: boolean; activeClass: string }>(`/api/instances/${id}/auto-reply/send`, {
+      method: 'POST',
+      body: JSON.stringify({ text, withEnter }),
+    }),
+  autoReplyCheck: (id: string) => req<{ ran: boolean; skipped?: string; sent?: boolean; error?: string }>(`/api/instances/${id}/auto-reply/check`, { method: 'POST' }),
+
+  unreadCheck: (id: string) =>
+    req<{ hasUnread: boolean; badges: number; error?: string }>(`/api/instances/${id}/unread/check`, {
+      method: 'POST',
+      headers: viewerHeader,
+    }),
 
   // 桌面壁纸
   listBackgrounds: (id: string) => req<{ backgrounds: string[] }>(`/api/admin/instances/${id}/backgrounds`),

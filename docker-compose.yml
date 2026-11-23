@@ -63,6 +63,10 @@ services:
       - WOC_CHAT_BACKUP_AUTO=${WOC_CHAT_BACKUP_AUTO:-}
       - WOC_CHAT_BACKUP_CRON_MIN=${WOC_CHAT_BACKUP_CRON_MIN:-360}
       - WOC_CHAT_BACKUP_KEEP=${WOC_CHAT_BACKUP_KEEP:-0}
+      - WOC_UNREAD_NOTIFY=${WOC_UNREAD_NOTIFY:-}
+      - WOC_UNREAD_POLL_SEC=${WOC_UNREAD_POLL_SEC:-30}
+      # AI 代回微信：设为 1 才允许后台自动发送；配置在面板「桌面设置 → AI 代回」。
+      - WOC_AUTO_REPLY=${WOC_AUTO_REPLY:-}
 
     volumes:
       # 面板账号数据（用户、实例元信息、密码哈希）

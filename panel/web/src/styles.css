@@ -2324,6 +2324,86 @@ body {
   gap: 6px;
 }
 
+/* AI 代回（1.6.6） */
+.ai-reply-panel .ai-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ai-reply-panel .ai-row > span:first-child {
+  min-width: 72px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.ai-reply-panel .ai-row .input {
+  flex: 1;
+  min-width: 120px;
+}
+.ai-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--text) 15%, transparent);
+  border-radius: var(--r-small);
+}
+.ai-quote {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  border-left: 3px solid var(--accent);
+  padding-left: 8px;
+}
+.ai-reply-text {
+  width: 100%;
+  resize: vertical;
+  line-height: 1.6;
+}
+.ai-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 串流画质档位（1.6.6） */
+.quality-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+  border-radius: var(--r-small);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.quality-option:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.quality-option.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.quality-option > svg {
+  margin-left: auto;
+  flex: none;
+  color: var(--accent);
+}
+.quality-option-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+.quality-option-desc {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* 壁纸缩略图网格 */
 .bg-grid {
   display: grid;
