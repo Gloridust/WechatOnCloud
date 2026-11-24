@@ -8,15 +8,19 @@
 import { execCapture } from './docker';
 import type { Instance } from './store';
 
-// 会话列表在 1176x666 布局下约 x=56..256（头像+行）；裁这条窄带避开右侧聊天内容。
-const CROP_W = 200;
-const CROP_H = 600;
-const CROP = `crop=${CROP_W}:${CROP_H}:56:52`;
+// 会话列表：实测 1656x892 布局下约 x=56..268；裁这条窄带避开右侧聊天内容。
+// CROP_X=56 同时把最左侧竖排工具栏（其总未读角标在 x≈109 但 y<100、且是另一类徽标）排除在外。
+const CROP_X = 56;
+const CROP_Y = 40;
+const CROP_W = 212;
+const CROP_H = 840;
+const CROP = `crop=${CROP_W}:${CROP_H}:${CROP_X}:${CROP_Y}`;
 
-// 阈值：未读徽标约 16-18px、面积 200+。基线实测最大红块 8x4=26px，留足余量。
-const MIN_WH = 11;
-const SKEW = 7;
-const MIN_AREA = 60;
+// 阈值：实测会话未读红点只有 8x7≈43 像素（远小于旧假设的 16-18px），旧阈值 11px/60 面积会全部漏检。
+// 降到 6px/25 面积；靠「接近正方形 + 位于会话列表窄带」区分红点与红色头像/图片。
+const MIN_WH = 6;
+const SKEW = 5;
+const MIN_AREA = 25;
 
 // 纯 Python 连通块检测（零依赖）。输出 "badges biggest"。
 const DETECT_PY = `import sys
@@ -26,7 +30,7 @@ raw=sys.stdin.buffer.read(); n=W*H; mask=bytearray(n)
 for p in range(n):
     i=p*3; r,g,b=raw[i],raw[i+1],raw[i+2]
     if r>200 and g<90 and b<90 and r-g>130 and r-b>130: mask[p]=1
-seen=bytearray(n); badges=0; biggest=0
+seen=bytearray(n); badges=0; biggest=0; spots=[]
 for p in range(n):
     if not mask[p] or seen[p]: continue
     q=deque([p]); seen[p]=1; cnt=0; x0=x1=p%W; y0=y1=p//W
@@ -43,17 +47,27 @@ for p in range(n):
     if cnt>=${MIN_AREA} and w>=${MIN_WH} and h>=${MIN_WH} and abs(w-h)<=${SKEW}:
         badges+=1
         if cnt>biggest: biggest=cnt
-print(badges, biggest)
+        spots.append("%d,%d,%d" % ((x0+x1)//2,(y0+y1)//2,cnt))
+print(badges, biggest, " ".join(spots))
 `;
 const DETECT_PY_B64 = Buffer.from(DETECT_PY, 'utf8').toString('base64');
 
 const DISPLAY_SETUP =
   'display="${DISPLAY:-}"; if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi; export DISPLAY="${display:-:1}"';
 
+export interface UnreadSpot {
+  x: number; // 红点中心，root 绝对坐标
+  y: number;
+  area: number;
+  clickX: number; // 建议点击位置：会话行中部（会话名区域），避开红点本体与头像
+  clickY: number;
+}
+
 export interface UnreadState {
   hasUnread: boolean;
   badges: number; // 检出的红点徽标数
   biggest: number; // 最大红点面积（调试用）
+  spots: UnreadSpot[]; // 每个红点的坐标，供自动回复切到对应会话
   checkedAt: number;
   error?: string;
 }
@@ -68,6 +82,7 @@ export async function probeUnread(inst: Instance): Promise<UnreadState> {
     hasUnread: false,
     badges: 0,
     biggest: 0,
+    spots: [],
     checkedAt: now,
     error,
   });
@@ -93,10 +108,26 @@ export async function probeUnread(inst: Instance): Promise<UnreadState> {
       await new Promise((r) => setTimeout(r, 400));
       out = (await execCapture(inst, ['bash', '-c', cmd])).trim();
     }
-    const [badgesStr, biggestStr] = out.split(/\s+/);
-    const badges = parseInt(badgesStr, 10) || 0;
-    const biggest = parseInt(biggestStr, 10) || 0;
-    return { hasUnread: badges > 0, badges, biggest, checkedAt: now };
+    const parts = out.trim().split(/\s+/).filter(Boolean);
+    const badges = parseInt(parts[0], 10) || 0;
+    const biggest = parseInt(parts[1], 10) || 0;
+    const spots: UnreadSpot[] = [];
+    for (const token of parts.slice(2)) {
+      const cols = token.split(',').map((v) => parseInt(v, 10));
+      const [cx, cy, area] = cols;
+      if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+      spots.push({
+        x: cx + CROP_X,
+        y: cy + CROP_Y,
+        area: Number.isFinite(area) ? area : 0,
+        // 会话行中部（会话名区域）：点这里稳定打开会话，不会误触红点/头像/删除按钮。
+        clickX: CROP_X + Math.round(CROP_W * 0.5),
+        clickY: cy + CROP_Y,
+      });
+    }
+    // 会话列表按最后消息时间排序：列表越靠上越新，优先处理；同高度取红点更大的（未读更多）。
+    spots.sort((a, b) => a.y - b.y || b.area - a.area);
+    return { hasUnread: badges > 0, badges, biggest, spots, checkedAt: now };
   } catch (e: any) {
     return fail(String(e?.message || e).slice(0, 200));
   }

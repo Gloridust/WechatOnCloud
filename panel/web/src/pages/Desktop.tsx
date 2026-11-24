@@ -2473,7 +2473,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                           <span>不限制会话</span>
                           <button
                             className={'btn ' + (aiCfg.autoAllowAny ? 'btn-primary' : '')}
-                            title="白名单为空时，允许对当前已打开的会话自动回复；不会替你切换会话，识别错人风险自负"
+                            title="白名单为空时，按未读红点自动切到有新消息的会话代回；识别错人风险自负"
                             onClick={() => void saveAiCfg({ autoAllowAny: !aiCfg.autoAllowAny })}
                           >{aiCfg.autoAllowAny ? '已开启' : '已关闭'}</button>
                         </div>

@@ -2414,6 +2414,25 @@ export async function focusChatInput(inst: Instance, appType = 'wechat'): Promis
   }
 }
 
+// 【1.6.19】点击会话列表里指定行（坐标来自 unreadProbe 的全屏截图，是 root 绝对坐标）。
+// 自动回复据此从「当前打开的会话」切到「真正有新未读消息的会话」，否则截图识别对象永远是错的。
+export async function clickChatInList(inst: Instance, x: number, y: number): Promise<boolean> {
+  const cmd = [
+    'display="${DISPLAY:-}"',
+    'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
+    'export DISPLAY="${display:-:1}"',
+    'command -v xdotool >/dev/null 2>&1 || exit 1',
+    `xdotool mousemove ${Math.round(x)} ${Math.round(y)} click 1 2>/dev/null || exit 2`,
+    'sleep 0.4',
+    'echo ok',
+  ].join('\n');
+  try {
+    return (await execCapture(inst, ['sh', '-c', cmd])).trim().includes('ok');
+  } catch {
+    return false;
+  }
+}
+
 // 【1.6.6】把文件上传路径写进剪贴板后，若活动窗口确为微信/QQ，自动按 Ctrl+V 送入当前会话；
 // 否则只备好剪贴板（用户可手动到输入框粘贴）。返回是否真的自动按了键，供前端给出准确提示。
 // 刻意不写「已送达」——微信是否把 uri-list 识别为文件取决于应用本身，这里只保证按键落在正确的应用窗口。

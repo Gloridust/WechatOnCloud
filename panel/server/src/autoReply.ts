@@ -12,7 +12,7 @@
 // 隐私：截图只裁右侧聊天区，不落盘；API Key 只存在 accounts.json（0600），接口一律脱敏回传。
 import { deflateSync } from 'node:zlib';
 import { getSettings, getAutoReplyEnabled, type Instance } from './store.js';
-import { execCaptureBinary, typeInInstance, keyInInstance, activeWindowClass, focusChatWindow, focusChatInput } from './docker.js';
+import { execCaptureBinary, typeInInstance, keyInInstance, activeWindowClass, focusChatWindow, focusChatInput, clickChatInList } from './docker.js';
 import { appendInstanceLog } from './logs.js';
 import { probeUnread } from './unreadProbe.js';
 
@@ -33,7 +33,7 @@ export interface AutoReplyConfig {
   pollSec: number; // auto 模式轮询间隔（最小 15s）
   autoTagEnabled: boolean; // 全自动发出的消息是否带「由 AI 代回」标记
   autoTagText: string; // 标记文案，附加在正文末尾
-  autoAllowAny: boolean; // 白名单为空时是否允许对当前会话自动回复（需显式开启，风险自负）
+  autoAllowAny: boolean; // 白名单为空时是否允许对任意有新未读的会话自动回复（需显式开启，风险自负）
 }
 
 export type PublicAutoReplyConfig = Omit<AutoReplyConfig, 'apiKey'> & {
@@ -574,6 +574,8 @@ const lastSentAt = new Map<string, number>();
 const sentTimestamps = new Map<string, number[]>();
 const fingerprints = new Map<string, { at: number; key: string }>();
 const busy = new Set<string>();
+// 已切到目标会话但尚未成功代回：红点被点击清掉后不再有增量，靠这个标记让下一轮继续处理。
+const pendingRetry = new Set<string>();
 const lastSkipLog = new Map<string, number>();
 
 // 跳过原因写进实例日志（同一原因 5 分钟最多一条），否则用户只看到"没反应"无法排障。
@@ -594,10 +596,9 @@ export async function autoReplyTick(
   const skip = (reason: string): TickResult => { noteSkip(inst, reason); return { ran: false, skipped: reason }; };
   if (cfg.mode !== 'auto' && !force) return skip('自动模式未开启');
   if (!getAutoReplyEnabled().enabled && !force) return skip('总开关未开启（设置 → AI 代回）');
-  // 自动模式不会替用户切换会话（切错群比不回更糟），默认要求白名单；
-  // 若用户显式开启「不限制会话」，则只回复当前已打开的会话，风险自负。
+  // 自动模式默认要求白名单；显式开启「不限制会话」后，会按未读红点自动切到有新消息的会话代回，风险自负。
   if (cfg.mode === 'auto' && !cfg.whitelist.length && !cfg.autoAllowAny) {
-    return skip('自动模式需先配置白名单，或开启「不限制会话（仅当前窗口）」');
+    return skip('自动模式需先配置白名单，或开启「不限制会话」');
   }
   if (!cfg.apiKey) return skip('未配置 API Key');
   // OCR / 纯识别类模型不会按提示词输出 JSON，无法生成回复。提前拦下并写清原因，
@@ -622,7 +623,7 @@ export async function autoReplyTick(
   if (unread.error) return skip(`未读检测失败：${unread.error}`);
   const prev = lastBadges.get(inst.id) ?? 0;
   // 只有「红点数量增加」或「无→有」才算新消息；红点一直在不重复回。
-  const isNew = force || unread.badges > prev || (prev === 0 && unread.hasUnread);
+  const isNew = force || pendingRetry.has(inst.id) || unread.badges > prev || (prev === 0 && unread.hasUnread);
   if (!isNew) {
     // 红点被用户手动清掉（数量下降/归零）：同步基线，否则下一批同数目的消息不再触发。
     if (unread.badges < prev) lastBadges.set(inst.id, unread.badges);
@@ -637,18 +638,40 @@ export async function autoReplyTick(
   const recent = (sentTimestamps.get(inst.id) || []).filter((t) => now - t < 3_600_000);
   if (recent.length >= cfg.maxPerHour) return skip('已达每小时上限');
 
+  const retrying = pendingRetry.has(inst.id);
   busy.add(inst.id);
   try {
+    // 【1.6.19 关键修复】先切到真正有新未读消息的会话。
+    // 之前只聚焦微信窗口就截图，截图仍是「当前打开的会话」，与新消息无关——表现为
+    // 「当前在哪个会话就回哪个会话」。未读探测现在带红点坐标，点它所在的行即可切到目标会话。
+    // 重试轮不再重复点击（红点已清、坐标已失效），当前停留的就是目标会话。
+    if (unread.spots.length && !retrying) {
+      const target = unread.spots[0]; // 已按 y 排序：列表越靠上 = 最后消息越新
+      const cls = await focusChatWindow(inst, inst.appType);
+      if (!/wechat|weixin/.test(cls)) throw new Error(`切会话前无法聚焦微信窗口（class=${cls || '空'}）`);
+      const ok = await clickChatInList(inst, target.clickX, target.clickY);
+      if (!ok) throw new Error(`点击未读会话行失败（${target.clickX},${target.clickY}）`);
+      pendingRetry.add(inst.id);
+      appendInstanceLog(inst.id, `[ai-reply] 已切到未读会话：红点(${target.x},${target.y}) 面积${target.area} 点击(${target.clickX},${target.clickY})`);
+      await new Promise((r) => setTimeout(r, 500)); // 等聊天区刷新，避免截到旧画面
+    } else {
+      appendInstanceLog(inst.id, '[ai-reply] 检出未读但无红点坐标，按当前会话处理');
+    }
     // 全自动：截图前主动聚焦微信，避免拍到面板浏览器或其他窗口。
     const draft = await draftReply(inst, undefined, { autoFocus: true });
-    if (!draft.shouldReply) return { ran: true, draft, sent: false, skipped: draft.reason || '模型判断无需回复' };
+    if (!draft.shouldReply) {
+      pendingRetry.delete(inst.id);
+      return { ran: true, draft, sent: false, skipped: draft.reason || '模型判断无需回复' };
+    }
     const fp = `${draft.contact}|${draft.message}`.slice(0, 300);
     const last = fingerprints.get(inst.id);
     if (last && last.key === fp && now - last.at < 30 * 60_000) {
+      pendingRetry.delete(inst.id);
       return { ran: true, draft, sent: false, skipped: '同一条消息已处理过' };
     }
     // 全自动：发送前主动把微信窗口激活到前台，避免焦点在面板浏览器时贴错窗口。
     const sent = await sendDraft(inst, draft.reply, true, { autoTag: true, autoFocus: true });
+    pendingRetry.delete(inst.id);
     lastSentAt.set(inst.id, now);
     recent.push(now);
     sentTimestamps.set(inst.id, recent);
@@ -666,7 +689,8 @@ export async function autoReplyTick(
   } catch (e: any) {
     // 真正的执行错误（焦点/窗口/接口）：回退未读基线，下一轮重新识别为增量并重试，
     // 否则一次偶发失败会让这条消息永久不再触发——这正是「开了没反应」的常见原因。
-    lastBadges.set(inst.id, prev);
+    // 已切过会话的话红点被点掉了，基线只能归零；靠 pendingRetry 让下一轮继续处理当前会话。
+    lastBadges.set(inst.id, pendingRetry.has(inst.id) ? 0 : prev);
     const msg = String(e?.message || e).slice(0, 300);
     appendInstanceLog(inst.id, `[ai-reply] 自动回复失败（下轮重试）：${msg}`);
     return { ran: true, sent: false, error: msg };
