@@ -171,10 +171,11 @@ export function saveAutoReplyConfig(id: string, patch: Record<string, unknown>):
 }
 
 // ---------- 截图 ----------
-// 右侧聊天区：x=256 到屏幕右边、y=52 到屏幕底部。
-// 【1.6.20】用 iw/ih 动态表达式，KasmVNC 分辨率变化（1656x892 ↔ 1176x726）时始终截到完整聊天区，
-// 不再硬编码 900x590（分辨率变小时会截偏/超界）。
-const CHAT_CROP = 'crop=iw-256:ih-52:256:52';
+// 右侧聊天区：x=256 到屏幕右边、y=0 到屏幕底部（含会话标题栏）。
+// 【1.6.20】用 iw/ih 动态表达式，KasmVNC 分辨率变化（1656x892 ↔ 1176x726）时始终截到完整聊天区。
+// 【1.6.21】y 起点从 52 改为 0：标题栏（会话名，约 y=35..50）原来被裁掉，导致模型 contact 永远为空，
+// 白名单匹配失效、指纹也无法区分会话。包含标题后 contact 可识别。
+const CHAT_CROP = 'crop=iw-256:ih:256:0';
 const DISPLAY_SETUP =
   'display="${DISPLAY:-}"; if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi; export DISPLAY="${display:-:1}"';
 
@@ -624,12 +625,14 @@ export async function autoReplyTick(
   const unread = await probeUnread(inst);
   if (unread.error) return skip(`未读检测失败：${unread.error}`);
   const prev = lastBadges.get(inst.id) ?? 0;
-  // 只有「红点数量增加」或「无→有」才算新消息；红点一直在不重复回。
-  const isNew = force || pendingRetry.has(inst.id) || unread.badges > prev || (prev === 0 && unread.hasUnread);
+  // 【1.6.21 关键修复】只要有未读红点就处理，不再用「红点数量增量」判断。
+  // 旧逻辑：回复掉一个会话后红点数从 2 减到 1，`1 > 2` 不成立 → 剩下的会话被当成「没有新增」永久吞掉，
+  // 表现为「成功回了一条后其它的都不回」。去重改由 fingerprints（同一条消息 30 分钟内不重复）与冷却负责。
+  const isNew = force || pendingRetry.has(inst.id) || unread.hasUnread;
   if (!isNew) {
-    // 红点被用户手动清掉（数量下降/归零）：同步基线，否则下一批同数目的消息不再触发。
+    // 红点被用户手动清掉（数量下降/归零）：同步基线。
     if (unread.badges < prev) lastBadges.set(inst.id, unread.badges);
-    return skip('没有新的未读增量');
+    return skip('没有未读消息');
   }
   // 先记下本轮增量对应的徽标，作为「已受理」基线；但若发送/草稿中途失败，catch 里会回退到
   // prev，让下一轮重新识别为增量并重试——否则一次焦点失败就会让这条消息永久不再触发。
@@ -661,15 +664,17 @@ export async function autoReplyTick(
     }
     // 全自动：截图前主动聚焦微信，避免拍到面板浏览器或其他窗口。
     const draft = await draftReply(inst, undefined, { autoFocus: true });
-    if (!draft.shouldReply) {
-      pendingRetry.delete(inst.id);
-      return { ran: true, draft, sent: false, skipped: draft.reason || '模型判断无需回复' };
-    }
     const fp = `${draft.contact}|${draft.message}`.slice(0, 300);
     const last = fingerprints.get(inst.id);
     if (last && last.key === fp && now - last.at < 30 * 60_000) {
       pendingRetry.delete(inst.id);
       return { ran: true, draft, sent: false, skipped: '同一条消息已处理过' };
+    }
+    if (!draft.shouldReply) {
+      // 也记指纹：红点可能还在（语音/表情等无法回复），避免每轮重复调模型烧钱。
+      fingerprints.set(inst.id, { at: now, key: fp });
+      pendingRetry.delete(inst.id);
+      return { ran: true, draft, sent: false, skipped: draft.reason || '模型判断无需回复' };
     }
     // 全自动：发送前主动把微信窗口激活到前台，避免焦点在面板浏览器时贴错窗口。
     const sent = await sendDraft(inst, draft.reply, true, { autoTag: true, autoFocus: true });
