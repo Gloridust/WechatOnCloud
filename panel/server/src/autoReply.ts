@@ -171,8 +171,10 @@ export function saveAutoReplyConfig(id: string, patch: Record<string, unknown>):
 }
 
 // ---------- 截图 ----------
-// 右侧聊天区。沿用 unreadProbe 的 1176x666 基准；窗口尺寸变化时不强求精确，模型能从画面自行判断。
-const CHAT_CROP = 'crop=900:590:256:52';
+// 右侧聊天区：x=256 到屏幕右边、y=52 到屏幕底部。
+// 【1.6.20】用 iw/ih 动态表达式，KasmVNC 分辨率变化（1656x892 ↔ 1176x726）时始终截到完整聊天区，
+// 不再硬编码 900x590（分辨率变小时会截偏/超界）。
+const CHAT_CROP = 'crop=iw-256:ih-52:256:52';
 const DISPLAY_SETUP =
   'display="${DISPLAY:-}"; if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi; export DISPLAY="${display:-:1}"';
 

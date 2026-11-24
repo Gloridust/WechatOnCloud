@@ -8,13 +8,14 @@
 import { execCapture } from './docker';
 import type { Instance } from './store';
 
-// 会话列表：实测 1656x892 布局下约 x=56..268；裁这条窄带避开右侧聊天内容。
-// CROP_X=56 同时把最左侧竖排工具栏（其总未读角标在 x≈109 但 y<100、且是另一类徽标）排除在外。
+// 会话列表：固定在左侧 x=56..280（竖排工具栏之后、聊天区之前）。
+// 【1.6.20】KasmVNC 分辨率会随浏览器窗口变化（实测 1656x892 ↔ 1176x726），高度绝不能硬编码，
+// 否则 crop 超界 → ffmpeg exit 4 → 三个小时一次都检不出。改用 ih 动态算高度，上下各留边。
 const CROP_X = 56;
 const CROP_Y = 40;
-const CROP_W = 212;
-const CROP_H = 840;
-const CROP = `crop=${CROP_W}:${CROP_H}:${CROP_X}:${CROP_Y}`;
+const CROP_W = 224; // 会话列表宽度固定（与屏幕宽度无关）
+// crop=w:h:x:y，h 用 ih-上下留白动态计算，避免分辨率变化导致超界。
+const CROP = `crop=${CROP_W}:ih-80:${CROP_X}:${CROP_Y}`;
 
 // 阈值：实测会话未读红点只有 8x7≈43 像素（远小于旧假设的 16-18px），旧阈值 11px/60 面积会全部漏检。
 // 降到 6px/25 面积；靠「接近正方形 + 位于会话列表窄带」区分红点与红色头像/图片。
@@ -22,11 +23,12 @@ const MIN_WH = 6;
 const SKEW = 5;
 const MIN_AREA = 25;
 
-// 纯 Python 连通块检测（零依赖）。输出 "badges biggest"。
+// 纯 Python 连通块检测（零依赖）。输出 "badges biggest x,y,area ..."。
+// 【1.6.20】H 由 stdin 字节数反推（分辨率动态），不再硬编码，彻底杜绝 crop 与 Python 尺寸不一致。
 const DETECT_PY = `import sys
 from collections import deque
-W,H=${CROP_W},${CROP_H}
-raw=sys.stdin.buffer.read(); n=W*H; mask=bytearray(n)
+W=${CROP_W}
+raw=sys.stdin.buffer.read(); H=len(raw)//(W*3); n=W*H; mask=bytearray(n)
 for p in range(n):
     i=p*3; r,g,b=raw[i],raw[i+1],raw[i+2]
     if r>200 and g<90 and b<90 and r-g>130 and r-b>130: mask[p]=1
