@@ -2294,10 +2294,12 @@ export async function pasteFilePathInInstance(inst: Instance, fileNames: string[
   });
 }
 
-// 【1.6.6 文件直达会话】探测容器内 X server 当前活动窗口的类名，用于判断能否安全自动粘贴。
+// 【1.6.6 文件直达会话 / 1.6.15 修正】探测容器内 X server 当前活动窗口的标识，用于判断能否安全自动粘贴。
 // 上传动作发生在面板父页面（宿主浏览器），不改变容器内 X 的 _NET_ACTIVE_WINDOW；
 // 用户最后一次在 VNC 里点击的目标（微信/QQ）仍是 active，据此可确认焦点落点。
-// 返回小写类名（如 'wechat' / 'qq'），拿不到返回空串。
+// 返回小写标识（优先 WM_CLASS，无则退回窗口标题，如 'wechat' / 'qq' / '微信'），拿不到返回空串。
+// 1.6.15：Linux 微信存在「有 WM_CLASS 的隐藏窗 + 无 WM_CLASS 的主聊天窗」两个窗口，
+// 真正接收输入的主窗常没有 WM_CLASS，只看 class 会误判成「焦点不在微信」导致自动回复永不发送。
 export async function activeWindowClass(inst: Instance): Promise<string> {
   const cmd = [
     'display="${DISPLAY:-}"',
@@ -2305,7 +2307,14 @@ export async function activeWindowClass(inst: Instance): Promise<string> {
     'export DISPLAY="${display:-:1}"',
     'wid=$(xprop -root _NET_ACTIVE_WINDOW 2>/dev/null | sed -n "s/.*# //p")',
     '[ -z "$wid" ] && exit 0',
-    'xprop -id "$wid" WM_CLASS 2>/dev/null | sed -n "s/.*= *\"\\([^\"]*\\)\".*/\\1/p" | tr "[:upper:]" "[:lower:]"',
+    // 优先 WM_CLASS；若为 "not found" 或无值，退回 _NET_WM_NAME / WM_NAME 标题。
+    'cls=$(xprop -id "$wid" WM_CLASS 2>/dev/null | sed -n "s/.*= *\"\\([^\"]*\\)\".*/\\1/p" | tr "[:upper:]" "[:lower:]")',
+    'if [ -n "$cls" ] && ! printf "%s" "$cls" | grep -qi "not found"; then echo "$cls"; exit 0; fi',
+    'title=$(xprop -id "$wid" _NET_WM_NAME 2>/dev/null | sed -n "s/.*= *\"\\(.*\\)\"/\\1/p")',
+    '[ -z "$title" ] && title=$(xprop -id "$wid" WM_NAME 2>/dev/null | sed -n "s/.*= *\"\\(.*\\)\"/\\1/p")',
+    // 规范化：标题含「微信/wechat」→ wechat，含 QQ → qq，其他原样小写返回。
+    'low=$(printf "%s" "$title" | tr "[:upper:]" "[:lower:]")',
+    'case "$low" in *微信*|*wechat*|*weixin*) echo wechat;; *qq*) echo qq;; *) echo "$low";; esac',
   ].join('\n');
   try {
     return (await execCapture(inst, ['sh', '-c', cmd])).trim().split('\n')[0] || '';
@@ -2321,19 +2330,38 @@ export async function activeWindowClass(inst: Instance): Promise<string> {
 // 用 xdotool search --onlyvisible --class 找窗口再 windowactivate --sync，实测可稳定切到微信。
 // 返回激活后的窗口类名（小写），失败返回空串，由调用方决定是否发送。
 export async function focusChatWindow(inst: Instance, appType = 'wechat'): Promise<string> {
-  const clsPattern = /qq/i.test(appType || '') ? 'qq' : 'wechat';
+  const wantQQ = /qq/i.test(appType || '');
+  const clsPattern = wantQQ ? 'qq' : 'wechat';
+  const titlePattern = wantQQ ? 'QQ' : '微信|wechat';
   const cmd = [
     'display="${DISPLAY:-}"',
     'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
     'export DISPLAY="${display:-:1}"',
     'command -v xdotool >/dev/null 2>&1 || exit 0',
-    `wid=$(xdotool search --onlyvisible --class '${clsPattern}' 2>/dev/null | head -1)`,
-    '[ -z "$wid" ] && exit 0',
-    'xdotool windowactivate --sync "$wid" 2>/dev/null || exit 0',
+    // 同时按 class 与标题收集候选（Linux 微信主聊天窗常无 WM_CLASS，只有标题「微信」）。
+    `ids="$(xdotool search --onlyvisible --class '${clsPattern}' 2>/dev/null); $(xdotool search --onlyvisible --name '${titlePattern}' 2>/dev/null)"`,
+    '[ -z "$(printf "%s" "$ids" | tr -d "[:space:]")" ] && exit 0',
+    // 多个微信窗口时选面积最大的那个（主聊天窗），避免激活到登录窗/隐藏窗。
+    'best=""; bestArea=0',
+    'for w in $ids; do',
+    '  geo=$(xwininfo -id "$w" 2>/dev/null | sed -n "s/.*Width: *\\([0-9]*\\).*/\\1/p")',
+    '  h=$(xwininfo -id "$w" 2>/dev/null | sed -n "s/.*Height: *\\([0-9]*\\).*/\\1/p")',
+    '  [ -z "$geo" ] && continue; [ -z "$h" ] && h=0',
+    '  area=$((geo*h))',
+    '  if [ "$area" -gt "$bestArea" ]; then bestArea=$area; best=$w; fi',
+    'done',
+    '[ -z "$best" ] && best=$(printf "%s" "$ids" | head -1)',
+    'xdotool windowactivate --sync "$best" 2>/dev/null || exit 0',
     'sleep 0.2',
     'focus=$(xdotool getwindowfocus 2>/dev/null)',
-    '[ "$focus" = "$wid" ] || exit 0',
-    'xprop -id "$focus" WM_CLASS 2>/dev/null | sed -n "s/.*= *\\"\\([^\\"]*\\)\\".*/\\1/p" | tr "[:upper:]" "[:lower:]" | head -1',
+    '[ "$focus" = "$best" ] || exit 0',
+    // 返回标识：优先 WM_CLASS，退回标题，供调用方判断是否确为聊天应用。
+    'cls=$(xprop -id "$focus" WM_CLASS 2>/dev/null | sed -n "s/.*= *\\"\\([^\\"]*\\)\\".*/\\1/p" | tr "[:upper:]" "[:lower:]")',
+    'if [ -n "$cls" ] && ! printf "%s" "$cls" | grep -qi "not found"; then echo "$cls"; exit 0; fi',
+    'title=$(xprop -id "$focus" _NET_WM_NAME 2>/dev/null | sed -n "s/.*= *\\"\\(.*\\)\\"/\\1/p")',
+    '[ -z "$title" ] && title=$(xprop -id "$focus" WM_NAME 2>/dev/null | sed -n "s/.*= *\\"\\(.*\\)\\"/\\1/p")',
+    'low=$(printf "%s" "$title" | tr "[:upper:]" "[:lower:]")',
+    'case "$low" in *微信*|*wechat*|*weixin*) echo wechat;; *qq*) echo qq;; *) echo "$low";; esac',
   ].join('\n');
   try {
     return (await execCapture(inst, ['sh', '-c', cmd])).trim().split('\n')[0] || '';
