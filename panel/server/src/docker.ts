@@ -2373,6 +2373,47 @@ export async function focusChatWindow(inst: Instance, appType = 'wechat'): Promi
   }
 }
 
+// 【1.6.18】聚焦聊天输入框：窗口激活只保证 X 焦点落在微信主窗，不保证落在「消息输入框」这个控件上。
+// 实测全自动回复时 Ctrl+V/回车打到了会话列表/空白处——动作执行了、日志写了「已发送」，但聊天区根本没有新消息。
+// 这里按窗口尺寸取相对坐标（聊天区中部、底部往上一点），避开右侧「发送」按钮与上方工具条，点击一次把输入焦点真正落到输入框。
+export async function focusChatInput(inst: Instance, appType = 'wechat'): Promise<boolean> {
+  const wantQQ = /qq/i.test(appType || '');
+  const clsPattern = wantQQ ? 'qq' : 'wechat';
+  const titlePattern = wantQQ ? 'QQ' : '微信|wechat';
+  const cmd = [
+    'display="${DISPLAY:-}"',
+    'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
+    'export DISPLAY="${display:-:1}"',
+    'command -v xdotool >/dev/null 2>&1 || exit 1',
+    `ids1=$(xdotool search --onlyvisible --class '${clsPattern}' 2>/dev/null)`,
+    `ids2=$(xdotool search --onlyvisible --name '${titlePattern}' 2>/dev/null)`,
+    'ids="$ids1 $ids2"',
+    '[ -z "$(printf "%s" "$ids" | tr -d "[:space:]")" ] && exit 1',
+    'best=""; bestArea=0; bw=0; bh=0',
+    'for w in $ids; do',
+    '  ww=$(xwininfo -id "$w" 2>/dev/null | sed -n "s/.*Width: *\\([0-9]*\\).*/\\1/p")',
+    '  hh=$(xwininfo -id "$w" 2>/dev/null | sed -n "s/.*Height: *\\([0-9]*\\).*/\\1/p")',
+    '  [ -z "$ww" ] && continue; [ -z "$hh" ] && hh=0',
+    '  area=$((ww*hh))',
+    '  if [ "$area" -gt "$bestArea" ]; then bestArea=$area; best=$w; bw=$ww; bh=$hh; fi',
+    'done',
+    '[ -z "$best" ] && exit 1',
+    'xdotool windowactivate --sync "$best" 2>/dev/null || exit 1',
+    'sleep 0.15',
+    // 相对窗口坐标：横向 45%（会话列表在左侧 ~22%，取聊天区中部），纵向离底部 55px（输入框内，避开发送按钮）。
+    '[ "$bw" -lt 400 ] && bw=1000; [ "$bh" -lt 300 ] && bh=600',
+    'ix=$((bw*45/100)); iy=$((bh-55))',
+    'xdotool mousemove --window "$best" "$ix" "$iy" click 1 2>/dev/null || exit 1',
+    'sleep 0.15',
+    'echo ok',
+  ].join('\n');
+  try {
+    return (await execCapture(inst, ['sh', '-c', cmd])).trim().includes('ok');
+  } catch {
+    return false;
+  }
+}
+
 // 【1.6.6】把文件上传路径写进剪贴板后，若活动窗口确为微信/QQ，自动按 Ctrl+V 送入当前会话；
 // 否则只备好剪贴板（用户可手动到输入框粘贴）。返回是否真的自动按了键，供前端给出准确提示。
 // 刻意不写「已送达」——微信是否把 uri-list 识别为文件取决于应用本身，这里只保证按键落在正确的应用窗口。

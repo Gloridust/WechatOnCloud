@@ -12,7 +12,7 @@
 // 隐私：截图只裁右侧聊天区，不落盘；API Key 只存在 accounts.json（0600），接口一律脱敏回传。
 import { deflateSync } from 'node:zlib';
 import { getSettings, getAutoReplyEnabled, type Instance } from './store.js';
-import { execCaptureBinary, typeInInstance, keyInInstance, activeWindowClass, focusChatWindow } from './docker.js';
+import { execCaptureBinary, typeInInstance, keyInInstance, activeWindowClass, focusChatWindow, focusChatInput } from './docker.js';
 import { appendInstanceLog } from './logs.js';
 import { probeUnread } from './unreadProbe.js';
 
@@ -184,6 +184,31 @@ export async function captureChatPng(inst: Instance): Promise<Buffer> {
     'rm -f /tmp/.woc_ar.xwd',
   ].join('\n');
   return execCaptureBinary(inst, ['bash', '-c', cmd]);
+}
+
+// 发送后校验用：把聊天区压成 80x80 灰度 raw（6400 字节），便于跨容器取回按字节比对。
+// 底部发一条消息会带来大片像素变化；时钟跳字、光标闪烁只影响极少字节，用差异比例即可区分「真发出去了」和「没发出去」。
+const VERIFY_CROP = `${CHAT_CROP},scale=80:80,format=gray`;
+export async function captureChatFingerprint(inst: Instance): Promise<Buffer | null> {
+  const cmd = [
+    DISPLAY_SETUP,
+    'xwd -root -silent -out /tmp/.woc_arf.xwd 2>/dev/null || exit 3',
+    `ffmpeg -y -loglevel error -i /tmp/.woc_arf.xwd -vf "${VERIFY_CROP}" -f rawvideo -pix_fmt gray pipe:1 2>/dev/null || exit 4`,
+    'rm -f /tmp/.woc_arf.xwd',
+  ].join('\n');
+  try {
+    const buf = await execCaptureBinary(inst, ['bash', '-c', cmd]);
+    return buf.length >= 6400 ? buf.subarray(0, 6400) : null;
+  } catch {
+    return null;
+  }
+}
+
+function fingerprintDiff(a: Buffer, b: Buffer): number {
+  if (!a || !b || a.length !== b.length) return 1;
+  let changed = 0;
+  for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 18) changed++;
+  return changed / a.length;
 }
 
 // ---------- 模型调用 ----------
@@ -513,13 +538,34 @@ export async function sendDraft(
   if (!/wechat|weixin/.test(cls)) {
     throw new Error(cls ? `当前焦点窗口是 ${cls}，无法自动发送，请在桌面点开微信会话输入框` : '找不到微信窗口，无法自动发送（微信可能未打开会话）');
   }
+  // 【1.6.18 关键修复】激活窗口 ≠ 焦点在输入框。此前只 windowactivate，Ctrl+V/回车常落到会话列表或空白处，
+  // 动作"执行成功"但聊天区没有新消息，日志却写了「已发送」、留痕也记了假成功。这里主动点一下输入框拿真焦点。
+  if (opts?.autoFocus) {
+    const clicked = await focusChatInput(inst, inst.appType);
+    appendInstanceLog(inst.id, `[ai-reply] 发送前点输入框 ${clicked ? '成功' : '未确认'}`);
+  }
+  // 发送前指纹：用于发送后确认聊天区确实发生了变化（消息真的发出去了）。
+  const beforeFp = opts?.autoFocus ? await captureChatFingerprint(inst) : null;
   await typeInInstance(inst, clean);
   if (withEnter) {
     await new Promise((r) => setTimeout(r, 250));
     await keyInInstance(inst, 'Return');
   }
+  // 发送后校验：等消息上屏后再取指纹比对。差异过小说明消息没进聊天区 —— 按失败处理，让上层回退基线重试，
+  // 且不能写「已发送」/留痕，避免再出现"记录说发了、实际没发"的假成功。
+  let verified = true;
+  if (opts?.autoFocus && withEnter && beforeFp) {
+    await new Promise((r) => setTimeout(r, 900));
+    const afterFp = await captureChatFingerprint(inst);
+    if (afterFp) {
+      const ratio = fingerprintDiff(beforeFp, afterFp);
+      verified = ratio > 0.01; // 1% 灰度像素变化，足以覆盖一条新气泡，又不被时钟/光标误触发
+      appendInstanceLog(inst.id, `[ai-reply] 发送后画面差异=${(ratio * 100).toFixed(1)}% ${verified ? '已确认上屏' : '未检出新消息'}`);
+      if (!verified) throw new Error('回复未出现在聊天区（焦点可能不在输入框），本轮不计成功，下轮重试');
+    }
+  }
   appendInstanceLog(inst.id, `[ai-reply] 已${withEnter ? '发送' : '填入'}回复（${clean.length}字）焦点=${cls || '未知'}${out.tagged ? ' 含AI标记' : ''}`);
-  return { sent: withEnter, activeClass: cls, text: clean, tagged: out.tagged, tagText: out.tagText };
+  return { sent: withEnter && verified, activeClass: cls, text: clean, tagged: out.tagged, tagText: out.tagText };
 }
 
 // ---------- 自动轮询 ----------
