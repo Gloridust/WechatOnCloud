@@ -221,9 +221,10 @@ async function callModel(cfg: AutoReplyConfig, image: Buffer | null, userText: s
 }
 
 // ---------- 模型发现 / 连通性验证（OpenAI 兼容接口） ----------
-// 1x1 红色 PNG，仅用于探测模型是否接受 image_url（视觉能力）；不上传任何会话截图。
+// 64x64 红白棋盘 PNG，仅用于探测模型是否接受 image_url（视觉能力）；不上传任何会话截图。
+// 1.6.12：原 1x1 图会被 Qwen3-VL 以「宽高必须 >28」拒绝，导致真 VLM 被误判为文本模型。
 const TINY_PNG_DATA =
-  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAY0lEQVR42u3XsQ0AIAwDQe+/dFggqdKAOERJwVUvp5L+Tuey9wEAAAAA2AEe+ej0HgAAAABgCVBiAAAAAHtAiQEAAADsASUGAAAAsAeUGIAAAAAe0CJAQAAAH4BHDof4dKdFE+fAAAAAElFTkSuQmCC';
 
 type Conn = { baseURL: string; apiKey: string; model: string };
 function resolveConn(id: string, patch?: Record<string, unknown>): Conn {
@@ -342,11 +343,15 @@ export async function verifyAutoReplyModel(id: string, patch?: Record<string, un
   } catch (e: any) {
     visionError = String(e?.message || e).slice(0, 200);
   }
+  // 视觉失败不一定是模型不支持：图片尺寸/编码被网关拒绝时，提示要区分开。
+  const probeIssue = !!visionError && /must be larger|failed to process|image size|dimension|base64/i.test(visionError);
   const hint = !textOk
     ? '文本调用失败：请检查接口地址、API Key 与模型名'
     : visionOk
       ? '文本与视觉均可用，可直接用截图识别（支持全自动）'
-      : '文本可用但视觉不可用：此模型不能读截图，请换视觉模型（VLM，如 qwen3-vl-plus），或手动填写对方消息';
+      : probeIssue
+        ? '文本可用，但测试图未被该接口接受（不一定是模型不支持视觉）；可手动填消息验证'
+        : '文本可用但视觉不可用：此模型不能读截图，请换视觉模型（VLM，如 qwen3-vl-plus），或手动填写对方消息';
   return { model: conn.model, baseURL: conn.baseURL, textOk, visionOk, textError, visionError, latencyMs: Date.now() - started, hint };
 }
 
