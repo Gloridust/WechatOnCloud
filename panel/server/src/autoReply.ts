@@ -10,6 +10,7 @@
 //   auto   自动：后台轮询未读红点增量，命中规则后自动生成并发送
 //
 // 隐私：截图只裁右侧聊天区，不落盘；API Key 只存在 accounts.json（0600），接口一律脱敏回传。
+import { deflateSync } from 'node:zlib';
 import { getSettings, getAutoReplyEnabled, type Instance } from './store.js';
 import { execCaptureBinary, typeInInstance, keyInInstance, activeWindowClass } from './docker.js';
 import { appendInstanceLog } from './logs.js';
@@ -223,8 +224,47 @@ async function callModel(cfg: AutoReplyConfig, image: Buffer | null, userText: s
 // ---------- 模型发现 / 连通性验证（OpenAI 兼容接口） ----------
 // 64x64 红白棋盘 PNG，仅用于探测模型是否接受 image_url（视觉能力）；不上传任何会话截图。
 // 1.6.12：原 1x1 图会被 Qwen3-VL 以「宽高必须 >28」拒绝，导致真 VLM 被误判为文本模型。
-const TINY_PNG_DATA =
-  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAY0lEQVR42u3XsQ0AIAwDQe+/dFggqdKAOERJwVUvp5L+Tuey9wEAAAAA2AEe+ej0HgAAAABgCVBiAAAAAHtAiQEAAADsASUGAAAAsAeUGIAAAAAe0CJAQAAAH4BHDof4dKdFE+fAAAAAElFTkSuQmCC';
+// 1.6.13：改用运行时按 PNG 规范生成，避免硬编码 base64 被截断/填充错误导致所有模型
+//         一律报「Failed to process the base64 image」（真 VLM 被再次误判）。
+function makeProbePng(width = 64, height = 64): string {
+  const crcTable = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    crcTable[n] = c >>> 0;
+  }
+  const crc32 = (buf: Buffer): number => {
+    let c = 0xffffffff;
+    for (const byte of buf) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length, 0);
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body), 0);
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 2; // 8-bit, truecolor RGB
+  const rows = Buffer.alloc(height * (1 + width * 3));
+  for (let y = 0; y < height; y++) {
+    const off = y * (1 + width * 3);
+    for (let x = 0; x < width; x++) {
+      const red = ((x >> 3) + (y >> 3)) % 2 === 0;
+      const p = off + 1 + x * 3;
+      rows[p] = 255; rows[p + 1] = red ? 0 : 255; rows[p + 2] = red ? 0 : 255;
+    }
+  }
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(rows, { level: 9 })),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+  return `data:image/png;base64,${png.toString('base64')}`;
+}
+const TINY_PNG_DATA = makeProbePng();
 
 type Conn = { baseURL: string; apiKey: string; model: string };
 function resolveConn(id: string, patch?: Record<string, unknown>): Conn {
