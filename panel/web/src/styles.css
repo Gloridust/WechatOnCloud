@@ -1539,6 +1539,28 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 顶栏未读徽标：有新消息时在标题旁可见，点击重新检查并停止闪烁 */
+.ws-unread-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 999px;
+  background: #e5484d;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.6;
+  cursor: pointer;
+  vertical-align: middle;
+  animation: woc-badge-pulse 1.4s ease-in-out infinite;
+  white-space: nowrap;
+}
+@keyframes woc-badge-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
 .ws-menu {
   display: none;
   flex: none;
@@ -1652,6 +1674,19 @@ body {
   height: 20px;
   margin: 0 2px;
   background: rgba(var(--shadow) / 0.16);
+}
+/* 设置：顶栏独立主按钮，和日常工具按钮视觉区分 */
+.ws-action-settings {
+  background: var(--accent-fill);
+  color: #fff;
+}
+.ws-action-settings .ic {
+  color: #fff;
+}
+.ws-action-settings:hover,
+.ws-action-settings:hover .ic {
+  color: #fff;
+  filter: brightness(1.06);
 }
 /* 主题切换：顶栏最右的图标按钮 */
 .theme-toggle {

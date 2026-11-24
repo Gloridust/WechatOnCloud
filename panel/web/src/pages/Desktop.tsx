@@ -11,7 +11,7 @@ import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
 import {
   IcFolder, IcKeyboard, IcClipboard, IcVolume, IcVolumeOff, IcMic, IcImage, IcRestart, IcUpload, IcDownload,
-  IcClose, IcCheck, IcFile, IcVideo, IcAudio, IcArchive, IcSearch, IcTrash, IcEye,
+  IcClose, IcCheck, IcFile, IcVideo, IcAudio, IcArchive, IcSearch, IcTrash, IcEye, IcSettings,
 } from '../icons';
 import { VncAudio } from '../vncAudio';
 import { RowMenu, type RowMenuItem } from '../parts';
@@ -1723,7 +1723,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     ...(isAdmin
       ? [
           {
-            label: '桌面设置',
+            label: '设置',
             onClick: () => {
               setShowSettings((v) => !v);
               if (!showSettings) {
@@ -1744,11 +1744,40 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
         <button className="ws-menu" onClick={onOpenMenu} aria-label="菜单">
           {MenuIcon}
         </button>
-        <span className="ws-title">{title}</span>
+        <span className="ws-title">
+          {title}
+          {unread.enabled && unread.hasUnread && (
+            <button
+              className="ws-unread-badge"
+              title="检测到未读消息（点击停止闪烁并重新检查）"
+              onClick={() => { unread.check(); window.focus(); }}
+            >
+              ● 新消息
+            </button>
+          )}
+        </span>
         {showVnc && (
           // 操作按钮收进可横向滑动的容器：手机宽度放不下时在容器内滑动，而不是整排挤出屏幕
           //（此前 390px 宽时「桌面」「重启」完全在屏幕外点不到，标题也被压成 0 宽）
           <div className="ws-actions">
+            {/* 设置：独立主按钮，置于最前并与日常工具按钮分隔（仅管理员可见） */}
+            {isAdmin && (
+              <>
+                <button
+                  className={'ws-action ws-action-settings' + (showSettings ? ' on' : '')}
+                  title="设置（壁纸/字体/画质/通知/AI 代回）"
+                  aria-pressed={showSettings}
+                  onClick={() => {
+                    setShowSettings((v) => !v);
+                    if (!showSettings) { refreshBgList(); refreshFontList(); }
+                  }}
+                >
+                  <IcSettings />
+                  <span>设置</span>
+                </button>
+                <span className="ws-action-sep ws-action-extra" aria-hidden="true" />
+              </>
+            )}
             <button
               className={'ws-action' + (showFiles ? ' on' : '')}
               title="文件传输"
@@ -1808,10 +1837,6 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             )}
             {isAdmin && (
               <>
-                <button className={'ws-action ws-action-extra' + (showSettings ? ' on' : '')} title="桌面设置（壁纸/字体）" aria-pressed={showSettings} onClick={() => { setShowSettings((v) => !v); if (!showSettings) { refreshBgList(); refreshFontList(); } }}>
-                  <IcImage />
-                  <span>桌面</span>
-                </button>
                 {/* 重启会断开所有人的连接：与日常开关隔开，避免顺手误点 */}
                 <span className="ws-action-sep ws-action-extra" aria-hidden="true" />
                 <button className="ws-action ws-action-extra" title="重启实例（修复卡死/最小化丢失）" onClick={restartInstance}>
@@ -2232,7 +2257,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           {showSettings && (
             <div className="iv-files">
               <div className="files-head">
-                <span>桌面设置</span>
+                <span>设置</span>
                 <button className="btn-text" onClick={() => setShowSettings(false)}>关闭</button>
               </div>
               <div className="settings-tabs">
@@ -2368,8 +2393,9 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               {settingsTab === 'notify' && (
                 <div className="settings-panel">
                   <div className="files-hint" style={{ marginBottom: 8 }}>
-                    定时检测微信会话列表的未读红点；有新消息时标签闪烁、提示音，并可发桌面通知。
-                    只检测"有新消息"，不读取聊天内容。开关在面板即可切换，即时生效。
+                    定时检测微信会话列表的未读红点，只判断"有新消息"，不读取聊天内容。开关在面板即可切换，即时生效。
+                    <br />有新消息时会在 <strong>3 处</strong>提醒：① 顶栏标题旁出现「● 新消息」；② 浏览器标签标题闪烁；③ 提示音 + 系统桌面通知（需授权）。
+                    <br />页面需保持打开才会检测；切到别的标签页时看标签闪烁最直观。
                   </div>
                   {isAdmin && (
                     <>
@@ -2410,6 +2436,9 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                       )}
                       <button className="btn-text" style={{ alignSelf: 'flex-start' }} onClick={unread.toggleMute}>
                         {unread.muted ? '本实例已静音（点击恢复）' : '本实例静音（点击关闭提醒）'}
+                      </button>
+                      <button className="btn-text" style={{ alignSelf: 'flex-start' }} onClick={unread.testAlert}>
+                        测试提醒（看标题闪烁 / 听提示音）
                       </button>
                       <button className="btn-text" style={{ alignSelf: 'flex-start' }} onClick={unread.check}>
                         立即检查一次

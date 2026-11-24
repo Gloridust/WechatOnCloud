@@ -17,6 +17,7 @@ export interface UnreadNotifyState {
   setEnabled: (on: boolean) => Promise<void>; // 管理员切换总开关（即时生效）
   setPollSec: (sec: number) => Promise<void>; // 管理员调整轮询间隔
   refresh: () => void; // 重新读取开关/重订阅
+  testAlert: () => void; // 手动触发一次提醒（验证三种体现位置）
 }
 
 const muteKey = (id: string | undefined) => `woc_unread_muted_${id || ''}`;
@@ -44,6 +45,8 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
       const Ctx = window.AudioContext || (window as any).webkitAudioContext;
       if (!Ctx) return;
       const ctx = audioCtxRef.current || (audioCtxRef.current = new Ctx());
+      // 浏览器自动播放策略：首次用户在页面上交互后解锁，否则 SSE 到来时 ctx 仍是 suspended 发不出声。
+      if (ctx.state === 'suspended') void ctx.resume();
       [0, 0.18].forEach((delay) => {
         const o = ctx.createOscillator();
         const g = ctx.createGain();
@@ -72,8 +75,8 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
     }, 900);
   };
 
-  const alertNow = (badges: number) => {
-    if (muted) return;
+  const alertNow = (badges: number, force = false) => {
+    if (muted && !force) return;
     startBlink();
     beep();
     if (supported && Notification.permission === 'granted') {
@@ -174,9 +177,23 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
     } catch { /* ignore */ }
   };
   const refresh = () => setVersion((v) => v + 1);
+  // 主动解锁提示音：在用户手势（点按钮）里 resume，确保后续 SSE 能出声。
+  const unlockAudio = () => {
+    try {
+      const Ctx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = audioCtxRef.current || (audioCtxRef.current = new Ctx());
+      if (ctx.state === 'suspended') void ctx.resume();
+    } catch { /* ignore */ }
+  };
+  const testAlert = () => {
+    unlockAudio();
+    alertNow(1, true); // 测试忽略静音，强制演示一遍提醒
+    setHasUnread(true);
+  };
 
   return {
     enabled, byEnv, pollSec, muted, hasUnread, supported: supported && perm !== 'denied',
-    grant, toggleMute, check, setEnabled: applyEnabled, setPollSec: applyPollSec, refresh,
+    grant, toggleMute, check, setEnabled: applyEnabled, setPollSec: applyPollSec, refresh, testAlert,
   };
 }
