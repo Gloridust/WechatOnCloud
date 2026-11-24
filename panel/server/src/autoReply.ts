@@ -12,7 +12,7 @@
 // 隐私：截图只裁右侧聊天区，不落盘；API Key 只存在 accounts.json（0600），接口一律脱敏回传。
 import { deflateSync } from 'node:zlib';
 import { getSettings, getAutoReplyEnabled, type Instance } from './store.js';
-import { execCaptureBinary, typeInInstance, keyInInstance, activeWindowClass } from './docker.js';
+import { execCaptureBinary, typeInInstance, keyInInstance, activeWindowClass, focusChatWindow } from './docker.js';
 import { appendInstanceLog } from './logs.js';
 import { probeUnread } from './unreadProbe.js';
 
@@ -218,7 +218,20 @@ async function callModel(cfg: AutoReplyConfig, image: Buffer | null, userText: s
   const answer = json.choices?.[0]?.message?.content;
   // 兼容 content 为数组（部分视觉模型返回 [{"type":"text","text":"..."}]）
   const text = typeof answer === 'string' ? answer : Array.isArray(answer) ? answer.map((p: any) => p?.text || '').join('') : '';
-  return parseJson(text) || { shouldReply: false, reason: '模型未返回可解析的 JSON', contact: '', message: text.slice(0, 200), reply: '' };
+  const parsed = parseJson(text);
+  if (parsed) return parsed;
+  // OCR / 纯识别类模型只会吐识别文字，不会按提示词输出 JSON，无法用于生成回复。
+  // 给出可操作的原因，避免用户以为是自动回复没运行。
+  const ocrLike = /ocr|识别/i.test(cfg.model);
+  return {
+    shouldReply: false,
+    reason: ocrLike
+      ? `模型 ${cfg.model} 是识别类模型，无法生成回复，请换成视觉对话模型（如 Qwen3-VL-32B-Instruct / qwen3-vl-plus）`
+      : '模型未返回可解析的 JSON',
+    contact: '',
+    message: text.slice(0, 200),
+    reply: '',
+  };
 }
 
 // ---------- 模型发现 / 连通性验证（OpenAI 兼容接口） ----------
@@ -415,12 +428,23 @@ function applyRules(cfg: AutoReplyConfig, d: DraftResult): DraftResult {
   return { ...d, reply: String(d.reply).trim().slice(0, cfg.maxChars) };
 }
 
-export async function draftReply(inst: Instance, userMessage?: string): Promise<DraftResult> {
+export async function draftReply(inst: Instance, userMessage?: string, opts?: { autoFocus?: boolean }): Promise<DraftResult> {
   const cfg = getAutoReplyConfig(inst.id);
   const started = Date.now();
   let image: Buffer | null = null;
   try {
-    if (!userMessage) image = await captureChatPng(inst);
+    if (!userMessage) {
+      // 全自动截图前先把微信窗口切到前台：xwd -root 截的是整个 X 桌面，若焦点/前台是别的程序，
+      // 模型会看到错误画面。主动聚焦保证裁剪出的聊天区确实是微信。
+      if (opts?.autoFocus) {
+        const cls = await focusChatWindow(inst, inst.appType);
+        if (!/wechat|weixin/.test(cls)) {
+          appendInstanceLog(inst.id, `[ai-reply] 自动截图前无法聚焦微信窗口（class=${cls || '空'}），本轮跳过`);
+          throw new Error('自动截图前无法把微信窗口切到前台，请确认微信已打开会话');
+        }
+      }
+      image = await captureChatPng(inst);
+    }
     const extra = userMessage
       ? `对方消息（由用户直接提供，优先于截图）：${userMessage}`
       : '请从截图中识别最后一条靠左的新消息。';
@@ -473,17 +497,21 @@ export async function sendDraft(
   inst: Instance,
   text: string,
   withEnter: boolean,
-  opts?: { autoTag?: boolean },
+  opts?: { autoTag?: boolean; autoFocus?: boolean },
 ): Promise<{ sent: boolean; activeClass: string; text: string; tagged: boolean; tagText: string }> {
   const cfg = getAutoReplyConfig(inst.id);
   // 仅全自动发送带标记；人工确认模式保持原样，避免干预用户手改的草稿。
   const out = opts?.autoTag ? taggedReply(cfg, text) : { text: String(text || '').trim().slice(0, cfg.maxChars), tagged: false, tagText: '' };
   const clean = out.text;
   if (!clean) throw new Error('回复内容为空');
-  const cls = await activeWindowClass(inst);
-  // 焦点不在微信就绝不盲发：xdotool 作用于 X server 的当前焦点，可能把回复贴进别的窗口。
+  let cls = await activeWindowClass(inst);
+  // 全自动模式发送前主动把微信窗口切到前台：轮询时焦点常在面板浏览器，等用户手动点开
+  // 就失去了全自动的意义。先激活再校验，仍不是微信才放弃——避免把回复贴错窗口。
+  if (opts?.autoFocus && !/wechat|weixin/.test(cls)) {
+    cls = await focusChatWindow(inst, inst.appType);
+  }
   if (!/wechat|weixin/.test(cls)) {
-    throw new Error(cls ? `当前焦点窗口是 ${cls}，请先在桌面点开微信会话输入框再发送` : '拿不到当前焦点窗口，请先点开微信会话输入框再发送');
+    throw new Error(cls ? `当前焦点窗口是 ${cls}，无法自动发送，请在桌面点开微信会话输入框` : '找不到微信窗口，无法自动发送（微信可能未打开会话）');
   }
   await typeInInstance(inst, clean);
   if (withEnter) {
@@ -526,16 +554,23 @@ export async function autoReplyTick(
     return skip('自动模式需先配置白名单，或开启「不限制会话（仅当前窗口）」');
   }
   if (!cfg.apiKey) return skip('未配置 API Key');
+  // OCR / 纯识别类模型不会按提示词输出 JSON，无法生成回复。提前拦下并写清原因，
+  // 免得每轮都调用接口、返回空结果，用户却只看到「没生效」。
+  if (/ocr/i.test(cfg.model)) {
+    return skip(`模型 ${cfg.model} 是识别类模型，无法生成回复，请换成视觉对话模型（如 Qwen3-VL-32B-Instruct）`);
+  }
   if (busy.has(inst.id)) return skip('上一轮仍在执行');
   if (isUserActive(inst.id)) return skip('用户正在操作桌面，已让行');
 
   const unread = await probeUnread(inst);
   if (unread.error) return skip(`未读检测失败：${unread.error}`);
   const prev = lastBadges.get(inst.id) ?? 0;
-  lastBadges.set(inst.id, unread.badges);
   // 只有「红点数量增加」或「无→有」才算新消息；红点一直在不重复回。
   const isNew = force || unread.badges > prev || (prev === 0 && unread.hasUnread);
   if (!isNew) return skip('没有新的未读增量');
+  // 先记下本轮增量对应的徽标，作为「已受理」基线；但若发送/草稿中途失败，catch 里会回退到
+  // prev，让下一轮重新识别为增量并重试——否则一次焦点失败就会让这条消息永久不再触发。
+  lastBadges.set(inst.id, unread.badges);
 
   const now = Date.now();
   if (now - (lastSentAt.get(inst.id) || 0) < cfg.cooldownSec * 1000) return skip('冷却时间内');
@@ -544,14 +579,16 @@ export async function autoReplyTick(
 
   busy.add(inst.id);
   try {
-    const draft = await draftReply(inst);
+    // 全自动：截图前主动聚焦微信，避免拍到面板浏览器或其他窗口。
+    const draft = await draftReply(inst, undefined, { autoFocus: true });
     if (!draft.shouldReply) return { ran: true, draft, sent: false, skipped: draft.reason || '模型判断无需回复' };
     const fp = `${draft.contact}|${draft.message}`.slice(0, 300);
     const last = fingerprints.get(inst.id);
     if (last && last.key === fp && now - last.at < 30 * 60_000) {
       return { ran: true, draft, sent: false, skipped: '同一条消息已处理过' };
     }
-    const sent = await sendDraft(inst, draft.reply, true, { autoTag: true });
+    // 全自动：发送前主动把微信窗口激活到前台，避免焦点在面板浏览器时贴错窗口。
+    const sent = await sendDraft(inst, draft.reply, true, { autoTag: true, autoFocus: true });
     lastSentAt.set(inst.id, now);
     recent.push(now);
     sentTimestamps.set(inst.id, recent);
@@ -567,8 +604,11 @@ export async function autoReplyTick(
     });
     return { ran: true, draft, sent: true };
   } catch (e: any) {
+    // 真正的执行错误（焦点/窗口/接口）：回退未读基线，下一轮重新识别为增量并重试，
+    // 否则一次偶发失败会让这条消息永久不再触发——这正是「开了没反应」的常见原因。
+    lastBadges.set(inst.id, prev);
     const msg = String(e?.message || e).slice(0, 300);
-    appendInstanceLog(inst.id, `[ai-reply] 自动回复失败：${msg}`);
+    appendInstanceLog(inst.id, `[ai-reply] 自动回复失败（下轮重试）：${msg}`);
     return { ran: true, sent: false, error: msg };
   } finally {
     busy.delete(inst.id);

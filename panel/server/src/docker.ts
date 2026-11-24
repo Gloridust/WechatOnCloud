@@ -2314,6 +2314,34 @@ export async function activeWindowClass(inst: Instance): Promise<string> {
   }
 }
 
+// 【1.6.14 AI 代回】把聊天窗口（微信/QQ/WeChat）激活到前台，供全自动发送前使用。
+// 自动轮询时焦点可能落在面板浏览器或其他程序，xdotool 的按键作用于 X 当前焦点窗口，
+// 若不先切回聊天窗口就可能把回复贴错地方——所以自动模式改为「主动激活 + 再校验」，
+// 而不是直接要求用户手动点开（那样全自动根本无法无人值守运行）。
+// 用 xdotool search --onlyvisible --class 找窗口再 windowactivate --sync，实测可稳定切到微信。
+// 返回激活后的窗口类名（小写），失败返回空串，由调用方决定是否发送。
+export async function focusChatWindow(inst: Instance, appType = 'wechat'): Promise<string> {
+  const clsPattern = /qq/i.test(appType || '') ? 'qq' : 'wechat';
+  const cmd = [
+    'display="${DISPLAY:-}"',
+    'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
+    'export DISPLAY="${display:-:1}"',
+    'command -v xdotool >/dev/null 2>&1 || exit 0',
+    `wid=$(xdotool search --onlyvisible --class '${clsPattern}' 2>/dev/null | head -1)`,
+    '[ -z "$wid" ] && exit 0',
+    'xdotool windowactivate --sync "$wid" 2>/dev/null || exit 0',
+    'sleep 0.2',
+    'focus=$(xdotool getwindowfocus 2>/dev/null)',
+    '[ "$focus" = "$wid" ] || exit 0',
+    'xprop -id "$focus" WM_CLASS 2>/dev/null | sed -n "s/.*= *\\"\\([^\\"]*\\)\\".*/\\1/p" | tr "[:upper:]" "[:lower:]" | head -1',
+  ].join('\n');
+  try {
+    return (await execCapture(inst, ['sh', '-c', cmd])).trim().split('\n')[0] || '';
+  } catch {
+    return '';
+  }
+}
+
 // 【1.6.6】把文件上传路径写进剪贴板后，若活动窗口确为微信/QQ，自动按 Ctrl+V 送入当前会话；
 // 否则只备好剪贴板（用户可手动到输入框粘贴）。返回是否真的自动按了键，供前端给出准确提示。
 // 刻意不写「已送达」——微信是否把 uri-list 识别为文件取决于应用本身，这里只保证按键落在正确的应用窗口。
