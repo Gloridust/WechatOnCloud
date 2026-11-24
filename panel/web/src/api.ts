@@ -80,6 +80,7 @@ export interface AutoReplyConfigPublic {
   pollSec: number;
   autoTagEnabled: boolean;
   autoTagText: string;
+  autoAllowAny: boolean;
   apiKeySet: boolean;
   enabledByEnv: boolean;
 }

@@ -32,6 +32,7 @@ export interface AutoReplyConfig {
   pollSec: number; // auto 模式轮询间隔（最小 15s）
   autoTagEnabled: boolean; // 全自动发出的消息是否带「由 AI 代回」标记
   autoTagText: string; // 标记文案，附加在正文末尾
+  autoAllowAny: boolean; // 白名单为空时是否允许对当前会话自动回复（需显式开启，风险自负）
 }
 
 export type PublicAutoReplyConfig = Omit<AutoReplyConfig, 'apiKey'> & {
@@ -102,6 +103,7 @@ const DEFAULTS: AutoReplyConfig = {
   pollSec: 30,
   autoTagEnabled: true,
   autoTagText: '（此消息由 AI 代回）',
+  autoAllowAny: false,
 };
 
 type StoreConfig = Partial<AutoReplyConfig>;
@@ -136,6 +138,7 @@ function sanitize(raw: StoreConfig): AutoReplyConfig {
     pollSec: num(raw.pollSec, DEFAULTS.pollSec, 15, 300),
     autoTagEnabled: raw.autoTagEnabled === undefined ? DEFAULTS.autoTagEnabled : !!raw.autoTagEnabled,
     autoTagText: typeof raw.autoTagText === 'string' ? raw.autoTagText.slice(0, 60) : DEFAULTS.autoTagText,
+    autoAllowAny: raw.autoAllowAny === undefined ? DEFAULTS.autoAllowAny : !!raw.autoAllowAny,
   };
 }
 
@@ -152,7 +155,7 @@ export function getPublicAutoReplyConfig(id: string): PublicAutoReplyConfig {
 export function saveAutoReplyConfig(id: string, patch: Record<string, unknown>): PublicAutoReplyConfig {
   const cur = getAutoReplyConfig(id);
   const next: StoreConfig = { ...cur };
-  for (const k of ['mode', 'baseURL', 'model', 'prompt', 'triggerPrefix', 'cooldownSec', 'maxPerHour', 'maxChars', 'pollSec', 'autoTagEnabled', 'autoTagText'] as const) {
+  for (const k of ['mode', 'baseURL', 'model', 'prompt', 'triggerPrefix', 'cooldownSec', 'maxPerHour', 'maxChars', 'pollSec', 'autoTagEnabled', 'autoTagText', 'autoAllowAny'] as const) {
     if (patch[k] !== undefined) (next as any)[k] = patch[k];
   }
   for (const k of ['whitelist', 'stopWords'] as const) {
@@ -254,7 +257,14 @@ async function compatFetch(conn: Conn, path: string, body?: unknown, timeoutMs =
       });
       const raw = await res.text();
       if (!res.ok) {
-        last = `${res.status}：${raw.slice(0, 160)}`;
+        // 常见错误翻成人话，避免用户盯着英文 402 猜原因。
+        const friendly =
+          res.status === 401 || res.status === 403 ? 'API Key 无效或无权限'
+          : res.status === 402 ? 'API 账户余额不足或额度用尽'
+          : res.status === 429 ? '调用频率/额度超限'
+          : res.status === 404 ? '接口路径不存在（检查接口地址是否含 /v1）'
+          : '';
+        last = `${res.status}${friendly ? `：${friendly}` : ''}：${raw.slice(0, 120)}`;
         continue;
       }
       return parseJson(raw) || {};
@@ -445,6 +455,16 @@ const lastSentAt = new Map<string, number>();
 const sentTimestamps = new Map<string, number[]>();
 const fingerprints = new Map<string, { at: number; key: string }>();
 const busy = new Set<string>();
+const lastSkipLog = new Map<string, number>();
+
+// 跳过原因写进实例日志（同一原因 5 分钟最多一条），否则用户只看到"没反应"无法排障。
+function noteSkip(inst: Instance, reason: string): void {
+  const key = `${inst.id}|${reason}`;
+  const now = Date.now();
+  if (now - (lastSkipLog.get(key) || 0) < 5 * 60_000) return;
+  lastSkipLog.set(key, now);
+  appendInstanceLog(inst.id, `[ai-reply] 跳过：${reason}`);
+}
 
 export async function autoReplyTick(
   inst: Instance,
@@ -452,27 +472,30 @@ export async function autoReplyTick(
   force = false,
 ): Promise<TickResult> {
   const cfg = getAutoReplyConfig(inst.id);
-  if (cfg.mode !== 'auto' && !force) return { ran: false, skipped: '自动模式未开启' };
-  if (!getAutoReplyEnabled().enabled && !force) return { ran: false, skipped: '总开关未开启（桌面设置 → AI 代回）' };
-  // 自动模式不会替用户切换会话（切错群比不回更糟），因此必须指定白名单：模型识别出的
-  // 联系人/群名命中白名单才发。assist 模式由用户亲自打开会话，不受此限制。
-  if (cfg.mode === 'auto' && !cfg.whitelist.length) return { ran: false, skipped: '自动模式需先配置白名单' };
-  if (!cfg.apiKey) return { ran: false, skipped: '未配置 API Key' };
-  if (busy.has(inst.id)) return { ran: false, skipped: '上一轮仍在执行' };
-  if (isUserActive(inst.id)) return { ran: false, skipped: '用户正在操作桌面，已让行' };
+  const skip = (reason: string): TickResult => { noteSkip(inst, reason); return { ran: false, skipped: reason }; };
+  if (cfg.mode !== 'auto' && !force) return skip('自动模式未开启');
+  if (!getAutoReplyEnabled().enabled && !force) return skip('总开关未开启（设置 → AI 代回）');
+  // 自动模式不会替用户切换会话（切错群比不回更糟），默认要求白名单；
+  // 若用户显式开启「不限制会话」，则只回复当前已打开的会话，风险自负。
+  if (cfg.mode === 'auto' && !cfg.whitelist.length && !cfg.autoAllowAny) {
+    return skip('自动模式需先配置白名单，或开启「不限制会话（仅当前窗口）」');
+  }
+  if (!cfg.apiKey) return skip('未配置 API Key');
+  if (busy.has(inst.id)) return skip('上一轮仍在执行');
+  if (isUserActive(inst.id)) return skip('用户正在操作桌面，已让行');
 
   const unread = await probeUnread(inst);
-  if (unread.error) return { ran: false, skipped: `未读检测失败：${unread.error}` };
+  if (unread.error) return skip(`未读检测失败：${unread.error}`);
   const prev = lastBadges.get(inst.id) ?? 0;
   lastBadges.set(inst.id, unread.badges);
   // 只有「红点数量增加」或「无→有」才算新消息；红点一直在不重复回。
   const isNew = force || unread.badges > prev || (prev === 0 && unread.hasUnread);
-  if (!isNew) return { ran: false, skipped: '没有新的未读增量' };
+  if (!isNew) return skip('没有新的未读增量');
 
   const now = Date.now();
-  if (now - (lastSentAt.get(inst.id) || 0) < cfg.cooldownSec * 1000) return { ran: false, skipped: '冷却时间内' };
+  if (now - (lastSentAt.get(inst.id) || 0) < cfg.cooldownSec * 1000) return skip('冷却时间内');
   const recent = (sentTimestamps.get(inst.id) || []).filter((t) => now - t < 3_600_000);
-  if (recent.length >= cfg.maxPerHour) return { ran: false, skipped: '已达每小时上限' };
+  if (recent.length >= cfg.maxPerHour) return skip('已达每小时上限');
 
   busy.add(inst.id);
   try {

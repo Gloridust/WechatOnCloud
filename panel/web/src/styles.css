@@ -2345,23 +2345,63 @@ body {
   flex-direction: column;
   gap: 6px;
 }
+/* 设置项较多时面板内部滚动，不再撑破浮层（1.6.11） */
+.settings-float {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
 
-/* AI 代回（1.6.6） */
+/* AI 代回（1.6.6；1.6.11 折叠分组） */
 .ai-reply-panel .ai-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 .ai-reply-panel .ai-row > span:first-child {
-  min-width: 72px;
-  font-size: 12px;
+  min-width: 62px;
+  font-size: 11px;
   color: var(--muted);
 }
 .ai-reply-panel .ai-row .input {
   flex: 1;
-  min-width: 120px;
+  min-width: 100px;
+  font-size: 12px;
+  padding: 5px 7px;
 }
+.ai-tip {
+  font-size: 11px;
+  line-height: 1.5;
+}
+.ai-status {
+  padding: 6px 8px;
+  border-radius: var(--r-small);
+  font-size: 11px;
+  line-height: 1.45;
+  border: 1px solid transparent;
+}
+.ai-status.ok { color: var(--ok, #3ba776); background: color-mix(in srgb, var(--ok, #3ba776) 10%, transparent); }
+.ai-status.warn { color: var(--warn, #d89a2b); background: color-mix(in srgb, var(--warn, #d89a2b) 10%, transparent); }
+.ai-group {
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  border-radius: var(--r-small);
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.ai-group > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  list-style: none;
+  padding: 1px 0;
+}
+.ai-group > summary::-webkit-details-marker { display: none; }
+.ai-group > summary::before { content: '▸ '; color: var(--muted); }
+.ai-group[open] > summary::before { content: '▾ '; }
 .ai-draft {
   display: flex;
   flex-direction: column;

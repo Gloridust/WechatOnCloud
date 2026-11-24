@@ -1813,10 +1813,10 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           {unread.enabled && unread.hasUnread && (
             <button
               className="ws-unread-badge"
-              title="检测到未读消息（点击停止闪烁并重新检查）"
-              onClick={() => { unread.check(); window.focus(); }}
+              title="检测到未读消息（点击关闭本次提醒，下次新消息会再提醒）"
+              onClick={() => { unread.dismiss(); window.focus(); }}
             >
-              ● 新消息
+              ● 新消息 ×
             </button>
           )}
         </span>
@@ -2341,7 +2341,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           )}
 
           {showSettings && (
-            <div className="iv-files">
+            <div className="iv-files settings-float">
               <div className="files-head">
                 <span>{settingsScope === 'desktop' ? '桌面设置' : '设置'}</span>
                 <button className="btn-text" onClick={() => setShowSettings(false)}>关闭</button>
@@ -2363,20 +2363,27 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
 
               {settingsTab === 'ai' && (
                 <div className="settings-panel ai-reply-panel">
-                  <div className="files-hint">
-                    参考 CowAgent / wechat-bot 的低风险做法：不碰协议与 Hook，只读当前会话截图，经多模态模型生成草稿，
-                    再用剪贴板中文直贴。<strong>默认关闭</strong>；总开关与模式均可在面板切换，即时生效。
-                    <br />读截图必须使用<strong>视觉语言模型（VLM）</strong>，如 qwen3-vl-plus / gpt-4o-mini；纯文本模型请在下方手动填写对方消息。
-                    可用「获取模型 / 验证模型」先测再存。
+                  <div className="files-hint ai-tip">
+                    不碰协议/Hook：只读当前会话截图 + 剪贴板中文直贴。读截图需 <strong>VLM</strong>；纯文本模型请手动填消息。
                   </div>
                   {!isAdmin ? (
-                    <div className="files-hint">模型与规则配置仅管理员可见。你可直接使用下方「生成草稿」。</div>
+                    <div className="files-hint">模型与规则仅管理员可见。你可直接使用下方「生成草稿」。</div>
                   ) : !aiCfg ? (
                     <div className="files-hint">正在读取配置…</div>
                   ) : (
                     <>
-                      <div className="ai-row">
-                        <span>模式</span>
+                      <div className={'ai-status ' + (
+                        aiCfg.mode === 'auto' && aiCfg.enabledByEnv && aiCfg.apiKeySet && (aiCfg.whitelist.length || aiCfg.autoAllowAny) ? 'ok' : 'warn'
+                      )}>
+                        {aiCfg.mode === 'off' ? '当前：关闭' : aiCfg.mode === 'assist' ? '当前：人工确认' : '当前：全自动'}
+                        {' · '}{aiCfg.enabledByEnv ? '总开关已开' : '总开关未开'}
+                        {aiCfg.mode === 'auto' && !aiCfg.apiKeySet ? ' · 未配置 API Key' : ''}
+                        {aiCfg.mode === 'auto' && !aiCfg.whitelist.length && !aiCfg.autoAllowAny ? ' · 未设白名单，不会发送' : ''}
+                      </div>
+                      <details className="ai-group" open>
+                        <summary>开关与模型（必填）</summary>
+                        <div className="ai-row">
+                          <span>模式</span>
                         <select
                           className="input"
                           value={aiCfg.mode}
@@ -2404,12 +2411,6 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                           }}
                         >{aiCfg.enabledByEnv ? '已开启（点击关闭）' : '已关闭（点击开启）'}</button>
                       </div>
-                      {aiCfg.mode === 'auto' && !aiCfg.enabledByEnv && (
-                        <div className="files-hint">自动回复总开关未开启：点上方开关即可启用，无需重启面板。</div>
-                      )}
-                      {aiCfg.mode === 'auto' && !aiCfg.whitelist.length && (
-                        <div className="files-hint">自动模式不会替你切换会话，必须先填白名单；只有识别到的联系人/群命中白名单才会发送。</div>
-                      )}
                       <div className="ai-row">
                         <span>接口地址</span>
                         <input className="input" value={aiCfg.baseURL} onChange={(e) => setAiCfg({ ...aiCfg, baseURL: e.target.value })}
@@ -2449,12 +2450,23 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                         <button className="btn-text" disabled={!aiKey.trim()} onClick={() => void saveAiCfg({ apiKey: aiKey })}>保存</button>
                         {aiCfg.apiKeySet && <button className="btn-text danger" onClick={() => void saveAiCfg({ clearApiKey: true })}>清除</button>}
                       </div>
-                      <div className="ai-row">
-                        <span>白名单</span>
-                        <input className="input" defaultValue={aiCfg.whitelist.join('、')}
-                          onBlur={(e) => void saveAiCfg({ whitelist: e.target.value.split(/[,，、\n]/).map((s) => s.trim()).filter(Boolean) })}
-                          placeholder="留空=不限，多个用顿号分隔" />
-                      </div>
+                      </details>
+                      <details className="ai-group">
+                        <summary>发送规则与标记</summary>
+                        <div className="ai-row">
+                          <span>白名单</span>
+                          <input className="input" defaultValue={aiCfg.whitelist.join('、')}
+                            onBlur={(e) => void saveAiCfg({ whitelist: e.target.value.split(/[,，、\n]/).map((s) => s.trim()).filter(Boolean) })}
+                            placeholder="联系人/群，顿号分隔" />
+                        </div>
+                        <div className="ai-row">
+                          <span>不限制会话</span>
+                          <button
+                            className={'btn ' + (aiCfg.autoAllowAny ? 'btn-primary' : '')}
+                            title="白名单为空时，允许对当前已打开的会话自动回复；不会替你切换会话，识别错人风险自负"
+                            onClick={() => void saveAiCfg({ autoAllowAny: !aiCfg.autoAllowAny })}
+                          >{aiCfg.autoAllowAny ? '已开启' : '已关闭'}</button>
+                        </div>
                       <div className="ai-row">
                         <span>触发前缀</span>
                         <input className="input" defaultValue={aiCfg.triggerPrefix}
@@ -2485,14 +2497,16 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                           placeholder="（此消息由 AI 代回）" />
                       </div>
                       {aiCfg.autoTagEnabled && aiCfg.mode === 'auto' && (
-                        <div className="files-hint">仅「自动回复」发送的消息会在末尾加标记，人工确认模式不受影响；示例：好的，稍后回复你 {aiCfg.autoTagText}</div>
+                        <div className="files-hint">标记仅全自动发送时附加，人工确认模式不加。</div>
                       )}
+                      </details>
                     </>
                   )}
 
-                  <div className="files-hint" style={{ marginTop: 8 }}>
-                    生成草稿时先点进微信会话输入框；模型只识别最底部一条靠左的新消息。
-                    若截图识别不准，可在下方直接填写对方消息（走纯文本，不传截图）。
+                  <details className="ai-group">
+                    <summary>手动生成草稿</summary>
+                  <div className="files-hint">
+                    先点进微信会话输入框；留空读截图，填文字则走纯文本。
                   </div>
                   <input className="input" value={aiManual} onChange={(e) => setAiManual(e.target.value)}
                     placeholder="可选：直接填写对方消息，留空则读截图" />
@@ -2517,8 +2531,11 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                       </div>
                     </div>
                   )}
+                  </details>
                   {isAdmin && (
-                    <div className="ai-history">
+                    <details className="ai-group">
+                      <summary>全自动回复记录</summary>
+                      <div className="ai-history">
                       <div className="ai-history-head">
                         <strong>全自动回复记录</strong>
                         <button className="btn-text" onClick={() => void loadAiHistory()}>刷新</button>
@@ -2535,7 +2552,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                           <div className="ai-history-reply">已发：{h.reply}</div>
                         </div>
                       ))}
-                    </div>
+                      </div>
+                    </details>
                   )}
                 </div>
               )}

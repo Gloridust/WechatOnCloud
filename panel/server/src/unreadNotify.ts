@@ -60,7 +60,8 @@ export async function pollOnce(inst: Instance): Promise<{ hasUnread: boolean; ba
   const r = await probeUnread(inst);
   const prev = lastState.get(inst.id) || false;
   lastState.set(inst.id, r.hasUnread);
-  broadcast(inst.id, r.hasUnread, r.badges);
+  // 只在状态真正变化时广播：红点一直在时不重复响铃；红点消失时也推一条，让前端撤销提醒。
+  if (prev !== r.hasUnread) broadcast(inst.id, r.hasUnread, r.badges);
   return { hasUnread: r.hasUnread, badges: r.badges, error: r.error };
 }
 

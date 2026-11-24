@@ -18,6 +18,7 @@ export interface UnreadNotifyState {
   setPollSec: (sec: number) => Promise<void>; // 管理员调整轮询间隔
   refresh: () => void; // 重新读取开关/重订阅
   testAlert: () => void; // 手动触发一次提醒（验证三种体现位置）
+  dismiss: () => void; // 手动关掉本次提醒（红点清零后也会自动关）
 }
 
 const muteKey = (id: string | undefined) => `woc_unread_muted_${id || ''}`;
@@ -38,6 +39,8 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
   );
   const blinkRef = useRef<number | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const dismissedRef = useRef(false); // 用户已看到/手动关掉本次提醒；等红点清零后自动复位
+  const notifRef = useRef<Notification | null>(null);
 
   // 提示音：用 Web Audio 合成两声短"叮"，无需音频文件。
   const beep = () => {
@@ -62,10 +65,13 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
     } catch { /* ignore */ }
   };
 
-  const stopBlink = () => {
+  const clearAlert = () => {
     if (blinkRef.current !== null) { window.clearInterval(blinkRef.current); blinkRef.current = null; }
     document.title = baseTitle;
+    try { notifRef.current?.close(); } catch { /* ignore */ }
+    notifRef.current = null;
   };
+  const stopBlink = clearAlert;
   const startBlink = () => {
     if (blinkRef.current !== null) return;
     let on = false;
@@ -81,7 +87,8 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
     beep();
     if (supported && Notification.permission === 'granted') {
       try {
-        new Notification(`${instName} 有新消息`, {
+        notifRef.current?.close();
+        notifRef.current = new Notification(`${instName} 有新消息`, {
           body: badges > 0 ? `检测到 ${badges} 处未读，点开面板查看` : '点开面板查看',
           tag: `woc-unread-${id}`,
         } as NotificationOptions);
@@ -101,15 +108,21 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
         setByEnv(!!cfg.byEnv);
         setPollSecState(cfg.pollSec);
         if (!cfg.enabled) return;
-        setHasUnread(cfg.hasUnread);
-        if (cfg.hasUnread) startBlink();
+        setHasUnread(cfg.hasUnread && !dismissedRef.current);
+        if (cfg.hasUnread && !dismissedRef.current) startBlink();
         es = new EventSource(`/api/instances/${id}/unread/events`);
         es.addEventListener('unread', (e) => {
           try {
             const d = JSON.parse((e as MessageEvent).data);
-            setHasUnread(d.hasUnread);
-            if (d.hasUnread) alertNow(d.badges || 0);
-            else stopBlink();
+            if (!d.hasUnread) {
+              // 红点被点掉：撤销红标/闪烁/系统通知，并允许下一次新消息重新提醒。
+              dismissedRef.current = false;
+              setHasUnread(false);
+              clearAlert();
+              return;
+            }
+            setHasUnread(!dismissedRef.current);
+            if (!dismissedRef.current) alertNow(d.badges || 0);
           } catch { /* ignore */ }
         });
         es.onerror = () => { /* EventSource 自动重连 */ };
@@ -153,9 +166,14 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
     if (!id) return;
     try {
       const r = await api.unreadCheck(id);
-      setHasUnread(r.hasUnread);
-      if (r.hasUnread) alertNow(r.badges || 0);
-      else stopBlink();
+      if (!r.hasUnread) {
+        dismissedRef.current = false;
+        setHasUnread(false);
+        clearAlert();
+        return;
+      }
+      setHasUnread(!dismissedRef.current);
+      if (!dismissedRef.current) alertNow(r.badges || 0);
     } catch { /* ignore */ }
   };
   const applyEnabled = async (on: boolean) => {
@@ -188,12 +206,18 @@ export function useUnreadNotify(id: string | undefined, instName: string): Unrea
   };
   const testAlert = () => {
     unlockAudio();
+    dismissedRef.current = false;
     alertNow(1, true); // 测试忽略静音，强制演示一遍提醒
     setHasUnread(true);
+  };
+  const dismiss = () => {
+    dismissedRef.current = true;
+    setHasUnread(false);
+    clearAlert();
   };
 
   return {
     enabled, byEnv, pollSec, muted, hasUnread, supported: supported && perm !== 'denied',
-    grant, toggleMute, check, setEnabled: applyEnabled, setPollSec: applyPollSec, refresh, testAlert,
+    grant, toggleMute, check, setEnabled: applyEnabled, setPollSec: applyPollSec, refresh, testAlert, dismiss,
   };
 }
