@@ -1675,19 +1675,6 @@ body {
   margin: 0 2px;
   background: rgba(var(--shadow) / 0.16);
 }
-/* 设置：顶栏独立主按钮，和日常工具按钮视觉区分 */
-.ws-action-settings {
-  background: var(--accent-fill);
-  color: #fff;
-}
-.ws-action-settings .ic {
-  color: #fff;
-}
-.ws-action-settings:hover,
-.ws-action-settings:hover .ic {
-  color: #fff;
-  filter: brightness(1.06);
-}
 /* 主题切换：顶栏最右的图标按钮 */
 .theme-toggle {
   margin-left: auto;

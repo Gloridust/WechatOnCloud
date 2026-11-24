@@ -771,6 +771,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     window.location.reload();
   };
   const [showSettings, setShowSettings] = useState(false);
+  // 两套面板：桌面设置（壁纸/字体）与应用设置（画质/通知/AI 代回），各自独立入口
+  const [settingsScope, setSettingsScope] = useState<'desktop' | 'app'>('app');
   const [settingsTab, setSettingsTab] = useState<'bg' | 'font' | 'quality' | 'notify' | 'ai'>('bg');
 
   // AI 代回微信（1.6.6）：配置仅管理员可读写；草稿/发送所有有实例权限的人都能用。
@@ -1723,10 +1725,24 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     ...(isAdmin
       ? [
           {
-            label: '设置',
+            label: '设置（画质/通知/AI 代回）',
             onClick: () => {
-              setShowSettings((v) => !v);
-              if (!showSettings) {
+              if (showSettings && settingsScope === 'app') setShowSettings(false);
+              else {
+                setSettingsScope('app');
+                if (settingsTab === 'bg' || settingsTab === 'font') setSettingsTab('quality');
+                setShowSettings(true);
+              }
+            },
+          },
+          {
+            label: '桌面（壁纸/字体）',
+            onClick: () => {
+              if (showSettings && settingsScope === 'desktop') setShowSettings(false);
+              else {
+                setSettingsScope('desktop');
+                setSettingsTab('bg');
+                setShowSettings(true);
                 refreshBgList();
                 refreshFontList();
               }
@@ -1764,12 +1780,16 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             {isAdmin && (
               <>
                 <button
-                  className={'ws-action ws-action-settings' + (showSettings ? ' on' : '')}
-                  title="设置（壁纸/字体/画质/通知/AI 代回）"
-                  aria-pressed={showSettings}
+                  className={'ws-action' + (showSettings && settingsScope === 'app' ? ' on' : '')}
+                  title="设置（画质/通知/AI 代回）"
+                  aria-pressed={showSettings && settingsScope === 'app'}
                   onClick={() => {
-                    setShowSettings((v) => !v);
-                    if (!showSettings) { refreshBgList(); refreshFontList(); }
+                    if (showSettings && settingsScope === 'app') setShowSettings(false);
+                    else {
+                      setSettingsScope('app');
+                      if (settingsTab === 'bg' || settingsTab === 'font') setSettingsTab('quality');
+                      setShowSettings(true);
+                    }
                   }}
                 >
                   <IcSettings />
@@ -1837,6 +1857,24 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             )}
             {isAdmin && (
               <>
+                <button
+                  className={'ws-action ws-action-extra' + (showSettings && settingsScope === 'desktop' ? ' on' : '')}
+                  title="桌面设置（壁纸/字体）"
+                  aria-pressed={showSettings && settingsScope === 'desktop'}
+                  onClick={() => {
+                    if (showSettings && settingsScope === 'desktop') setShowSettings(false);
+                    else {
+                      setSettingsScope('desktop');
+                      setSettingsTab('bg');
+                      setShowSettings(true);
+                      refreshBgList();
+                      refreshFontList();
+                    }
+                  }}
+                >
+                  <IcImage />
+                  <span>桌面</span>
+                </button>
                 {/* 重启会断开所有人的连接：与日常开关隔开，避免顺手误点 */}
                 <span className="ws-action-sep ws-action-extra" aria-hidden="true" />
                 <button className="ws-action ws-action-extra" title="重启实例（修复卡死/最小化丢失）" onClick={restartInstance}>
@@ -2257,15 +2295,22 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           {showSettings && (
             <div className="iv-files">
               <div className="files-head">
-                <span>设置</span>
+                <span>{settingsScope === 'desktop' ? '桌面设置' : '设置'}</span>
                 <button className="btn-text" onClick={() => setShowSettings(false)}>关闭</button>
               </div>
               <div className="settings-tabs">
-                <button className={'settings-tab' + (settingsTab === 'bg' ? ' on' : '')} onClick={() => setSettingsTab('bg')}>壁纸</button>
-                <button className={'settings-tab' + (settingsTab === 'font' ? ' on' : '')} onClick={() => setSettingsTab('font')}>字体</button>
-                <button className={'settings-tab' + (settingsTab === 'quality' ? ' on' : '')} onClick={() => setSettingsTab('quality')}>画质</button>
-                <button className={'settings-tab' + (settingsTab === 'notify' ? ' on' : '')} onClick={() => setSettingsTab('notify')}>通知</button>
-                <button className={'settings-tab' + (settingsTab === 'ai' ? ' on' : '')} onClick={() => setSettingsTab('ai')}>AI 代回</button>
+                {settingsScope === 'desktop' ? (
+                  <>
+                    <button className={'settings-tab' + (settingsTab === 'bg' ? ' on' : '')} onClick={() => setSettingsTab('bg')}>壁纸</button>
+                    <button className={'settings-tab' + (settingsTab === 'font' ? ' on' : '')} onClick={() => setSettingsTab('font')}>字体</button>
+                  </>
+                ) : (
+                  <>
+                    <button className={'settings-tab' + (settingsTab === 'quality' ? ' on' : '')} onClick={() => setSettingsTab('quality')}>画质</button>
+                    <button className={'settings-tab' + (settingsTab === 'notify' ? ' on' : '')} onClick={() => setSettingsTab('notify')}>通知</button>
+                    <button className={'settings-tab' + (settingsTab === 'ai' ? ' on' : '')} onClick={() => setSettingsTab('ai')}>AI 代回</button>
+                  </>
+                )}
               </div>
 
               {settingsTab === 'ai' && (
@@ -2423,7 +2468,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   )}
                   {!unread.enabled ? (
                     <div className="files-hint">
-                      {isAdmin ? '点击上方开关即可开启未读提醒。' : '未读提醒未启用，请联系管理员在桌面设置中开启。'}
+                      {isAdmin ? '点击上方开关即可开启未读提醒。' : '未读提醒未启用，请联系管理员在设置中开启。'}
                     </div>
                   ) : (
                     <>
