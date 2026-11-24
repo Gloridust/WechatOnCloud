@@ -2339,7 +2339,10 @@ export async function focusChatWindow(inst: Instance, appType = 'wechat'): Promi
     'export DISPLAY="${display:-:1}"',
     'command -v xdotool >/dev/null 2>&1 || exit 0',
     // 同时按 class 与标题收集候选（Linux 微信主聊天窗常无 WM_CLASS，只有标题「微信」）。
-    `ids="$(xdotool search --onlyvisible --class '${clsPattern}' 2>/dev/null); $(xdotool search --onlyvisible --name '${titlePattern}' 2>/dev/null)"`,
+    // 分两条命令赋值再合并，避免用分号拼接把 ';' 当成窗口 id。
+    `ids1=$(xdotool search --onlyvisible --class '${clsPattern}' 2>/dev/null)`,
+    `ids2=$(xdotool search --onlyvisible --name '${titlePattern}' 2>/dev/null)`,
+    'ids="$ids1 $ids2"',
     '[ -z "$(printf "%s" "$ids" | tr -d "[:space:]")" ] && exit 0',
     // 多个微信窗口时选面积最大的那个（主聊天窗），避免激活到登录窗/隐藏窗。
     'best=""; bestArea=0',
