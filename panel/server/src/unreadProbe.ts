@@ -71,18 +71,28 @@ export async function probeUnread(inst: Instance): Promise<UnreadState> {
     checkedAt: now,
     error,
   });
+  // base64 脚本写入 /tmp，xwd 截图 → ffmpeg 裁剪转 raw → 管道给 python。
+  const cmd = [
+    DISPLAY_SETUP,
+    `echo ${DETECT_PY_B64} | base64 -d > /tmp/.woc_unread_detect.py`,
+    'xwd -root -silent -out /tmp/.woc_unread.xwd 2>/dev/null || exit 3',
+    `ffmpeg -y -loglevel error -i /tmp/.woc_unread.xwd -vf "${CROP}" -f rawvideo -pix_fmt rgb24 /tmp/.woc_unread.rgb 2>/dev/null || exit 4`,
+    'rm -f /tmp/.woc_unread.xwd',
+    'python3 /tmp/.woc_unread_detect.py < /tmp/.woc_unread.rgb 2>/dev/null || exit 5',
+    'rm -f /tmp/.woc_unread.rgb /tmp/.woc_unread_detect.py',
+  ].join('\n');
+  const cleanupCmd = 'rm -f /tmp/.woc_unread.xwd /tmp/.woc_unread.rgb /tmp/.woc_unread_detect.py';
   try {
-    // base64 脚本写入 /tmp，xwd 截图 → ffmpeg 裁剪转 raw → 管道给 python。
-    const cmd = [
-      DISPLAY_SETUP,
-      `echo ${DETECT_PY_B64} | base64 -d > /tmp/.woc_unread_detect.py`,
-      'xwd -root -silent -out /tmp/.woc_unread.xwd 2>/dev/null || exit 3',
-      `ffmpeg -y -loglevel error -i /tmp/.woc_unread.xwd -vf "${CROP}" -f rawvideo -pix_fmt rgb24 /tmp/.woc_unread.rgb 2>/dev/null || exit 4`,
-      'rm -f /tmp/.woc_unread.xwd',
-      'python3 /tmp/.woc_unread_detect.py < /tmp/.woc_unread.rgb 2>/dev/null || exit 5',
-      'rm -f /tmp/.woc_unread.rgb /tmp/.woc_unread_detect.py',
-    ].join('\n');
-    const out = (await execCapture(inst, ['bash', '-c', cmd])).trim();
+    let out: string;
+    try {
+      out = (await execCapture(inst, ['bash', '-c', cmd])).trim();
+    } catch {
+      // xwd/ffmpeg 偶发失败（会话刚切换、X server 忙；日志里出现过 ffmpeg exit 4）。
+      // 清掉可能残留的半成品再试一次，避免一次瞬时失败就漏掉这条未读消息。
+      try { await execCapture(inst, ['bash', '-c', cleanupCmd]); } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 400));
+      out = (await execCapture(inst, ['bash', '-c', cmd])).trim();
+    }
     const [badgesStr, biggestStr] = out.split(/\s+/);
     const badges = parseInt(badgesStr, 10) || 0;
     const biggest = parseInt(biggestStr, 10) || 0;

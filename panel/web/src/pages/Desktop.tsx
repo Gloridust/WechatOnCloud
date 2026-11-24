@@ -889,6 +889,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const frameRef = useRef<HTMLIFrameElement>(null);
   const dragDepth = useRef(0);
   const lastBeat = useRef(0);
+  const lastKeyBeat = useRef(0); // 键盘输入单独节流：AI 代回只在真实打字时让行，不能被鼠标 beat 的 2.5s 窗口吞掉
   const audioRef = useRef<VncAudio | null>(null);
   const recovering = useRef(false); // 致命崩溃自愈进行中（防错误浮层轮询与 error 事件重复触发重载）
   // 浏览器扩展注入脚本的报错（见 fatalErrorMsg）：只关浮层不重连；每次页面加载只记一条，避免 3s 轮询刷日志
@@ -1081,13 +1082,18 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
 
   // 续约控制权，节流 2.5s。桌面画面里的真实操作、底部输入条里打字都算（输入条不经过画面，此前不续约，
   // 连着打一会儿字控制权就被别人拿走）。空闲不操作则超时自动释放。
-  const beat = useCallback(async () => {
+  const beat = useCallback(async (kind: 'key' | 'mouse' = 'mouse') => {
     if (!id) return;
     const now = Date.now();
-    if (now - lastBeat.current < 2500) return;
+    if (kind === 'key') {
+      if (now - lastKeyBeat.current < 800) return;
+      lastKeyBeat.current = now;
+    } else if (now - lastBeat.current < 2500) {
+      return;
+    }
     lastBeat.current = now;
     try {
-      const r = await api.controlBeat(id);
+      const r = await api.controlBeat(id, kind);
       setControl({ free: false, mine: r.mine, holder: r.holder });
     } catch {
       /* ignore */
@@ -1101,16 +1107,20 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     if (!showVnc || !id || !frameLoaded) return;
     const win = frameRef.current?.contentWindow;
     if (!win) return;
-    const onInteract = () => void beat();
-    const evs = ['mousedown', 'keydown', 'wheel'] as const;
+    const onMouseInteract = () => void beat('mouse');
+    const onKeyInteract = () => void beat('key');
     try {
-      evs.forEach((e) => win.addEventListener(e, onInteract, { capture: true, passive: true }));
+      win.addEventListener('mousedown', onMouseInteract, { capture: true, passive: true });
+      win.addEventListener('wheel', onMouseInteract, { capture: true, passive: true });
+      win.addEventListener('keydown', onKeyInteract, { capture: true, passive: true });
     } catch {
       return;
     }
     return () => {
       try {
-        evs.forEach((e) => win.removeEventListener(e, onInteract, { capture: true } as any));
+        win.removeEventListener('mousedown', onMouseInteract, { capture: true } as any);
+        win.removeEventListener('wheel', onMouseInteract, { capture: true } as any);
+        win.removeEventListener('keydown', onKeyInteract, { capture: true } as any);
       } catch {
         /* ignore */
       }
@@ -2735,7 +2745,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   disabled={readOnly}
                   onChange={(e) => setImeText(e.target.value)}
                   onKeyDown={(e) => {
-                    void beat();
+                    void beat('key');
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       sendImeText();

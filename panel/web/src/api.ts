@@ -543,7 +543,13 @@ export const api = {
     req<{ free: boolean; mine: boolean; holder: string | null; superseded?: Superseded | null }>(`/api/instances/${id}/control`, {
       headers: viewerHeader,
     }),
-  controlBeat: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/beat`, { method: 'POST', headers: viewerHeader }),
+  // kind=key 表示真实键盘输入（AI 代回据此短暂让行）；鼠标点击/滚动只续约控制权，不阻断自动回复。
+  controlBeat: (id: string, kind?: 'key' | 'mouse') =>
+    req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/beat`, {
+      method: 'POST',
+      headers: viewerHeader,
+      ...(kind ? { body: JSON.stringify({ kind }) } : {}),
+    }),
   controlTake: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/take`, { method: 'POST', headers: viewerHeader }),
   typeInInstance: (id: string, text: string) =>
     req(`/api/instances/${id}/type`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ text }) }),

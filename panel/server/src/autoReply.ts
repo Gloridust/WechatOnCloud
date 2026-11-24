@@ -560,14 +560,28 @@ export async function autoReplyTick(
     return skip(`模型 ${cfg.model} 是识别类模型，无法生成回复，请换成视觉对话模型（如 Qwen3-VL-32B-Instruct）`);
   }
   if (busy.has(inst.id)) return skip('上一轮仍在执行');
-  if (isUserActive(inst.id)) return skip('用户正在操作桌面，已让行');
+  if (isUserActive(inst.id)) {
+    // 让行期间也要跟进未读基线：用户可能已手动点掉红点。这里不更新的话，基线会停在旧值，
+    // 下一条消息的红点数恰好与旧值相同时会被误判为「没有新增」而永久不回（实测 1→0→1 卡死）。
+    try {
+      const seen = await probeUnread(inst);
+      if (!seen.error) lastBadges.set(inst.id, seen.badges);
+    } catch {
+      /* 探测失败：保留原基线，下一轮再试 */
+    }
+    return skip('用户正在操作桌面，已让行');
+  }
 
   const unread = await probeUnread(inst);
   if (unread.error) return skip(`未读检测失败：${unread.error}`);
   const prev = lastBadges.get(inst.id) ?? 0;
   // 只有「红点数量增加」或「无→有」才算新消息；红点一直在不重复回。
   const isNew = force || unread.badges > prev || (prev === 0 && unread.hasUnread);
-  if (!isNew) return skip('没有新的未读增量');
+  if (!isNew) {
+    // 红点被用户手动清掉（数量下降/归零）：同步基线，否则下一批同数目的消息不再触发。
+    if (unread.badges < prev) lastBadges.set(inst.id, unread.badges);
+    return skip('没有新的未读增量');
+  }
   // 先记下本轮增量对应的徽标，作为「已受理」基线；但若发送/草稿中途失败，catch 里会回退到
   // prev，让下一轮重新识别为增量并重试——否则一次焦点失败就会让这条消息永久不再触发。
   lastBadges.set(inst.id, unread.badges);

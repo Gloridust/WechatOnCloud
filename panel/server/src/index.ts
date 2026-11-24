@@ -1091,7 +1091,9 @@ app.get('/api/instances/:id/download-all', async (req, reply) => {
 // 同一实例被多个浏览器连的是同一会话，键鼠会互相打架。这里用"心跳持锁"：
 // 当前操作者每隔几秒 beat 续约；TTL 内他人只读（前端盖只读遮罩）。空闲超 TTL 自动释放。
 const CONTROL_TTL = 10_000; // ms：超过则视为已空闲，可被接管
-const controlHolders = new Map<string, { userId: string; username: string; at: number }>();
+// keyAt：最近一次真实键盘输入时间，独立于控制心跳。AI 代回只在用户打字时让行，
+// 单纯点会话/滚动列表不再阻断自动回复（此前任何鼠标操作都让 AI 停手 10s，实测导致漏回）。
+const controlHolders = new Map<string, { userId: string; username: string; at: number; keyAt: number }>();
 
 // 续约/认领：无人持有、已超时、或本来就是我 → 我成为操作者；否则返回当前操作者。
 app.post('/api/instances/:id/control/beat', async (req, reply) => {
@@ -1101,10 +1103,16 @@ app.post('/api/instances/:id/control/beat', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const sup = supersededBy(id, viewerOf(req));
   if (sup) return reply.code(409).send(supersededBusy(sup));
+  const kind = (req.body as any)?.kind === 'key' ? 'key' : 'mouse';
   const now = Date.now();
   const h = controlHolders.get(id);
   if (!h || now - h.at > CONTROL_TTL || h.userId === u.id) {
-    controlHolders.set(id, { userId: u.id, username: u.username, at: now });
+    controlHolders.set(id, {
+      userId: u.id,
+      username: u.username,
+      at: now,
+      keyAt: kind === 'key' ? now : h && now - h.at <= CONTROL_TTL ? h.keyAt || 0 : 0,
+    });
     return { mine: true, holder: u.username };
   }
   return { mine: false, holder: h.username };
@@ -1131,7 +1139,7 @@ app.post('/api/instances/:id/control/take', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const sup = supersededBy(id, viewerOf(req));
   if (sup) return reply.code(409).send(supersededBusy(sup));
-  controlHolders.set(id, { userId: u.id, username: u.username, at: Date.now() });
+  controlHolders.set(id, { userId: u.id, username: u.username, at: Date.now(), keyAt: 0 });
   return { mine: true, holder: u.username };
 });
 
@@ -1186,7 +1194,7 @@ function attachViewer(instId: string, viewer: string, u: User, device: string, s
     cur = { id: viewer, userId: u.id, username: u.username, sockets: new Set() };
     currentViewers.set(instId, cur);
     // 操作权跟着显示走：否则新页面要等旧页面的心跳过期（CONTROL_TTL）才能操作
-    controlHolders.set(instId, { userId: u.id, username: u.username, at: Date.now() });
+    controlHolders.set(instId, { userId: u.id, username: u.username, at: Date.now(), keyAt: 0 });
   }
   const c = cur;
   c.sockets.add(socket);
@@ -1205,7 +1213,7 @@ function claimControl(u: User, id: string, req: FastifyRequest): object | null {
   const now = Date.now();
   const h = controlHolders.get(id);
   if (h && h.userId !== u.id && now - h.at <= CONTROL_TTL) return controlBusy(h.username);
-  controlHolders.set(id, { userId: u.id, username: u.username, at: now });
+  controlHolders.set(id, { userId: u.id, username: u.username, at: now, keyAt: 0 });
   return null;
 }
 const controlBusy = (holder: string) => ({ error: `「${holder}」正在操作，你当前为只读；要操作请先点「申请控制」`, holder });
@@ -2539,10 +2547,11 @@ startUpdateChecker(); // 后台检测新版（best-effort，失败静默）
 startChatBackupScheduler(listInstances, (s) => appendPanelLog('INFO', s));
 // 未读红点通知轮询（默认关闭；WOC_UNREAD_NOTIFY=1 启用，间隔 WOC_UNREAD_POLL_SEC）
 startUnreadPoller(listInstances);
-// AI 代回：仅在 WOC_AUTO_REPLY=1 且实例配置为 auto 时后台运行；用户正在操作桌面时自动让行。
+// AI 代回：仅在 WOC_AUTO_REPLY=1 且实例配置为 auto 时后台运行；仅当用户正在打字时让行，
+// 避免抢输入法；鼠标点选/滚动不构成让行（此前任何操作都让 AI 停手，实测漏回）。
 startAutoReplyPoller(listInstances, (id) => {
   const h = controlHolders.get(id);
-  return !!h && Date.now() - h.at <= CONTROL_TTL;
+  return !!h && Date.now() - h.keyAt <= CONTROL_TTL;
 });
 // 日志保留期清理：启动后跑一次 + 每 24h 一次，删除超过一年的日志行（unref 不阻止退出）。
 pruneOldLogs();
