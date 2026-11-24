@@ -30,6 +30,8 @@ export interface AutoReplyConfig {
   maxPerHour: number; // 全局每小时自动回复上限
   maxChars: number; // 单条回复最大字数
   pollSec: number; // auto 模式轮询间隔（最小 15s）
+  autoTagEnabled: boolean; // 全自动发出的消息是否带「由 AI 代回」标记
+  autoTagText: string; // 标记文案，附加在正文末尾
 }
 
 export type PublicAutoReplyConfig = Omit<AutoReplyConfig, 'apiKey'> & {
@@ -56,6 +58,28 @@ export interface TickResult {
   error?: string;
 }
 
+// 全自动回复留痕：面板「AI 代回」tab 显示最近记录，便于区分哪些消息是 AI 发出的。
+export interface AutoReplyHistoryItem {
+  at: number;
+  contact: string;
+  message: string;
+  reply: string;
+  tagged: boolean;
+  tagText: string;
+  source: 'auto' | 'manual';
+}
+
+export interface AutoReplyVerifyResult {
+  model: string;
+  baseURL: string;
+  textOk: boolean;
+  visionOk: boolean;
+  textError?: string;
+  visionError?: string;
+  latencyMs: number;
+  hint: string;
+}
+
 const DEFAULT_PROMPT =
   '你是微信桌面端的信息抽取与回复助手。截图是微信聊天窗口，只分析右侧聊天区域：气泡靠右是自己发的，靠左是对方发的。' +
   '只识别最底部一条「靠左」的新消息，忽略自己刚发的消息、系统提示、时间分割线、图片/文件/语音/表情本身。' +
@@ -76,6 +100,8 @@ const DEFAULTS: AutoReplyConfig = {
   maxPerHour: 20,
   maxChars: 300,
   pollSec: 30,
+  autoTagEnabled: true,
+  autoTagText: '（此消息由 AI 代回）',
 };
 
 type StoreConfig = Partial<AutoReplyConfig>;
@@ -108,6 +134,8 @@ function sanitize(raw: StoreConfig): AutoReplyConfig {
     maxPerHour: num(raw.maxPerHour, DEFAULTS.maxPerHour, 1, 200),
     maxChars: num(raw.maxChars, DEFAULTS.maxChars, 20, 1000),
     pollSec: num(raw.pollSec, DEFAULTS.pollSec, 15, 300),
+    autoTagEnabled: raw.autoTagEnabled === undefined ? DEFAULTS.autoTagEnabled : !!raw.autoTagEnabled,
+    autoTagText: typeof raw.autoTagText === 'string' ? raw.autoTagText.slice(0, 60) : DEFAULTS.autoTagText,
   };
 }
 
@@ -124,7 +152,7 @@ export function getPublicAutoReplyConfig(id: string): PublicAutoReplyConfig {
 export function saveAutoReplyConfig(id: string, patch: Record<string, unknown>): PublicAutoReplyConfig {
   const cur = getAutoReplyConfig(id);
   const next: StoreConfig = { ...cur };
-  for (const k of ['mode', 'baseURL', 'model', 'prompt', 'triggerPrefix', 'cooldownSec', 'maxPerHour', 'maxChars', 'pollSec'] as const) {
+  for (const k of ['mode', 'baseURL', 'model', 'prompt', 'triggerPrefix', 'cooldownSec', 'maxPerHour', 'maxChars', 'pollSec', 'autoTagEnabled', 'autoTagText'] as const) {
     if (patch[k] !== undefined) (next as any)[k] = patch[k];
   }
   for (const k of ['whitelist', 'stopWords'] as const) {
@@ -189,6 +217,129 @@ async function callModel(cfg: AutoReplyConfig, image: Buffer | null, userText: s
   return parseJson(text) || { shouldReply: false, reason: '模型未返回可解析的 JSON', contact: '', message: text.slice(0, 200), reply: '' };
 }
 
+// ---------- 模型发现 / 连通性验证（OpenAI 兼容接口） ----------
+// 1x1 红色 PNG，仅用于探测模型是否接受 image_url（视觉能力）；不上传任何会话截图。
+const TINY_PNG_DATA =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
+
+type Conn = { baseURL: string; apiKey: string; model: string };
+function resolveConn(id: string, patch?: Record<string, unknown>): Conn {
+  const cfg = getAutoReplyConfig(id);
+  const pick = (v: unknown, d: string) => (typeof v === 'string' && v.trim() ? v.trim() : d);
+  return {
+    baseURL: pick(patch?.baseURL, cfg.baseURL),
+    apiKey: pick(patch?.apiKey, cfg.apiKey),
+    model: pick(patch?.model, cfg.model),
+  };
+}
+
+function endpoints(base: string, path: string): string[] {
+  const b = base.replace(/\/+$/, '').replace(/\/chat\/completions$/i, '');
+  const list = [`${b}/${path}`];
+  // 用户可能只填到域名；没有 /v1 时补一次，兼容两种写法。
+  if (!/\/v\d+$/.test(b)) list.push(`${b}/v1/${path}`);
+  return [...new Set(list)];
+}
+
+async function compatFetch(conn: Conn, path: string, body?: unknown, timeoutMs = 25_000): Promise<any> {
+  if (!conn.apiKey) throw new Error('请先保存 API Key（设置 → AI 代回）');
+  let last = '接口不可达';
+  for (const url of endpoints(conn.baseURL, path)) {
+    try {
+      const res = await fetch(url, {
+        method: body === undefined ? 'GET' : 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${conn.apiKey}` },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const raw = await res.text();
+      if (!res.ok) {
+        last = `${res.status}：${raw.slice(0, 160)}`;
+        continue;
+      }
+      return parseJson(raw) || {};
+    } catch (e: any) {
+      last = String(e?.message || e).slice(0, 160);
+    }
+  }
+  throw new Error(last);
+}
+
+function answerText(json: any): string {
+  const m = json?.choices?.[0]?.message;
+  const c = m?.content;
+  const s = typeof c === 'string' ? c : Array.isArray(c) ? c.map((p: any) => p?.text || '').join('') : '';
+  // 部分推理模型 content 为空、只有 reasoning_content；证明接口已正常响应即可。
+  return s || (typeof m?.reasoning_content === 'string' ? m.reasoning_content : '');
+}
+
+export async function listAutoReplyModels(
+  id: string,
+  patch?: Record<string, unknown>,
+): Promise<{ models: string[]; baseURL: string }> {
+  const conn = resolveConn(id, patch);
+  const json = await compatFetch(conn, 'models', undefined, 20_000);
+  const raw: any[] = Array.isArray(json.data) ? json.data : [];
+  const models = raw
+    .map((m: any) => (typeof m === 'string' ? m : m?.id))
+    .filter((m: any): m is string => typeof m === 'string' && !!m.trim())
+    .map((m: string) => m.trim());
+  if (!models.length) throw new Error('接口未返回模型列表；需兼容 OpenAI GET /v1/models');
+  return { models: [...new Set(models)].sort(), baseURL: conn.baseURL };
+}
+
+export async function verifyAutoReplyModel(id: string, patch?: Record<string, unknown>): Promise<AutoReplyVerifyResult> {
+  const conn = resolveConn(id, patch);
+  const started = Date.now();
+  let textOk = false;
+  let textError: string | undefined;
+  let visionOk = false;
+  let visionError: string | undefined;
+  try {
+    const json = await compatFetch(
+      conn,
+      'chat/completions',
+      { model: conn.model, messages: [{ role: 'user', content: '只回复 OK' }], temperature: 0, max_tokens: 128 },
+      30_000,
+    );
+    if (answerText(json).trim()) textOk = true;
+    else textError = '接口返回内容为空';
+  } catch (e: any) {
+    textError = String(e?.message || e).slice(0, 200);
+  }
+  try {
+    const json = await compatFetch(
+      conn,
+      'chat/completions',
+      {
+        model: conn.model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: '这是一张测试图片。看图后只回复 OK。' },
+              { type: 'image_url', image_url: { url: TINY_PNG_DATA } },
+            ],
+          },
+        ],
+        temperature: 0,
+        max_tokens: 128,
+      },
+      30_000,
+    );
+    if (answerText(json).trim()) visionOk = true;
+    else visionError = '接口返回内容为空';
+  } catch (e: any) {
+    visionError = String(e?.message || e).slice(0, 200);
+  }
+  const hint = !textOk
+    ? '文本调用失败：请检查接口地址、API Key 与模型名'
+    : visionOk
+      ? '文本与视觉均可用，可直接用截图识别（支持全自动）'
+      : '文本可用但视觉不可用：此模型不能读截图，请换视觉模型（VLM，如 qwen3-vl-plus），或手动填写对方消息';
+  return { model: conn.model, baseURL: conn.baseURL, textOk, visionOk, textError, visionError, latencyMs: Date.now() - started, hint };
+}
+
 // ---------- 规则过滤 ----------
 function applyRules(cfg: AutoReplyConfig, d: DraftResult): DraftResult {
   if (!d.shouldReply) return d;
@@ -238,10 +389,41 @@ export async function draftReply(inst: Instance, userMessage?: string): Promise<
   }
 }
 
+// ---------- 回复留痕 ----------
+const HISTORY_LIMIT = 50;
+const historyByInstance = new Map<string, AutoReplyHistoryItem[]>();
+
+export function getAutoReplyHistory(id: string, limit = 20): AutoReplyHistoryItem[] {
+  const n = Math.max(1, Math.min(limit, HISTORY_LIMIT));
+  return (historyByInstance.get(id) || []).slice(-n).reverse();
+}
+
+function pushHistory(id: string, item: AutoReplyHistoryItem): void {
+  const list = historyByInstance.get(id) || [];
+  list.push(item);
+  if (list.length > HISTORY_LIMIT) list.splice(0, list.length - HISTORY_LIMIT);
+  historyByInstance.set(id, list);
+}
+
+function taggedReply(cfg: AutoReplyConfig, text: string): { text: string; tagged: boolean; tagText: string } {
+  const tag = cfg.autoTagText.trim();
+  if (!cfg.autoTagEnabled || !tag) return { text: String(text || '').trim().slice(0, cfg.maxChars), tagged: false, tagText: '' };
+  // 标记占用正文额度，保证整条消息不超过 maxChars。
+  const room = Math.max(1, cfg.maxChars - tag.length - 1);
+  return { text: `${String(text || '').trim().slice(0, room)} ${tag}`, tagged: true, tagText: tag };
+}
+
 // ---------- 发送 ----------
-export async function sendDraft(inst: Instance, text: string, withEnter: boolean): Promise<{ sent: boolean; activeClass: string }> {
+export async function sendDraft(
+  inst: Instance,
+  text: string,
+  withEnter: boolean,
+  opts?: { autoTag?: boolean },
+): Promise<{ sent: boolean; activeClass: string; text: string; tagged: boolean; tagText: string }> {
   const cfg = getAutoReplyConfig(inst.id);
-  const clean = String(text || '').trim().slice(0, cfg.maxChars);
+  // 仅全自动发送带标记；人工确认模式保持原样，避免干预用户手改的草稿。
+  const out = opts?.autoTag ? taggedReply(cfg, text) : { text: String(text || '').trim().slice(0, cfg.maxChars), tagged: false, tagText: '' };
+  const clean = out.text;
   if (!clean) throw new Error('回复内容为空');
   const cls = await activeWindowClass(inst);
   // 焦点不在微信就绝不盲发：xdotool 作用于 X server 的当前焦点，可能把回复贴进别的窗口。
@@ -253,8 +435,8 @@ export async function sendDraft(inst: Instance, text: string, withEnter: boolean
     await new Promise((r) => setTimeout(r, 250));
     await keyInInstance(inst, 'Return');
   }
-  appendInstanceLog(inst.id, `[ai-reply] 已${withEnter ? '发送' : '填入'}回复（${clean.length}字）焦点=${cls || '未知'}`);
-  return { sent: withEnter, activeClass: cls };
+  appendInstanceLog(inst.id, `[ai-reply] 已${withEnter ? '发送' : '填入'}回复（${clean.length}字）焦点=${cls || '未知'}${out.tagged ? ' 含AI标记' : ''}`);
+  return { sent: withEnter, activeClass: cls, text: clean, tagged: out.tagged, tagText: out.tagText };
 }
 
 // ---------- 自动轮询 ----------
@@ -301,11 +483,20 @@ export async function autoReplyTick(
     if (last && last.key === fp && now - last.at < 30 * 60_000) {
       return { ran: true, draft, sent: false, skipped: '同一条消息已处理过' };
     }
-    await sendDraft(inst, draft.reply, true);
+    const sent = await sendDraft(inst, draft.reply, true, { autoTag: true });
     lastSentAt.set(inst.id, now);
     recent.push(now);
     sentTimestamps.set(inst.id, recent);
     fingerprints.set(inst.id, { at: now, key: fp });
+    pushHistory(inst.id, {
+      at: now,
+      contact: draft.contact || '当前会话',
+      message: draft.message,
+      reply: sent.text,
+      tagged: sent.tagged,
+      tagText: sent.tagText,
+      source: 'auto',
+    });
     return { ran: true, draft, sent: true };
   } catch (e: any) {
     const msg = String(e?.message || e).slice(0, 300);

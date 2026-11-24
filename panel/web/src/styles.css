@@ -2388,6 +2388,47 @@ body {
   gap: 8px;
   flex-wrap: wrap;
 }
+/* 模型验证结果（1.6.10） */
+.ai-verify {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: var(--r-small);
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+}
+.ai-verify.ok { color: var(--ok, #3ba776); }
+.ai-verify.warn { color: var(--warn, #d89a2b); }
+.ai-verify.bad { color: var(--danger, #d9534f); }
+.ai-verify .muted { color: var(--muted); }
+/* 全自动回复留痕（1.6.10） */
+.ai-history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--text) 15%, transparent);
+  font-size: 12px;
+}
+.ai-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ai-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border-radius: var(--r-small);
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  line-height: 1.5;
+}
+.ai-history-reply { word-break: break-word; }
 
 /* 串流画质档位（1.6.6） */
 .quality-option {

@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import {
   api, appProfile, fmtUploadSize, provisionProgressText, VIEWER_ID,
   type Superseded, type AutoReplyConfigPublic, type AutoReplyDraft,
+  type AutoReplyHistoryItem, type AutoReplyVerifyResult,
 } from '../api';
 import { browserImageCodec, fitPasteImage, pasteImageWithFallback } from '../pasteImage';
 import { useUI } from '../ui';
@@ -782,6 +783,18 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const [aiManual, setAiManual] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
   const [notifyBusy, setNotifyBusy] = useState(false);
+  const [aiModels, setAiModels] = useState<string[]>([]);
+  const [aiVerify, setAiVerify] = useState<AutoReplyVerifyResult | null>(null);
+  const [aiHistory, setAiHistory] = useState<AutoReplyHistoryItem[]>([]);
+  const [aiModelBusy, setAiModelBusy] = useState(false);
+  const loadAiHistory = useCallback(async () => {
+    if (!isAdmin || !id) return;
+    try {
+      setAiHistory((await api.autoReplyHistory(id)).items);
+    } catch {
+      /* 静默：面板轮询，避免反复弹错 */
+    }
+  }, [id, isAdmin]);
   const loadAiCfg = useCallback(async () => {
     if (!isAdmin || !id) return;
     try {
@@ -793,6 +806,41 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   useEffect(() => {
     if (showSettings && settingsTab === 'ai') void loadAiCfg();
   }, [showSettings, settingsTab, loadAiCfg]);
+  useEffect(() => {
+    if (!showSettings || settingsTab !== 'ai' || !isAdmin || !id) return;
+    void loadAiHistory();
+    const t = setInterval(() => void loadAiHistory(), 15_000);
+    return () => clearInterval(t);
+  }, [showSettings, settingsTab, isAdmin, id, loadAiHistory]);
+  const aiConnPatch = () => ({
+    baseURL: aiCfg?.baseURL,
+    // 未点「保存」的新 Key 也能直接参与验证，验证通过后用户再自行保存。
+    apiKey: aiKey.trim() || undefined,
+    model: aiCfg?.model,
+  });
+  const fetchAiModels = async () => {
+    if (!id || !aiCfg) return;
+    setAiModelBusy(true);
+    try {
+      const r = await api.autoReplyModels(id, aiConnPatch());
+      setAiModels(r.models);
+      toast(`已获取 ${r.models.length} 个模型`, 'ok');
+    } catch (e: any) {
+      toast(e?.message || '拉取模型列表失败', 'error');
+    } finally { setAiModelBusy(false); }
+  };
+  const verifyAiModel = async () => {
+    if (!id || !aiCfg) return;
+    setAiModelBusy(true);
+    try {
+      const r = await api.autoReplyVerify(id, aiConnPatch());
+      setAiVerify(r);
+      toast(r.visionOk ? '模型验证通过（支持视觉）' : r.textOk ? '文本可用，但视觉不可用' : '模型验证失败', r.textOk ? 'ok' : 'error');
+    } catch (e: any) {
+      setAiVerify(null);
+      toast(e?.message || '模型验证失败', 'error');
+    } finally { setAiModelBusy(false); }
+  };
   const saveAiCfg = async (patch: Partial<AutoReplyConfigPublic> & { apiKey?: string; clearApiKey?: boolean }) => {
     if (!id) return;
     try {
@@ -2318,6 +2366,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   <div className="files-hint">
                     参考 CowAgent / wechat-bot 的低风险做法：不碰协议与 Hook，只读当前会话截图，经多模态模型生成草稿，
                     再用剪贴板中文直贴。<strong>默认关闭</strong>；总开关与模式均可在面板切换，即时生效。
+                    <br />读截图必须使用<strong>视觉语言模型（VLM）</strong>，如 qwen3-vl-plus / gpt-4o-mini；纯文本模型请在下方手动填写对方消息。
+                    可用「获取模型 / 验证模型」先测再存。
                   </div>
                   {!isAdmin ? (
                     <div className="files-hint">模型与规则配置仅管理员可见。你可直接使用下方「生成草稿」。</div>
@@ -2367,9 +2417,31 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                       </div>
                       <div className="ai-row">
                         <span>模型</span>
-                        <input className="input" value={aiCfg.model} onChange={(e) => setAiCfg({ ...aiCfg, model: e.target.value })}
-                          onBlur={(e) => void saveAiCfg({ model: e.target.value })} placeholder="qwen3-vl-plus" />
+                        <input className="input" list={`woc-ai-models-${id || 'x'}`} value={aiCfg.model}
+                          onChange={(e) => setAiCfg({ ...aiCfg, model: e.target.value })}
+                          onBlur={(e) => void saveAiCfg({ model: e.target.value })} placeholder="可直接选择，或输入模型 ID" />
+                        <datalist id={`woc-ai-models-${id || 'x'}`}>
+                          {aiModels.map((m) => <option key={m} value={m} />)}
+                        </datalist>
                       </div>
+                      <div className="ai-row">
+                        <span>模型探测</span>
+                        <button className="btn-text" disabled={aiModelBusy} onClick={() => void fetchAiModels()}>
+                          {aiModelBusy ? '请求中…' : '获取模型列表'}
+                        </button>
+                        <button className="btn-text" disabled={aiModelBusy} onClick={() => void verifyAiModel()}>验证模型</button>
+                        {!!aiModels.length && <span className="muted small">候选 {aiModels.length} 个，点模型框可下拉选择</span>}
+                      </div>
+                      {aiVerify && (
+                        <div className={'ai-verify ' + (aiVerify.visionOk ? 'ok' : aiVerify.textOk ? 'warn' : 'bad')}>
+                          <div>{aiVerify.hint}</div>
+                          <div className="muted small">
+                            文本 {aiVerify.textOk ? '✓' : '✗'} · 视觉 {aiVerify.visionOk ? '✓' : '✗'} · {aiVerify.latencyMs}ms
+                            {aiVerify.textError ? ` · 文本：${aiVerify.textError}` : ''}
+                            {aiVerify.visionError ? ` · 视觉：${aiVerify.visionError}` : ''}
+                          </div>
+                        </div>
+                      )}
                       <div className="ai-row">
                         <span>API Key</span>
                         <input className="input" type="password" value={aiKey} onChange={(e) => setAiKey(e.target.value)}
@@ -2402,6 +2474,19 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                         <input className="input" type="number" min={1} defaultValue={aiCfg.maxPerHour}
                           onBlur={(e) => void saveAiCfg({ maxPerHour: Number(e.target.value) })} />
                       </div>
+                      <div className="ai-row">
+                        <span>自动回复标记</span>
+                        <button
+                          className={'btn ' + (aiCfg.autoTagEnabled ? 'btn-primary' : '')}
+                          onClick={() => void saveAiCfg({ autoTagEnabled: !aiCfg.autoTagEnabled })}
+                        >{aiCfg.autoTagEnabled ? '已开启（点击关闭）' : '已关闭（点击开启）'}</button>
+                        <input className="input" defaultValue={aiCfg.autoTagText} disabled={!aiCfg.autoTagEnabled}
+                          onBlur={(e) => void saveAiCfg({ autoTagText: e.target.value })}
+                          placeholder="（此消息由 AI 代回）" />
+                      </div>
+                      {aiCfg.autoTagEnabled && aiCfg.mode === 'auto' && (
+                        <div className="files-hint">仅「自动回复」发送的消息会在末尾加标记，人工确认模式不受影响；示例：好的，稍后回复你 {aiCfg.autoTagText}</div>
+                      )}
                     </>
                   )}
 
@@ -2430,6 +2515,26 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                         <button className="btn" disabled={aiBusy || !aiDraft.reply.trim()}
                           onClick={() => void sendAiDraft(false)}>只填入输入框</button>
                       </div>
+                    </div>
+                  )}
+                  {isAdmin && (
+                    <div className="ai-history">
+                      <div className="ai-history-head">
+                        <strong>全自动回复记录</strong>
+                        <button className="btn-text" onClick={() => void loadAiHistory()}>刷新</button>
+                      </div>
+                      {aiHistory.length === 0 ? (
+                        <div className="muted small">暂无记录。自动模式成功发出的消息会显示在这里（含 AI 标记），每 15 秒自动刷新。</div>
+                      ) : aiHistory.map((h, idx) => (
+                        <div className="ai-history-item" key={`${h.at}-${idx}`}>
+                          <div className="muted small">
+                            {new Date(h.at).toLocaleString()} · {h.contact}
+                            {h.tagged ? ' · 此消息由 AI 代回' : ''}
+                          </div>
+                          {h.message && <div className="ai-quote">对方：{h.message}</div>}
+                          <div className="ai-history-reply">已发：{h.reply}</div>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>

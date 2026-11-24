@@ -78,8 +78,29 @@ export interface AutoReplyConfigPublic {
   maxPerHour: number;
   maxChars: number;
   pollSec: number;
+  autoTagEnabled: boolean;
+  autoTagText: string;
   apiKeySet: boolean;
   enabledByEnv: boolean;
+}
+export interface AutoReplyHistoryItem {
+  at: number;
+  contact: string;
+  message: string;
+  reply: string;
+  tagged: boolean;
+  tagText: string;
+  source: 'auto' | 'manual';
+}
+export interface AutoReplyVerifyResult {
+  model: string;
+  baseURL: string;
+  textOk: boolean;
+  visionOk: boolean;
+  textError?: string;
+  visionError?: string;
+  latencyMs: number;
+  hint: string;
 }
 export interface AutoReplyDraft {
   shouldReply: boolean;
@@ -569,6 +590,11 @@ export const api = {
       body: JSON.stringify({ text, withEnter }),
     }),
   autoReplyCheck: (id: string) => req<{ ran: boolean; skipped?: string; sent?: boolean; error?: string }>(`/api/instances/${id}/auto-reply/check`, { method: 'POST' }),
+  autoReplyHistory: (id: string) => req<{ items: AutoReplyHistoryItem[] }>(`/api/instances/${id}/auto-reply/history`),
+  autoReplyModels: (id: string, patch: { baseURL?: string; apiKey?: string }) =>
+    req<{ models: string[]; baseURL: string }>(`/api/instances/${id}/auto-reply/models`, { method: 'POST', body: JSON.stringify(patch) }),
+  autoReplyVerify: (id: string, patch: { baseURL?: string; apiKey?: string; model?: string }) =>
+    req<AutoReplyVerifyResult>(`/api/instances/${id}/auto-reply/verify`, { method: 'POST', body: JSON.stringify(patch) }),
 
   unreadCheck: (id: string) =>
     req<{ hasUnread: boolean; badges: number; error?: string }>(`/api/instances/${id}/unread/check`, {

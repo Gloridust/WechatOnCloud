@@ -154,6 +154,9 @@ import {
   sendDraft,
   autoReplyTick,
   startAutoReplyPoller,
+  getAutoReplyHistory,
+  listAutoReplyModels,
+  verifyAutoReplyModel,
 } from './autoReply.js';
 import { GiB, MiB, readBody, receiveFile, spoolUpload, cleanSpoolDir, type Spooled } from './upload.js';
 import { appendInstanceLog, readInstanceLog, appendPanelLog, readPanelLog, pruneOldLogs, filterSince, rangeToMs, DIAG_RANGES } from './logs.js';
@@ -1385,6 +1388,41 @@ app.post('/api/instances/:id/auto-reply/config', async (req, reply) => {
   const cfg = saveAutoReplyConfig(id, body);
   persistSettings();
   return cfg;
+});
+
+// 全自动回复留痕（管理员）：最近 20 条，含实际发出的文本（带 AI 标记）。
+app.get('/api/instances/:id/auto-reply/history', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  if (!findInstance(id)) return reply.code(404).send({ error: '实例不存在' });
+  return { items: getAutoReplyHistory(id, 20) };
+});
+
+// 拉取 OpenAI 兼容 /v1/models：可传未保存的 baseURL/apiKey 用于先测后存；Key 不回传。
+app.post('/api/instances/:id/auto-reply/models', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  if (!findInstance(id)) return reply.code(404).send({ error: '实例不存在' });
+  const patch = ((req.body as any) ?? {}) as Record<string, unknown>;
+  try {
+    return await listAutoReplyModels(id, patch);
+  } catch (e: any) {
+    return reply.code(500).send({ error: String(e?.message || e).slice(0, 300) });
+  }
+});
+
+// 验证当前模型：① 文本 chat/completions ② 同接口传 1x1 测试图探测视觉能力。
+// 截图识别必须用 VLM；视觉不通过时前端提示换模型或手动填消息。
+app.post('/api/instances/:id/auto-reply/verify', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  if (!findInstance(id)) return reply.code(404).send({ error: '实例不存在' });
+  const patch = ((req.body as any) ?? {}) as Record<string, unknown>;
+  try {
+    return await verifyAutoReplyModel(id, patch);
+  } catch (e: any) {
+    return reply.code(500).send({ error: String(e?.message || e).slice(0, 300) });
+  }
 });
 
 // 生成草稿：不传 userMessage 时截取当前会话聊天区交给多模态模型；传入时走纯文本模型也可。
