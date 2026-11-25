@@ -1025,14 +1025,16 @@ test('MCP_ALLOW_WRITE=1: 13 tools with exact annotations, click/scroll, draft->c
       assert.equal(byName.get(ro.name).annotations.readOnlyHint, true);
       assert.equal(byName.get(ro.name).annotations.destructiveHint, false);
     }
-    for (const nonDest of ['woc_click', 'woc_scroll', 'woc_draft_reply']) {
+    for (const nonDest of ['woc_scroll', 'woc_draft_reply']) {
       assert.equal(byName.get(nonDest).annotations.readOnlyHint, false);
       assert.equal(byName.get(nonDest).annotations.destructiveHint, false);
       assert.equal(byName.get(nonDest).annotations.idempotentHint, false);
     }
-    assert.equal(byName.get('woc_confirm_send').annotations.readOnlyHint, false);
-    assert.equal(byName.get('woc_confirm_send').annotations.destructiveHint, true);
-    assert.equal(byName.get('woc_confirm_send').annotations.idempotentHint, false);
+    for (const dest of ['woc_click', 'woc_confirm_send']) {
+      assert.equal(byName.get(dest).annotations.readOnlyHint, false);
+      assert.equal(byName.get(dest).annotations.destructiveHint, true);
+      assert.equal(byName.get(dest).annotations.idempotentHint, false);
+    }
     assert.equal(byName.get('woc_discard_draft').annotations.readOnlyHint, false);
     assert.equal(byName.get('woc_discard_draft').annotations.destructiveHint, false);
     assert.equal(byName.get('woc_discard_draft').annotations.idempotentHint, true);

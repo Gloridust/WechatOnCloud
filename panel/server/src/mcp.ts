@@ -368,7 +368,7 @@ export const MCP_WRITE_TOOLS: Tool[] = [
       required: ['instance_id', 'x', 'y', 'display_width', 'display_height'],
       additionalProperties: false,
     },
-    annotations: WRITE_NON_DESTRUCTIVE_ANNOTATIONS,
+    annotations: WRITE_DESTRUCTIVE_ANNOTATIONS,
   },
   {
     name: 'woc_scroll',
