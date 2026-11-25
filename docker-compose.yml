@@ -32,6 +32,8 @@ services:
       - WOC_DOCKER_NETWORK=${WOC_DOCKER_NETWORK:-}
       - WOC_INSTANCE_NETWORK=${WOC_INSTANCE_NETWORK:-}
       - WOC_INSTANCE_MEM_GB=${WOC_INSTANCE_MEM_GB:-}
+      # 每个实例的 CPU 核数上限（默认空=不限制）。4 核小机器多实例卡顿时，可设 1.5~2
+      - WOC_INSTANCE_CPU_CORES=${WOC_INSTANCE_CPU_CORES:-}
       - WOC_INSTANCE_MEM_SOFT_MB=${WOC_INSTANCE_MEM_SOFT_MB:-1500}
       - WOC_INSTANCE_MEM_HARD_MB=${WOC_INSTANCE_MEM_HARD_MB:-2500}
       - WOC_WATCHDOG_INTERVAL_SEC=${WOC_WATCHDOG_INTERVAL_SEC:-300}
@@ -54,6 +56,14 @@ services:
       - PANEL_ALLOWED_HOSTS=${PANEL_ALLOWED_HOSTS:-}
       # 反代不在本机（比如路由器、另一台机器上的 nginx）时，把它的地址填进来，登录限速才按真实来源计数（见 .env.example）
       - WOC_TRUSTED_PROXIES=${WOC_TRUSTED_PROXIES:-}
+      # 聊天消息自动备份（默认关闭；详见 doc/聊天消息备份使用说明.md）。手动备份无需这些变量。
+      - WOC_CHAT_BACKUP_AUTO=${WOC_CHAT_BACKUP_AUTO:-}
+      - WOC_CHAT_BACKUP_CRON_MIN=${WOC_CHAT_BACKUP_CRON_MIN:-360}
+      - WOC_CHAT_BACKUP_KEEP=${WOC_CHAT_BACKUP_KEEP:-0}
+      - WOC_UNREAD_NOTIFY=${WOC_UNREAD_NOTIFY:-}
+      - WOC_UNREAD_POLL_SEC=${WOC_UNREAD_POLL_SEC:-30}
+      # AI 代回微信：设为 1 才允许后台自动发送；配置在面板「桌面设置 → AI 代回」。
+      - WOC_AUTO_REPLY=${WOC_AUTO_REPLY:-}
 
     volumes:
       # 面板账号数据（用户、实例元信息、密码哈希）
