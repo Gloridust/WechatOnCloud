@@ -54,6 +54,12 @@ services:
       - PANEL_ALLOWED_HOSTS=${PANEL_ALLOWED_HOSTS:-}
       # 反代不在本机（比如路由器、另一台机器上的 nginx）时，把它的地址填进来，登录限速才按真实来源计数（见 .env.example）
       - WOC_TRUSTED_PROXIES=${WOC_TRUSTED_PROXIES:-}
+      # MCP 端点（给 AI 客户端用）：不填令牌就不开；写工具（点击 / 滚动 / 发微信）另需 MCP_ALLOW_WRITE=1。见 doc/MCP.md
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
+      - MCP_ALLOW_WRITE=${MCP_ALLOW_WRITE:-0}
+      # 一般不用填的两个微调项（见 doc/MCP.md「环境变量」）
+      - MCP_EDITOR_MAX_DIFF_PIXELS=${MCP_EDITOR_MAX_DIFF_PIXELS:-}
+      - MCP_CONFIRM_FOCUS_CHECK=${MCP_CONFIRM_FOCUS_CHECK:-}
 
     volumes:
       # 面板账号数据（用户、实例元信息、密码哈希）
