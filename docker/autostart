@@ -41,6 +41,32 @@ fi
     done
 ) &
 
+# 换设备后把跑出屏幕的窗口拉回来：KasmVNC 按浏览器尺寸 resize-remote，但 X 不会挪已有的窗口——电脑上居中的
+# 扫码框 / 主窗口到了手机上大半截在屏幕外，看不全也点不到。看守：每 2s 看一次分辨率，变了就把出界的窗口挪回来
+# （放得下就居中，放不下就贴左上角，至少露出标题和左边）。只在分辨率变化时动，不跟用户自己摆的位置较劲。
+(
+    export DISPLAY="${DISPLAY:-:1}"
+    last=""
+    while sleep 2; do
+        res=$(xrandr 2>/dev/null | grep -o 'current [0-9]* x [0-9]*' | head -1)
+        [ -n "$res" ] && [ "$res" != "$last" ] || continue
+        last="$res"
+        set -- $res
+        sw=$2 sh=$4
+        for w in $(xdotool search --onlyvisible --name '.+' 2>/dev/null); do
+            geo=$(xdotool getwindowgeometry --shell "$w" 2>/dev/null) || continue
+            X=; Y=; WIDTH=; HEIGHT=
+            eval "$geo"
+            [ -n "$X" ] && [ -n "$WIDTH" ] || continue
+            [ "$X" -ge 0 ] && [ "$Y" -ge 0 ] && [ $((X + WIDTH)) -le "$sw" ] && [ $((Y + HEIGHT)) -le "$sh" ] && continue
+            nx=$(((sw - WIDTH) / 2)); ny=$(((sh - HEIGHT) / 2))
+            [ "$nx" -lt 0 ] && nx=0
+            [ "$ny" -lt 0 ] && ny=0
+            xdotool windowmove "$w" "$nx" "$ny" 2>/dev/null && echo "[autostart] 分辨率变为 ${sw}x${sh}，窗口 ${w} 出界，挪到 ${nx},${ny}"
+        done
+    done
+) &
+
 # 自定义应用若未配置启动命令，给出提示并退出（避免空等）
 if [ "$APP_TYPE" = "custom" ] && [ -z "${APP_LAUNCH:-}" ]; then
     echo "[autostart] 自定义应用尚未配置启动命令，请在面板「数据卷」上传安装包并设定后重启实例"
