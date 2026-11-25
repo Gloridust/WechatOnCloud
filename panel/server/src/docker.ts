@@ -3004,3 +3004,17 @@ export function instanceTarget(inst: Instance): string {
 }
 
 export { WECHAT_IMAGE };
+
+// mcp-desktop.ts（MCP 端点用的实例桌面原语）复用的内部件：Docker 客户端、exec 创建、打字时剪贴板的借用与归还。
+export {
+  docker as dockerClient,
+  execCreate,
+  XDO_RELEASE_MODS,
+  xdoKey,
+  X_PRELUDE,
+  CLIP_DIR,
+  CLIP_SAVE,
+  withClipLock,
+  cancelClipRestore,
+  scheduleClipRestore,
+};
