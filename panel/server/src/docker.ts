@@ -2453,9 +2453,12 @@ export async function focusChatWindow(inst: Instance, appType = 'wechat'): Promi
     // 分两条命令赋值再合并，避免用分号拼接把 ';' 当成窗口 id。
     `ids1=$(xdotool search --onlyvisible --class '${clsPattern}' 2>/dev/null)`,
     `ids2=$(xdotool search --onlyvisible --name '${titlePattern}' 2>/dev/null)`,
-    'ids="$ids1 $ids2"',
+    // 【1.7.3】只认标题为应用名（微信/QQ）的主窗。独立单聊窗标题是联系人名（实测「李鹏」，
+    // 与 main 同为 1656x892、同 WM_CLASS），按面积选会因顺序不稳定误激活它 → 全屏闪一下又回到主窗。
+    // 同时按 class 收集只是兜底：主窗恰好没有应用名标题时才用。
+    'if [ -n "$(printf "%s" "$ids2" | tr -d "[:space:]")" ]; then ids="$ids2"; else ids="$ids1"; fi',
     '[ -z "$(printf "%s" "$ids" | tr -d "[:space:]")" ] && exit 0',
-    // 多个微信窗口时选面积最大的那个（主聊天窗），避免激活到登录窗/隐藏窗。
+    // 剩下的候选里选面积最大的主窗，避免激活到登录窗/隐藏窗。
     'best=""; bestArea=0',
     'for w in $ids; do',
     '  geo=$(xwininfo -id "$w" 2>/dev/null | sed -n "s/.*Width: *\\([0-9]*\\).*/\\1/p")',
@@ -2466,6 +2469,8 @@ export async function focusChatWindow(inst: Instance, appType = 'wechat'): Promi
     'done',
     '[ -z "$best" ] && best=$(printf "%s" "$ids" | head -1)',
     'xdotool windowactivate --sync "$best" 2>/dev/null || exit 0',
+    // activate 不保证层叠最前（另一全屏窗可能压在上面），显式 raise，确保 xwd 截到主窗。
+    'xdotool windowraise "$best" 2>/dev/null || true',
     'sleep 0.2',
     'focus=$(xdotool getwindowfocus 2>/dev/null)',
     '[ "$focus" = "$best" ] || exit 0',
@@ -2498,7 +2503,8 @@ export async function focusChatInput(inst: Instance, appType = 'wechat'): Promis
     'command -v xdotool >/dev/null 2>&1 || exit 1',
     `ids1=$(xdotool search --onlyvisible --class '${clsPattern}' 2>/dev/null)`,
     `ids2=$(xdotool search --onlyvisible --name '${titlePattern}' 2>/dev/null)`,
-    'ids="$ids1 $ids2"',
+    // 【1.7.3】同 focusChatWindow：只认应用名标题的主窗，不碰联系人单聊窗。
+    'if [ -n "$(printf "%s" "$ids2" | tr -d "[:space:]")" ]; then ids="$ids2"; else ids="$ids1"; fi',
     '[ -z "$(printf "%s" "$ids" | tr -d "[:space:]")" ] && exit 1',
     'best=""; bestArea=0; bw=0; bh=0',
     'for w in $ids; do',
@@ -2510,6 +2516,7 @@ export async function focusChatInput(inst: Instance, appType = 'wechat'): Promis
     'done',
     '[ -z "$best" ] && exit 1',
     'xdotool windowactivate --sync "$best" 2>/dev/null || exit 1',
+    'xdotool windowraise "$best" 2>/dev/null || true',
     'sleep 0.15',
     // 相对窗口坐标：横向 45%（会话列表在左侧 ~22%，取聊天区中部），纵向离底部 55px（输入框内，避开发送按钮）。
     '[ "$bw" -lt 400 ] && bw=1000; [ "$bh" -lt 300 ] && bh=600',
