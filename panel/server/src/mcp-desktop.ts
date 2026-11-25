@@ -13,6 +13,8 @@ import {
   cancelClipRestore,
   dockerClient as docker,
   execCreate,
+  instanceAcceptsLargePng,
+  pasteImageInInstance,
   scheduleClipRestore,
   withClipLock,
   xdoKey,
@@ -1181,6 +1183,14 @@ export const CLEAR_INPUT_SCRIPT = [...X_PRELUDE, WECHAT_FOCUS_INPUT, xdoKey('ctr
 export async function clearInputInInstance(inst: Instance): Promise<void> {
   assertWechatInstance(inst);
   assertInputOk(await execInputScript(inst, CLEAR_INPUT_SCRIPT, [], INPUT_KILL_AFTER_SEC), '清空输入框');
+}
+
+// 起草图片：聚焦微信当前会话输入框并清空残留，再用面板已有的图片粘贴链路写入剪贴板并 Ctrl+V（绝不按回车）。
+export async function pasteDraftImageInInstance(inst: Instance, mime: string, content: Buffer): Promise<void> {
+  assertWechatInstance(inst);
+  await clearInputInInstance(inst);
+  const largeOk = mime === 'image/png' ? await instanceAcceptsLargePng(inst) : false;
+  await pasteImageInInstance(inst, mime, content, largeOk);
 }
 
 // 确认发送专用：校验微信主窗口仍是当前活动窗口后只按一次回车。

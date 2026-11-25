@@ -53,6 +53,7 @@
 | `woc_scroll` | 在指定坐标滚动 | 全部 |
 | `woc_session_header` | 返回当前会话标题栏的原图和它的摘要 `header_digest`（只读，随写工具一起出现） | 微信 |
 | `woc_draft_reply` | 清空当前会话的输入框并粘贴一段文字，**不按回车**；返回截图和一次性的 `draft_id` | 微信 |
+| `woc_draft_image` | 清空当前会话的输入框并粘贴一张图片（≤ 4 MiB），**不按回车**；返回截图和一次性的 `draft_id` | 微信 |
 | `woc_confirm_send` | 核对后按一次回车把草稿发出去 | 微信 |
 | `woc_discard_draft` | 作废草稿并清空输入框 | 微信 |
 

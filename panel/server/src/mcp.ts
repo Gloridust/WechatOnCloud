@@ -53,6 +53,21 @@ interface ToolResult {
   isError?: boolean;
 }
 const DEFAULT_LOG_TAIL = 100;
+const MCP_WRITE_BODY_LIMIT_BYTES = 8 * 1024 * 1024; // 8 MiB cap when write tools enabled (allows base64 images up to 4 MiB)
+const MAX_DRAFT_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MiB decoded image cap
+const ALLOWED_IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'] as const;
+const DRAFT_IMAGE_SETTLE_MS = 250;
+
+function hasValidImageSignature(mime: string, b: Buffer): boolean {
+  if (mime === 'image/png') {
+    return b.length >= 24 && b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) && b.toString('ascii', 12, 16) === 'IHDR';
+  }
+  if (mime === 'image/jpeg') return b.length >= 4 && b[0] === 255 && b[1] === 216 && b[2] === 255;
+  if (mime === 'image/gif') return b.length >= 10 && /GIF8[79]a/.test(b.toString('ascii', 0, 6));
+  if (mime === 'image/webp') return b.length >= 16 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP';
+  if (mime === 'image/bmp') return b.length >= 26 && b.toString('ascii', 0, 2) === 'BM';
+  return false;
+}
 const MAX_LOG_TAIL = 500;
 const MAX_LOG_BYTES = 64 * 1024; // 64 KiB cap on returned log text
 const DEFAULT_SCREENSHOT_MAX_WIDTH = 1280;
@@ -111,6 +126,8 @@ export interface McpDeps {
   scrollInInstance?: (inst: Instance, opts: ScrollOptions) => Promise<{ displayWidth: number; displayHeight: number }>;
   // Focuses the WeChat chat input, clears it and pastes text. Never presses Return.
   pasteDraftInInstance?: (inst: Instance, text: string) => Promise<void>;
+  // Focuses the WeChat chat input, clears it and pastes an image. Never presses Return.
+  pasteDraftImageInInstance?: (inst: Instance, mime: string, content: Buffer) => Promise<void>;
   clearInputInInstance?: (inst: Instance) => Promise<void>;
   // Presses Return once after checking the WeChat main window is still active. Must NOT take the input lock itself.
   sendReturnInInstance?: (inst: Instance, expectedWindowId: string, opts?: { focusCheck?: boolean }) => Promise<void>;
@@ -451,6 +468,49 @@ export const MCP_WRITE_TOOLS: Tool[] = [
         },
       },
       required: ['instance_id', 'text'],
+      additionalProperties: false,
+    },
+    annotations: WRITE_NON_DESTRUCTIVE_ANNOTATIONS,
+  },
+  {
+    name: 'woc_draft_image',
+    description:
+      'WeChat instances only. Clear any residual draft in the active WeChat chat editor and paste an image (PNG/JPEG/GIF/WebP/BMP, <= 4 MiB, NEVER presses Return). Before pasting it checks that the chat header is not blank and, when expected_header_digest is given, that the open chat is still that one; otherwise nothing is pasted. Returns a post-paste screenshot, native-resolution crops of the header and of the input box, and a short-lived single-use draft_id for woc_confirm_send. Issuing a draft invalidates every older draft_id of the instance.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        instance_id: {
+          type: 'string',
+          description: 'Instance ID (from woc_list_instances).',
+        },
+        image_base64: {
+          type: 'string',
+          minLength: 1,
+          description: 'Base64-encoded image bytes (decoded size <= 4 MiB; never sent automatically).',
+        },
+        mime_type: {
+          type: 'string',
+          enum: [...ALLOWED_IMAGE_MIMES],
+          description: 'Image MIME type matching the binary signature of image_base64.',
+        },
+        expected_header_digest: {
+          type: 'string',
+          pattern: '^[0-9a-f]{32}$',
+          description:
+            'header_digest from woc_session_header for the chat this image is meant for. If another chat is open, the call fails with session_header_mismatch and nothing is pasted.',
+        },
+        max_width: {
+          type: 'integer',
+          minimum: 0,
+          maximum: MAX_SCREENSHOT_MAX_WIDTH,
+          description: `Target max width for the post-paste verification screenshot (default ${DEFAULT_SCREENSHOT_MAX_WIDTH}; 0 for native; or ${MIN_SCREENSHOT_MAX_WIDTH}-${MAX_SCREENSHOT_MAX_WIDTH}).`,
+        },
+        full_resolution: {
+          type: 'boolean',
+          description: 'Capture post-paste verification screenshot at full native width.',
+        },
+      },
+      required: ['instance_id', 'image_base64', 'mime_type'],
       additionalProperties: false,
     },
     annotations: WRITE_NON_DESTRUCTIVE_ANNOTATIONS,
@@ -914,7 +974,7 @@ function createToolRunner(deps: McpDeps, state: McpRuntimeState) {
   };
 
   const instructions = state.allowWrite
-    ? 'MCP server for WechatOnCloud (WOC) with controlled write tools enabled. Never assumes stopped instances can be started. Always inspect screenshot/window info before clicking; the chat list reorders whenever a message arrives, so never reuse old coordinates without a fresh screenshot. Before drafting, call woc_session_header, confirm from its image that the intended chat is open, and pass its header_digest to woc_draft_reply as expected_header_digest. Always review the woc_draft_reply images and obtain explicit user approval before calling woc_confirm_send.'
+    ? 'MCP server for WechatOnCloud (WOC) with controlled write tools enabled. Never assumes stopped instances can be started. Always inspect screenshot/window info before clicking; the chat list reorders whenever a message arrives, so never reuse old coordinates without a fresh screenshot. Before drafting text or images, call woc_session_header, confirm from its image that the intended chat is open, and pass its header_digest to woc_draft_reply or woc_draft_image as expected_header_digest. Always review the drafted images and obtain explicit user approval before calling woc_confirm_send.'
     : 'Read-only MCP server for WechatOnCloud (WOC). Never assumes stopped instances can be started; check runtime state first.';
 
   const callTool = async (toolName: string, rawArgs: unknown): Promise<ToolResult> => {
@@ -928,6 +988,7 @@ function createToolRunner(deps: McpDeps, state: McpRuntimeState) {
       toolName === 'woc_click' ||
       toolName === 'woc_scroll' ||
       toolName === 'woc_draft_reply' ||
+      toolName === 'woc_draft_image' ||
       toolName === 'woc_confirm_send' ||
       toolName === 'woc_discard_draft';
 
@@ -1648,6 +1709,224 @@ function createToolRunner(deps: McpDeps, state: McpRuntimeState) {
           };
         }
 
+        case 'woc_draft_image': {
+          const id = requireInstanceId(args);
+          logInstanceId = id;
+          const mimeType = args.mime_type;
+          if (typeof mimeType !== 'string' || !(ALLOWED_IMAGE_MIMES as readonly string[]).includes(mimeType)) {
+            throw new Error(`invalid_argument: mime_type must be one of ${ALLOWED_IMAGE_MIMES.join(', ')}`);
+          }
+          const rawB64 = args.image_base64;
+          if (typeof rawB64 !== 'string' || rawB64.trim().length === 0) {
+            throw new Error('invalid_argument: image_base64 must be a non-empty base64 string');
+          }
+          const cleanB64 = rawB64.replace(/\s+/g, '');
+          if (cleanB64.length > Math.ceil((MAX_DRAFT_IMAGE_BYTES * 4) / 3) + 4) {
+            throw new Error(`invalid_argument: image exceeds ${MAX_DRAFT_IMAGE_BYTES} bytes`);
+          }
+          if (!/^[A-Za-z0-9+/]*={0,2}$/.test(cleanB64) || cleanB64.length % 4 !== 0) {
+            throw new Error('invalid_argument: image_base64 is not valid base64');
+          }
+          const imageBuf = Buffer.from(cleanB64, 'base64');
+          if (imageBuf.length === 0 || imageBuf.length > MAX_DRAFT_IMAGE_BYTES) {
+            throw new Error(`invalid_argument: decoded image must be 1..${MAX_DRAFT_IMAGE_BYTES} bytes`);
+          }
+          if (!hasValidImageSignature(mimeType, imageBuf)) {
+            throw new Error('invalid_argument: image content does not match mime_type signature');
+          }
+          const imageBytes = imageBuf.length;
+          let expectedDigest: string | undefined;
+          if (args.expected_header_digest !== undefined) {
+            if (typeof args.expected_header_digest !== 'string' || !/^[0-9a-f]{32}$/.test(args.expected_header_digest)) {
+              throw new Error('invalid_argument: expected_header_digest must be the 32-hex header_digest returned by woc_session_header');
+            }
+            expectedDigest = args.expected_header_digest;
+          }
+          const shotOpts = parseScreenshotArgs(args, false);
+
+          const inst = deps.findInstance(id);
+          if (!inst) {
+            auditWrite({ tool: toolName, instance_id: id, text_length: imageBytes, result: 'rejected', error: 'instance_not_found', duration_ms: state.now() - t0 });
+            return jsonTextResult({ ok: false, error: 'instance_not_found', instance_id: id }, true);
+          }
+          const unsupportedDraft = unsupportedApp(toolName, inst, t0, true, imageBytes);
+          if (unsupportedDraft) return unsupportedDraft;
+
+          const guard = await checkWriteGuards(inst, false);
+          if (!guard.ok) {
+            auditWrite({ tool: toolName, instance_id: id, text_length: imageBytes, result: 'rejected', error: guard.error, duration_ms: state.now() - t0 });
+            return jsonTextResult(guard.payload);
+          }
+
+          if (!deps.pasteDraftImageInInstance || !deps.captureSessionFingerprint) {
+            throw new Error('draft image handlers not configured');
+          }
+          const capture = deps.captureSessionFingerprint;
+          const pasteImg = deps.pasteDraftImageInInstance;
+          const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+          const rejectDraft = (error: string) =>
+            auditWrite({ tool: toolName, instance_id: id, text_length: imageBytes, result: 'rejected', error, duration_ms: state.now() - t0 });
+
+          let pasteAttempted = false;
+          let outcome:
+            | { kind: 'header_blank'; fp: SessionFingerprint }
+            | { kind: 'header_mismatch'; fp: SessionFingerprint }
+            | { kind: 'session_changed'; cmp: FingerprintComparison }
+            | { kind: 'ok'; fp: SessionFingerprint; shot: ScreenshotResult; invalidated: number };
+          try {
+            outcome = await withLock(inst, async () => {
+              const pre = await capture(inst);
+              if (pre.headerInkPixels < MIN_HEADER_INK_PIXELS) return { kind: 'header_blank' as const, fp: pre };
+              if (expectedDigest && pre.headerDigest !== expectedDigest) return { kind: 'header_mismatch' as const, fp: pre };
+
+              const invalidated = state.draftStore.invalidateInstance(inst.id);
+              pasteAttempted = true;
+              await pasteImg(inst, mimeType, imageBuf);
+              if (DRAFT_IMAGE_SETTLE_MS > 0) await sleep(DRAFT_IMAGE_SETTLE_MS);
+              const post = await capture(inst);
+              const cmp = compareSessionFingerprints(pre, post, { editorMaxDiffPixels: null });
+              if (!cmp.match) return { kind: 'session_changed' as const, cmp };
+              const shot = await deps.captureInstanceScreenshot(inst, shotOpts);
+              return { kind: 'ok' as const, fp: post, shot, invalidated };
+            });
+          } catch (e: any) {
+            if (isInputBusy(e)) {
+              rejectDraft('input_busy');
+              return jsonTextResult(inputBusyPayload(id));
+            }
+            if (e instanceof InputCommandError && e.dispatched === 'no') {
+              rejectDraft(e.code);
+              return jsonTextResult({
+                ok: false,
+                error: e.code,
+                instance_id: id,
+                dispatched: 'no',
+                detail: e.message,
+                input_may_have_residual_draft: false,
+                message: 'Nothing was pasted into the instance; no draft_id issued.',
+              });
+            }
+            if (pasteAttempted) {
+              const msg = e instanceof Error ? e.message : String(e);
+              auditWrite({ tool: toolName, instance_id: id, text_length: imageBytes, result: 'error', error: 'draft_failed_after_paste', duration_ms: state.now() - t0 });
+              return jsonTextResult(
+                {
+                  ok: false,
+                  error: 'draft_failed_after_paste',
+                  instance_id: id,
+                  detail: msg,
+                  ...RESIDUAL_DRAFT_META,
+                  message: 'The image paste may have been (partially) applied but the draft could not be verified; no draft_id issued.',
+                },
+                true,
+              );
+            }
+            throw e;
+          }
+
+          if (outcome.kind === 'header_blank') {
+            rejectDraft('header_blank');
+            return jsonTextResult({
+              ok: false,
+              error: 'header_blank',
+              instance_id: inst.id,
+              header_ink_pixels: outcome.fp.headerInkPixels,
+              min_header_ink_pixels: MIN_HEADER_INK_PIXELS,
+              header_region: outcome.fp.headerRegion,
+              input_may_have_residual_draft: false,
+              message:
+                'WeChat chat header appears blank or obscured (insufficient title ink pixels); nothing was pasted and no draft_id issued.',
+            });
+          }
+          if (outcome.kind === 'header_mismatch') {
+            rejectDraft('session_header_mismatch');
+            const fp = outcome.fp;
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: JSON.stringify({
+                    ok: false,
+                    error: 'session_header_mismatch',
+                    instance_id: inst.id,
+                    expected_header_digest: expectedDigest,
+                    actual_header_digest: fp.headerDigest,
+                    header_ink_pixels: fp.headerInkPixels,
+                    input_may_have_residual_draft: false,
+                    message:
+                      'The open chat is not the one pinned by expected_header_digest (the attached image is the header that is open now); nothing was pasted and no draft_id issued.',
+                  }),
+                },
+                {
+                  type: 'image' as const,
+                  data: encodeGrayPng(fp.headerGray, fp.headerRegion.width, fp.headerRegion.height).toString('base64'),
+                  mimeType: 'image/png',
+                },
+              ],
+            };
+          }
+          if (outcome.kind === 'session_changed') {
+            rejectDraft('session_changed_during_draft');
+            return jsonTextResult({
+              ok: false,
+              error: 'session_changed_during_draft',
+              instance_id: inst.id,
+              detail: outcome.cmp.detail,
+              header_check: formatHeaderCheck(outcome.cmp.headerCheck),
+              ...RESIDUAL_DRAFT_META,
+              message:
+                'The chat header or window changed while the image was being pasted; no draft_id issued.',
+            });
+          }
+
+          const { fp: fingerprint, shot } = outcome;
+          const draft = state.draftStore.create(inst.id, imageBytes, fingerprint);
+          const ttlSec = Math.max(1, Math.round((draft.expiresAt - draft.createdAt) / 1000));
+          const headerPng = encodeGrayPng(fingerprint.headerGray, fingerprint.headerRegion.width, fingerprint.headerRegion.height);
+          const editorPng = encodeGrayPng(fingerprint.editorGray, fingerprint.editorRegion.width, fingerprint.editorRegion.height);
+
+          auditWrite({ tool: toolName, instance_id: id, text_length: imageBytes, result: 'ok', duration_ms: state.now() - t0 });
+          return {
+            content: [
+              {
+                type: 'image' as const,
+                data: shot.png.toString('base64'),
+                mimeType: 'image/png',
+              },
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  ok: true,
+                  draft_id: draft.draftId,
+                  expires_at: new Date(draft.expiresAt).toISOString(),
+                  ttl_sec: ttlSec,
+                  instance_id: inst.id,
+                  mime_type: mimeType,
+                  image_bytes: imageBytes,
+                  display_width: shot.displayWidth,
+                  display_height: shot.displayHeight,
+                  image_width: shot.imageWidth,
+                  image_height: shot.imageHeight,
+                  bytes: shot.bytes,
+                  images: ['screenshot', 'header_native', 'editor_native'],
+                  invalidated_drafts: outcome.invalidated,
+                  fingerprint_summary: {
+                    digest: fingerprint.digest,
+                    header_digest: fingerprint.headerDigest,
+                    header_ink_pixels: fingerprint.headerInkPixels,
+                    editor_ink_pixels: countHeaderInkPixels(fingerprint.editorGray).inkPixels,
+                    header_region: fingerprint.headerRegion,
+                    editor_region: fingerprint.editorRegion,
+                  },
+                  wechat_window: shot.wechatWindow,
+                }),
+              },
+              { type: 'image' as const, data: headerPng.toString('base64'), mimeType: 'image/png' },
+              { type: 'image' as const, data: editorPng.toString('base64'), mimeType: 'image/png' },
+            ],
+          };
+        }
+
         case 'woc_confirm_send': {
           const id = requireInstanceId(args);
           logInstanceId = id;
@@ -2005,7 +2284,7 @@ export function registerMcp(app: FastifyInstance, deps: McpDeps): { enabled: boo
   // Reject any unexpected subpath under /mcp/* explicitly so it never falls back to SPA HTML.
   app.all('/mcp/*', async (_req, reply) => reply.code(404).send({ error: 'not found' }));
 
-  app.all('/mcp', { bodyLimit: MCP_BODY_LIMIT_BYTES }, async (req, reply) => {
+  app.all('/mcp', { bodyLimit: allowWrite ? MCP_WRITE_BODY_LIMIT_BYTES : MCP_BODY_LIMIT_BYTES }, async (req, reply) => {
     reply.header('Cache-Control', 'no-store, max-age=0');
 
     if (req.method !== 'POST') {
