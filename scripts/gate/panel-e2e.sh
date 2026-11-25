@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 面板端到端回归（doc/dev/发布门禁.md §4 与历次修复的可执行版本，本地与 CI 共用）。
 # 用一个临时面板 + 一个 Chromium 实例，经面板 HTTP 接口走用户会走的路径，验证：
-#   部署约束（日志上限、实例网络隔离）、桌面反代（含 #179 大 cookie）、上传、取回图片、
+#   部署约束（日志上限、实例网络隔离）、桌面反代（含 #179 大 cookie）、上传、取回图片、MCP 端点、
 #   重启时应用正常退出、WOC_DATA_ROOT 填错时明确报错（#133）、删除实例清理数据卷。
 # 用法：scripts/gate/panel-e2e.sh <面板镜像> <实例镜像>
 # 不会碰已有的面板和实例：容器、网络、数据卷都用 woc-e2e 前缀，结束时清掉。
@@ -14,6 +14,7 @@ NAME=woc-e2e-panel
 NET=woc-e2e-instances
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/woc-e2e.XXXXXX")"
 JAR="$WORK/jar"
+MCP_TOKEN=e2e-mcp-token-0123456789abcdef
 FAILED=0
 IDS=()
 
@@ -72,7 +73,7 @@ prefs_exit_type() { # 读数据卷里 Chromium 的 exit_type（运行中 = Crash
 }
 
 echo "面板端到端：面板 $PANEL_IMG · 实例 $INST_IMG"
-if start_panel; then note "面板启动并登录"; else bad "面板没起来或登录失败"; docker logs "$NAME" 2>&1 | tail -30; exit 1; fi
+if start_panel -e MCP_AUTH_TOKEN="$MCP_TOKEN" -e MCP_ALLOW_WRITE=1; then note "面板启动并登录"; else bad "面板没起来或登录失败"; docker logs "$NAME" 2>&1 | tail -30; exit 1; fi
 
 ID=$(create_instance e2e)
 [ -n "$ID" ] && IDS+=("$ID")
@@ -124,6 +125,44 @@ docker exec -u abc "$C" sh -c 'DISPLAY=:1 xclip -selection clipboard -t image/pn
 sleep 1
 curl -s -b "$JAR" -o "$WORK/got.png" "$U/api/instances/$ID/clipboard-image"
 cmp -s "$WORK/t.png" "$WORK/got.png" && note "取回的图片与原图逐字节一致" || bad "取回的图片与原图不一致"
+
+# --- MCP 端点（doc/MCP.md）：鉴权；只读工具拿到窗口信息和截图；同一坐标连续滚动 / 点击不卡住；聊天工具只认微信实例 ---
+mcp() { # mcp <工具名> <参数 JSON>：打印 JSON-RPC 响应（工具结果是其中一段转义过的 JSON 文本）；每次最多等 6 秒
+  curl -s -m 6 -H "authorization: Bearer $MCP_TOKEN" -H 'content-type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" "$U/mcp"
+}
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$U/mcp")
+[ "$code" = 401 ] && note "MCP 不带令牌 401" || bad "MCP 不带令牌应为 401，实际：$code"
+n=$(curl -s -H "authorization: Bearer $MCP_TOKEN" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$U/mcp" | grep -o '"name":"woc_[a-z_]*"' | sort -u | wc -l | xargs)
+[ "$n" = 13 ] && note "MCP tools/list 13 个工具（开了写工具）" || bad "MCP tools/list 应有 13 个工具，实际：$n"
+win=$(mcp woc_window_info "{\"instance_id\":\"$ID\"}")
+DW=$(printf '%s' "$win" | sed -n 's/.*display_width\\":\([0-9]*\).*/\1/p')
+DH=$(printf '%s' "$win" | sed -n 's/.*display_height\\":\([0-9]*\).*/\1/p')
+if [ "${DW:-0}" -gt 0 ] && [ "${DH:-0}" -gt 0 ]; then note "MCP 窗口信息：桌面 ${DW}x${DH}"; else
+  bad "MCP woc_window_info 没拿到桌面分辨率：$(printf '%s' "$win" | head -c 300)"; DW=1280; DH=720
+fi
+shot=$(mcp woc_screenshot "{\"instance_id\":\"$ID\",\"max_width\":640}")
+case "$shot" in *'"mimeType":"image/png"'*'iVBORw0KGgo'*|*'iVBORw0KGgo'*'"mimeType":"image/png"'*) note "MCP 截图是 PNG" ;;
+  *) bad "MCP woc_screenshot 没返回 PNG：$(printf '%s' "$shot" | head -c 300)" ;; esac
+DIMS="\"display_width\":$DW,\"display_height\":$DH"
+ok=0
+for dir in up down down; do # 第二、三次指针已经停在目标坐标上：xdotool mousemove --sync 会在这里空等 15 秒
+  mcp woc_scroll "{\"instance_id\":\"$ID\",\"x\":$((DW / 2)),\"y\":$((DH / 2)),$DIMS,\"direction\":\"$dir\",\"clicks\":1}" | grep -q '\\"ok\\":true' && ok=$((ok + 1))
+done
+[ "$ok" = 3 ] && note "MCP 同一坐标连续滚动 3 次都成功" || bad "MCP 同一坐标连续滚动应 3 次都成功，实际成功 $ok 次"
+ok=0
+for _ in 1 2; do
+  mcp woc_click "{\"instance_id\":\"$ID\",\"x\":5,\"y\":$((DH - 5)),$DIMS}" | grep -q '\\"ok\\":true' && ok=$((ok + 1))
+done
+[ "$ok" = 2 ] && note "MCP 同一坐标连续点击 2 次都成功" || bad "MCP 同一坐标连续点击应 2 次都成功，实际成功 $ok 次"
+mcp woc_click "{\"instance_id\":\"$ID\",\"x\":5,\"y\":5,\"display_width\":$((DW + 1)),\"display_height\":$DH}" | grep -q 'display_size_mismatch' \
+  && note "MCP 分辨率对不上时拒绝点击" || bad "MCP 分辨率对不上时应返回 display_size_mismatch"
+mcp woc_draft_reply "{\"instance_id\":\"$ID\",\"text\":\"e2e\"}" | grep -q 'unsupported_app' \
+  && note "MCP 聊天工具拒绝非微信实例" || bad "MCP 在 Chromium 实例上起草应返回 unsupported_app"
+audit=$(docker logs "$NAME" 2>&1 | grep -c '\[mcp-audit\]' || true)
+leak=$(docker logs "$NAME" 2>&1 | grep -c -F "$MCP_TOKEN" || true)
+[ "$audit" -ge 6 ] && [ "$leak" = 0 ] && note "MCP 写操作有审计日志（$audit 条），日志里没有令牌" || bad "MCP 审计日志 $audit 条、令牌出现 $leak 次（应 ≥6 条、0 次）"
 
 # --- 重启实例：旧容器里的应用正常退出，而不是被 SIGKILL 或随 Xvnc 消失而崩溃 ---
 # 应用退出得快时，「先停 Xvnc 再等应用」这种错也可能碰巧不出事。为了让检查是确定的：发重启前先冻结 Chromium，
