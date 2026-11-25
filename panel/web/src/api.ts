@@ -65,6 +65,54 @@ export interface MemLimits {
   watchdogEnabled: boolean;
   intervalSec: number;
 }
+// AI 代回微信（1.6.6）。API Key 永不回传明文，只用 apiKeySet 表示已配置。
+export interface AutoReplyConfigPublic {
+  mode: 'off' | 'assist' | 'auto';
+  baseURL: string;
+  model: string;
+  prompt: string;
+  whitelist: string[];
+  triggerPrefix: string;
+  stopWords: string[];
+  cooldownSec: number;
+  maxPerHour: number;
+  maxChars: number;
+  pollSec: number;
+  autoTagEnabled: boolean;
+  autoTagText: string;
+  autoAllowAny: boolean;
+  apiKeySet: boolean;
+  enabledByEnv: boolean;
+}
+export interface AutoReplyHistoryItem {
+  at: number;
+  contact: string;
+  message: string;
+  reply: string;
+  tagged: boolean;
+  tagText: string;
+  source: 'auto' | 'manual';
+}
+export interface AutoReplyVerifyResult {
+  model: string;
+  baseURL: string;
+  textOk: boolean;
+  visionOk: boolean;
+  textError?: string;
+  visionError?: string;
+  latencyMs: number;
+  hint: string;
+}
+export interface AutoReplyDraft {
+  shouldReply: boolean;
+  reason: string;
+  contact: string;
+  message: string;
+  reply: string;
+  usedScreenshot: boolean;
+  elapsedMs: number;
+}
+
 export interface InstanceWithStatus extends PanelInstance {
   runtime: RuntimeState;
   wechat: WechatStatus;
@@ -99,6 +147,22 @@ export interface VolEntry {
   type: 'dir' | 'file' | 'link' | 'other';
   size: number;
   mtime: number; // epoch ms
+}
+
+export interface ChatBackupEntry {
+  id: string;
+  kind: 'full' | 'inc';
+  file: string;
+  createdAt: number;
+  bytes: number;
+  fileCount: number;
+  base?: string;
+  removed?: string[];
+}
+export interface ChatChain {
+  version: number;
+  appType: string;
+  entries: ChatBackupEntry[];
 }
 
 export interface VersionInfo {
@@ -431,6 +495,7 @@ export const api = {
     return res.blob();
   },
   downloadFileUrl: (id: string, name: string) => `/api/instances/${id}/download?name=${encodeURIComponent(name)}`,
+  downloadAllUrl: (id: string) => `/api/instances/${id}/download-all`,
   deleteFile: (id: string, name: string) => req(`/api/instances/${id}/files?name=${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
   // 数据卷管理（仅管理员）
@@ -445,6 +510,21 @@ export const api = {
   volumeDownloadUrl: (id: string, path: string) =>
     `/api/admin/instances/${id}/volume/download?path=${encodeURIComponent(path)}`,
   volumeBackupUrl: (id: string) => `/api/admin/instances/${id}/volume/backup`,
+
+  // 聊天消息备份（全量 + 增量，仅管理员）
+  chatBackupList: (id: string) => req<ChatChain>(`/api/admin/instances/${id}/chat-backup`),
+  chatBackupRun: (id: string, mode: 'full' | 'inc') =>
+    req<{ ok: boolean; job: string }>(`/api/admin/instances/${id}/chat-backup`, { method: 'POST', body: JSON.stringify({ mode }) }),
+  chatBackupRestore: (id: string, entryId: string) =>
+    req<{ ok: boolean; job: string }>(`/api/admin/instances/${id}/chat-backup/${encodeURIComponent(entryId)}/restore`, { method: 'POST' }),
+  chatBackupDelete: (id: string, entryId: string) =>
+    req(`/api/admin/instances/${id}/chat-backup/${encodeURIComponent(entryId)}`, { method: 'DELETE' }),
+  chatBackupDownloadUrl: (id: string, entryId: string) =>
+    `/api/admin/instances/${id}/chat-backup/${encodeURIComponent(entryId)}/download`,
+  chatBackupJob: (id: string, job: string) =>
+    req<{ state: 'running' | 'done' | 'error'; stage: string; error: string | null; result: any }>(
+      `/api/admin/instances/${id}/chat-backup/jobs/${encodeURIComponent(job)}`,
+    ),
   volumeUpload: async (id: string, path: string, file: File, onProgress?: UploadProgress) => {
     assertUploadSize(file, UPLOAD_LIMITS.volumeFile);
     return rawUpload(
@@ -470,15 +550,71 @@ export const api = {
     req<{ free: boolean; mine: boolean; holder: string | null; superseded?: Superseded | null }>(`/api/instances/${id}/control`, {
       headers: viewerHeader,
     }),
-  controlBeat: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/beat`, { method: 'POST', headers: viewerHeader }),
+  // kind=key 表示真实键盘输入（AI 代回据此短暂让行）；鼠标点击/滚动只续约控制权，不阻断自动回复。
+  controlBeat: (id: string, kind?: 'key' | 'mouse') =>
+    req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/beat`, {
+      method: 'POST',
+      headers: viewerHeader,
+      ...(kind ? { body: JSON.stringify({ kind }) } : {}),
+    }),
   controlTake: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/take`, { method: 'POST', headers: viewerHeader }),
   typeInInstance: (id: string, text: string) =>
     req(`/api/instances/${id}/type`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ text }) }),
   // 本机剪贴板文字粘进应用（粘贴桥判断本机比容器新时用；贴完留在容器剪贴板）
   pasteText: (id: string, text: string) =>
     req(`/api/instances/${id}/paste-text`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ text }) }),
+  // 【优化】把已上传的文件路径写进容器剪贴板；1.6.6 支持多文件 + 焦点校验后自动粘贴。
+  // 返回 autoPasted=true 表示已确认焦点在聊天应用并按了 Ctrl+V；false 表示仅备好剪贴板需手动粘贴。
+  pasteFilePath: (id: string, names: string[] | string, autoPaste = false) =>
+    req<{ ok: boolean; autoPasted?: boolean; activeClass?: string; names?: string[] }>(
+      `/api/instances/${id}/paste-path`,
+      {
+        method: 'POST',
+        headers: viewerHeader,
+        body: JSON.stringify(Array.isArray(names) ? { names, autoPaste } : { name: names, autoPaste }),
+      },
+    ),
   keyInInstance: (id: string, key: string) =>
     req(`/api/instances/${id}/key`, { method: 'POST', headers: viewerHeader, body: JSON.stringify({ key }) }),
+
+  // 未读消息通知（1.6.6）
+  unreadConfig: (id: string) =>
+    req<{ enabled: boolean; pollSec: number; byEnv?: boolean; hasUnread: boolean }>(`/api/instances/${id}/unread/config`),
+  // 总开关（1.6.7）：面板切换、即时生效，管理员
+  unreadSetEnabled: (enabled: boolean, pollSec?: number) =>
+    req<{ enabled: boolean; pollSec: number; byEnv: boolean }>('/api/admin/unread-notify', {
+      method: 'POST', body: JSON.stringify(pollSec !== undefined ? { enabled, pollSec } : { enabled }),
+    }),
+  autoReplySetEnabled: (enabled: boolean) =>
+    req<{ enabled: boolean; byEnv: boolean }>('/api/admin/auto-reply-enabled', {
+      method: 'POST', body: JSON.stringify({ enabled }),
+    }),
+  // AI 代回微信
+  autoReplyConfig: (id: string) => req<AutoReplyConfigPublic>(`/api/instances/${id}/auto-reply/config`),
+  autoReplySaveConfig: (id: string, patch: Partial<AutoReplyConfigPublic> & { apiKey?: string; clearApiKey?: boolean }) =>
+    req<AutoReplyConfigPublic>(`/api/instances/${id}/auto-reply/config`, { method: 'POST', body: JSON.stringify(patch) }),
+  autoReplyDraft: (id: string, userMessage?: string) =>
+    req<AutoReplyDraft>(`/api/instances/${id}/auto-reply/draft`, {
+      method: 'POST',
+      body: JSON.stringify(userMessage ? { userMessage } : {}),
+    }),
+  autoReplySend: (id: string, text: string, withEnter: boolean) =>
+    req<{ sent: boolean; activeClass: string }>(`/api/instances/${id}/auto-reply/send`, {
+      method: 'POST',
+      body: JSON.stringify({ text, withEnter }),
+    }),
+  autoReplyCheck: (id: string) => req<{ ran: boolean; skipped?: string; sent?: boolean; error?: string }>(`/api/instances/${id}/auto-reply/check`, { method: 'POST' }),
+  autoReplyHistory: (id: string) => req<{ items: AutoReplyHistoryItem[] }>(`/api/instances/${id}/auto-reply/history`),
+  autoReplyModels: (id: string, patch: { baseURL?: string; apiKey?: string }) =>
+    req<{ models: string[]; baseURL: string }>(`/api/instances/${id}/auto-reply/models`, { method: 'POST', body: JSON.stringify(patch) }),
+  autoReplyVerify: (id: string, patch: { baseURL?: string; apiKey?: string; model?: string }) =>
+    req<AutoReplyVerifyResult>(`/api/instances/${id}/auto-reply/verify`, { method: 'POST', body: JSON.stringify(patch) }),
+
+  unreadCheck: (id: string) =>
+    req<{ hasUnread: boolean; badges: number; error?: string }>(`/api/instances/${id}/unread/check`, {
+      method: 'POST',
+      headers: viewerHeader,
+    }),
 
   // 桌面壁纸
   listBackgrounds: (id: string) => req<{ backgrounds: string[] }>(`/api/admin/instances/${id}/backgrounds`),

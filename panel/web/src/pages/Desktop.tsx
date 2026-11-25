@@ -1,13 +1,22 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, appProfile, fmtUploadSize, provisionProgressText, VIEWER_ID, type Superseded } from '../api';
+import {
+  api, appProfile, fmtUploadSize, provisionProgressText, VIEWER_ID,
+  type Superseded, type AutoReplyConfigPublic, type AutoReplyDraft,
+  type AutoReplyHistoryItem, type AutoReplyVerifyResult,
+} from '../api';
 import { browserImageCodec, fitPasteImage, pasteImageWithFallback } from '../pasteImage';
 import { useUI } from '../ui';
 import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
-import { IcFolder, IcKeyboard, IcClipboard, IcVolume, IcVolumeOff, IcMic, IcImage, IcRestart, IcUpload, IcDownload, IcClose, IcCheck } from '../icons';
+import {
+  IcFolder, IcKeyboard, IcClipboard, IcVolume, IcVolumeOff, IcMic, IcImage, IcRestart, IcUpload, IcDownload,
+  IcClose, IcCheck, IcFile, IcVideo, IcAudio, IcArchive, IcSearch, IcTrash, IcEye, IcSettings,
+} from '../icons';
 import { VncAudio } from '../vncAudio';
 import { RowMenu, type RowMenuItem } from '../parts';
+import { useUnreadNotify } from '../useUnreadNotify';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
 // ws 地址带上本页的查看者标识（noVNC 先解码 path 再拼进地址），面板据此做「同一实例只在一处显示」，转发前会去掉。
@@ -16,6 +25,47 @@ function desktopUrl(id: string) {
     `/desktop/${id}/vnc/index.html?autoconnect=1&path=desktop/${id}/websockify%3Fwoc_viewer%3D${VIEWER_ID}&resize=remote` +
     '&reconnect=true&reconnect_delay=2000&clipboard_up=true&clipboard_down=true&clipboard_seamless=true'
   );
+}
+
+// 串流画质模式（1.6.6）：KasmVNC 客户端从同源 localStorage 读这些设置，iframe 加载前写好即生效。
+// 实测镜像默认值偏低（framerate=24 上限 60、compression=2、enable_threading=false、enable_webp=false），
+// 是「略微卡」的主因。三档按「网络/CPU → 画质」权衡，用户可自己切换（切换走整页重载，避免新旧两条 ws 并存把 Xvnc 卡死）。
+type QualityMode = 'smooth' | 'balanced' | 'sharp';
+interface QualityPreset {
+  label: string;
+  quality: number; // JPEG 质量 0-9，越高越清晰、越费带宽
+  compression: number; // 压缩等级 0-9，越高越省带宽、越费 CPU
+  framerate: number; // 帧率 1-120（KasmVNC dr.MIN=24 / MAX=60）
+  videoQuality: number; // 视频流质量
+  threading: boolean; // 多线程编解码
+  webp: boolean; // WebP 编码（通常比 JPEG 更高效，但个别客户端兼容性略差）
+}
+const QUALITY_PRESETS: Record<QualityMode, QualityPreset> = {
+  smooth: { label: '流畅优先', quality: 4, compression: 7, framerate: 60, videoQuality: 30, threading: true, webp: true },
+  balanced: { label: '均衡（推荐）', quality: 6, compression: 5, framerate: 48, videoQuality: 43, threading: true, webp: true },
+  sharp: { label: '清晰优先', quality: 8, compression: 2, framerate: 30, videoQuality: 60, threading: true, webp: false },
+};
+function readQualityMode(): QualityMode {
+  try {
+    const v = window.localStorage.getItem('woc_quality_mode');
+    if (v === 'smooth' || v === 'sharp') return v;
+  } catch { /* ignore */ }
+  return 'balanced';
+}
+// iframe 加载前把当前档位的 KasmVNC 参数写进 localStorage（与 enable_ime 同源同机制）。
+function applyQualitySettings(mode: QualityMode) {
+  const p = QUALITY_PRESETS[mode];
+  try {
+    window.localStorage.setItem('woc_quality_mode', mode);
+    window.localStorage.setItem('quality', String(p.quality));
+    window.localStorage.setItem('compression', String(p.compression));
+    window.localStorage.setItem('framerate', String(p.framerate));
+    window.localStorage.setItem('framerate_image_mode', String(p.framerate));
+    window.localStorage.setItem('framerate_streaming_mode', String(p.framerate));
+    window.localStorage.setItem('video_quality', String(p.videoQuality));
+    window.localStorage.setItem('enable_threading', p.threading ? 'true' : 'false');
+    window.localStorage.setItem('enable_webp', p.webp ? 'true' : 'false');
+  } catch { /* 隐私模式禁用 localStorage：忽略 */ }
 }
 
 // 「无感输入」钩子：装进同源 iframe，让用户直接在微信里打中文。
@@ -44,17 +94,33 @@ function installSeamlessIme(
     if (draining) return;
     draining = true;
     while (queue.length) {
-      const job = queue[0];
-      try {
-        if (job.kind === 'text') {
-          onTyped(job.data);
-          await api.typeInInstance(instId, job.data);
+      // 先出队再处理：即使请求失败也不会重复 shift 或漏掉后续 job。
+      const job = queue.shift()!;
+      if (job.kind === 'text') {
+        // 【优化】合并队首连续的 text job 为一次 /type：上屏延迟的大头是每段一个 HTTP 往返
+        // （中文 + 全角标点 + 混排数字会连续入队成多段）。每段本身已 ≤500（pushText 分段），
+        // 累计接近 500 就停、余下的留下一轮；遇到 key job 立即停 —— text/key 相对顺序严格不变，
+        // 不会回归「你好123→23」丢字。合并后剪贴板里就是整串，noteTyped 记整串也更贴合归还判断。
+        let combined = job.data;
+        while (queue.length && queue[0].kind === 'text') {
+          const next = (queue[0] as { kind: 'text'; data: string }).data;
+          if (combined.length + next.length > 500) break;
+          combined += next;
+          queue.shift();
         }
-        else await api.keyInInstance(instId, job.data);
-      } catch (e) {
-        onFail(e); // 单条失败丢弃、继续后续，避免卡住队列；但要让用户知道刚打的字没发出去
+        try {
+          onTyped(combined);
+          await api.typeInInstance(instId, combined);
+        } catch (e) {
+          onFail(e); // 单批失败丢弃、继续后续，避免卡住队列；但要让用户知道刚打的字没发出去
+        }
+      } else {
+        try {
+          await api.keyInInstance(instId, job.data);
+        } catch (e) {
+          onFail(e);
+        }
       }
-      queue.shift();
     }
     draining = false;
   };
@@ -413,12 +479,57 @@ function shouldPasteLocal(st: ClipState, text: string, localIsFresh: boolean, do
 interface TFile {
   name: string;
   size: number;
+  mtime?: number;
 }
+
+// 文件面板：类型归类（按扩展名），用于图标与配色。纯前端，不改后端/不改语义。
+type FileKind = 'image' | 'video' | 'audio' | 'archive' | 'doc' | 'file';
+const FILE_KIND_EXT: Record<Exclude<FileKind, 'file'>, string[]> = {
+  image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic', 'tif', 'tiff'],
+  video: ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'm4v'],
+  audio: ['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'wma'],
+  archive: ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'tgz'],
+  doc: ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'csv', 'rtf'],
+};
+function fileKind(name: string): FileKind {
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  for (const k of Object.keys(FILE_KIND_EXT) as Exclude<FileKind, 'file'>[]) {
+    if (FILE_KIND_EXT[k].includes(ext)) return k;
+  }
+  return 'file';
+}
+const FILE_KIND_ICON: Record<FileKind, ReactNode> = {
+  image: <IcImage size={20} />,
+  video: <IcVideo size={20} />,
+  audio: <IcAudio size={20} />,
+  archive: <IcArchive size={20} />,
+  doc: <IcFile size={20} />,
+  file: <IcFile size={20} />,
+};
+const FILE_KIND_LABEL: Record<FileKind, string> = {
+  image: '图片', video: '视频', audio: '音频', archive: '压缩包', doc: '文档', file: '文件',
+};
 function humanSize(n: number) {
   if (n < 1024) return n + ' B';
   if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
   if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
   return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+// 后端已返回 mtime（秒）；显示成相对时间，贴合「刚在微信里另存到桌面 → 马上来下载」的用法。
+function relTime(sec?: number) {
+  if (!sec) return '';
+  const diff = Date.now() - sec * 1000;
+  if (diff < 60_000 && diff > -60_000) return '刚刚';
+  if (diff < 3_600_000 && diff > 0) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000 && diff > 0) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  const d = new Date(sec * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const today = new Date();
+  if (d.toDateString() === today.toDateString()) return `今天 ${hhmm}`;
+  const yest = new Date(today.getTime() - 86_400_000);
+  if (d.toDateString() === yest.toDateString()) return `昨天 ${hhmm}`;
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hhmm}`;
 }
 
 // KasmVNC/noVNC 客户端 bundle 偶发未捕获异常（如断线后报 "Cannot read properties of undefined
@@ -559,6 +670,11 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const [dragging, setDragging] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
   const [files, setFiles] = useState<TFile[]>([]);
+  const [fileQuery, setFileQuery] = useState('');       // 按文件名过滤
+  const [fileSort, setFileSort] = useState<'mtime' | 'size' | 'name'>('mtime');
+  const [fileSelMode, setFileSelMode] = useState(false); // 批量选择模式
+  const [fileSel, setFileSel] = useState<Set<string>>(new Set());
+  const [filePreview, setFilePreview] = useState<string | null>(null); // 图片预览文件名
   const [showClip, setShowClip] = useState(false);
   const [clipText, setClipText] = useState('');
   // 中文输入模式：'forward'=底部输入条转发（默认，最稳）；'seamless'=无感（直接在微信里打，提交后转发）。
@@ -638,14 +754,129 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const [imeSending, setImeSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadPct, setUploadPct] = useState(''); // 进行中的上传进度文案（「37%」「(2/5) 80%」）
+  const [uploadPctNum, setUploadPctNum] = useState(0); // 进度条百分比
   const uploadQueue = useRef<File[]>([]);
   const uploadBusy = useRef(false);
   const [starting, setStarting] = useState(false);
   const [control, setControl] = useState<{ free: boolean; mine: boolean; holder: string | null } | null>(null);
   // 本页面已被别处打开的页面接管（同一实例同一时间只在一处显示）：不再显示桌面，等用户点「在这里继续使用」
   const [superseded, setSuperseded] = useState<Superseded | null>(null);
+  // 未读消息通知（1.6.6）：后端开启时订阅 SSE，标题闪烁 + 桌面通知 + 提示音。
+  const unread = useUnreadNotify(id, instances.find((i) => i.id === id)?.name || '微信');
+
+  // 串流画质模式（1.6.6）：进入桌面前把参数写进 localStorage；切换走整页重载让新连接读到。
+  const [qualityMode, setQualityMode] = useState<QualityMode>(() => readQualityMode());
+  const changeQuality = (m: QualityMode) => {
+    if (m === qualityMode) return;
+    applyQualitySettings(m);
+    window.location.reload();
+  };
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'bg' | 'font'>('bg');
+  // 两套面板：桌面设置（壁纸/字体）与应用设置（画质/通知/AI 代回），各自独立入口
+  const [settingsScope, setSettingsScope] = useState<'desktop' | 'app'>('app');
+  const [settingsTab, setSettingsTab] = useState<'bg' | 'font' | 'quality' | 'notify' | 'ai'>('bg');
+
+  // AI 代回微信（1.6.6）：配置仅管理员可读写；草稿/发送所有有实例权限的人都能用。
+  const [aiCfg, setAiCfg] = useState<AutoReplyConfigPublic | null>(null);
+  const [aiKey, setAiKey] = useState('');
+  const [aiDraft, setAiDraft] = useState<AutoReplyDraft | null>(null);
+  const [aiManual, setAiManual] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const [notifyBusy, setNotifyBusy] = useState(false);
+  const [aiModels, setAiModels] = useState<string[]>([]);
+  const [aiVerify, setAiVerify] = useState<AutoReplyVerifyResult | null>(null);
+  const [aiHistory, setAiHistory] = useState<AutoReplyHistoryItem[]>([]);
+  const [aiModelBusy, setAiModelBusy] = useState(false);
+  const loadAiHistory = useCallback(async () => {
+    if (!isAdmin || !id) return;
+    try {
+      setAiHistory((await api.autoReplyHistory(id)).items);
+    } catch {
+      /* 静默：面板轮询，避免反复弹错 */
+    }
+  }, [id, isAdmin]);
+  const loadAiCfg = useCallback(async () => {
+    if (!isAdmin || !id) return;
+    try {
+      setAiCfg(await api.autoReplyConfig(id));
+    } catch (e: any) {
+      toast(e?.message || '读取 AI 代回配置失败', 'error');
+    }
+  }, [id, isAdmin, toast]);
+  useEffect(() => {
+    if (showSettings && settingsTab === 'ai') void loadAiCfg();
+  }, [showSettings, settingsTab, loadAiCfg]);
+  useEffect(() => {
+    if (!showSettings || settingsTab !== 'ai' || !isAdmin || !id) return;
+    void loadAiHistory();
+    const t = setInterval(() => void loadAiHistory(), 15_000);
+    return () => clearInterval(t);
+  }, [showSettings, settingsTab, isAdmin, id, loadAiHistory]);
+  const aiConnPatch = () => ({
+    baseURL: aiCfg?.baseURL,
+    // 未点「保存」的新 Key 也能直接参与验证，验证通过后用户再自行保存。
+    apiKey: aiKey.trim() || undefined,
+    model: aiCfg?.model,
+  });
+  const fetchAiModels = async () => {
+    if (!id || !aiCfg) return;
+    setAiModelBusy(true);
+    try {
+      const r = await api.autoReplyModels(id, aiConnPatch());
+      setAiModels(r.models);
+      toast(`已获取 ${r.models.length} 个模型`, 'ok');
+    } catch (e: any) {
+      toast(e?.message || '拉取模型列表失败', 'error');
+    } finally { setAiModelBusy(false); }
+  };
+  const verifyAiModel = async () => {
+    if (!id || !aiCfg) return;
+    setAiModelBusy(true);
+    try {
+      const r = await api.autoReplyVerify(id, aiConnPatch());
+      setAiVerify(r);
+      toast(r.visionOk ? '模型验证通过（支持视觉）' : r.textOk ? '文本可用，但视觉不可用' : '模型验证失败', r.textOk ? 'ok' : 'error');
+    } catch (e: any) {
+      setAiVerify(null);
+      toast(e?.message || '模型验证失败', 'error');
+    } finally { setAiModelBusy(false); }
+  };
+  const saveAiCfg = async (patch: Partial<AutoReplyConfigPublic> & { apiKey?: string; clearApiKey?: boolean }) => {
+    if (!id) return;
+    try {
+      setAiCfg(await api.autoReplySaveConfig(id, patch));
+      setAiKey('');
+      toast('AI 代回配置已保存', 'ok');
+    } catch (e: any) {
+      toast(e?.message || '保存失败', 'error');
+    }
+  };
+  const genAiDraft = async (manual?: string) => {
+    if (!id) return;
+    setAiBusy(true);
+    try {
+      const d = await api.autoReplyDraft(id, manual);
+      setAiDraft(d);
+      if (!d.shouldReply) toast(d.reason || '模型判断无需回复', 'info');
+    } catch (e: any) {
+      toast(e?.message || '生成草稿失败', 'error');
+    } finally {
+      setAiBusy(false);
+    }
+  };
+  const sendAiDraft = async (withEnter: boolean) => {
+    if (!id || !aiDraft?.reply) return;
+    setAiBusy(true);
+    try {
+      const r = await api.autoReplySend(id, aiDraft.reply, withEnter);
+      toast(withEnter ? '已发送到当前微信会话' : '已填入输入框，请检查后手动发送', 'ok');
+      if (r.activeClass) setAiDraft({ ...aiDraft, reason: `焦点窗口：${r.activeClass}` });
+    } catch (e: any) {
+      toast(e?.message || '发送失败', 'error');
+    } finally {
+      setAiBusy(false);
+    }
+  };
   const [bgList, setBgList] = useState<string[]>([]);
   const [fontList, setFontList] = useState<string[]>([]);
   const [bgUploading, setBgUploading] = useState(false);
@@ -658,6 +889,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const frameRef = useRef<HTMLIFrameElement>(null);
   const dragDepth = useRef(0);
   const lastBeat = useRef(0);
+  const lastKeyBeat = useRef(0); // 键盘输入单独节流：AI 代回只在真实打字时让行，不能被鼠标 beat 的 2.5s 窗口吞掉
   const audioRef = useRef<VncAudio | null>(null);
   const recovering = useRef(false); // 致命崩溃自愈进行中（防错误浮层轮询与 error 事件重复触发重载）
   // 浏览器扩展注入脚本的报错（见 fatalErrorMsg）：只关浮层不重连；每次页面加载只记一条，避免 3s 轮询刷日志
@@ -685,6 +917,10 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     setLoadStuck(false);
     setShowFiles(false);
     setFiles([]);
+    setFileQuery('');
+    setFileSelMode(false);
+    setFileSel(new Set());
+    setFilePreview(null);
     setShowClip(false);
     setClipText('');
     setImeText('');
@@ -692,6 +928,31 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     setSuperseded(null); // 被接管是按实例算的：换到别的实例先照常连，回来时轮询会再次发现
     recovering.current = false;
   }, [id]);
+
+  // 文件面板打开时每 5s 自动刷新列表：微信里"另存到桌面"的文件会自动出现，不必关掉面板再打开。
+  // 页面隐藏时跳过，避免无谓的 docker exec；仅 showFiles 时轮询，平时零开销。
+  useEffect(() => {
+    if (!showFiles || !id) return;
+    const poll = async () => {
+      if (document.hidden) return;
+      try {
+        const { files } = await api.listFiles(id);
+        setFiles(files);
+      } catch {
+        /* ignore */
+      }
+    };
+    const t = window.setInterval(poll, 5000);
+    return () => window.clearInterval(t);
+  }, [showFiles, id]);
+
+  // 图片预览：Esc / 关闭按钮收起；打开时阻止页面滚动干扰
+  useEffect(() => {
+    if (!filePreview) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFilePreview(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [filePreview]);
 
   // 桌面久未加载出来 → 判为"无响应"，把无限转圈换成可操作的重试/重启，不让用户干等。
   // （实测容器跑久了会 I/O/服务 stall，进程没死、显示在线，但读不出 VNC 文件而永远连接中。）
@@ -821,13 +1082,18 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
 
   // 续约控制权，节流 2.5s。桌面画面里的真实操作、底部输入条里打字都算（输入条不经过画面，此前不续约，
   // 连着打一会儿字控制权就被别人拿走）。空闲不操作则超时自动释放。
-  const beat = useCallback(async () => {
+  const beat = useCallback(async (kind: 'key' | 'mouse' = 'mouse') => {
     if (!id) return;
     const now = Date.now();
-    if (now - lastBeat.current < 2500) return;
+    if (kind === 'key') {
+      if (now - lastKeyBeat.current < 800) return;
+      lastKeyBeat.current = now;
+    } else if (now - lastBeat.current < 2500) {
+      return;
+    }
     lastBeat.current = now;
     try {
-      const r = await api.controlBeat(id);
+      const r = await api.controlBeat(id, kind);
       setControl({ free: false, mine: r.mine, holder: r.holder });
     } catch {
       /* ignore */
@@ -841,16 +1107,20 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     if (!showVnc || !id || !frameLoaded) return;
     const win = frameRef.current?.contentWindow;
     if (!win) return;
-    const onInteract = () => void beat();
-    const evs = ['mousedown', 'keydown', 'wheel'] as const;
+    const onMouseInteract = () => void beat('mouse');
+    const onKeyInteract = () => void beat('key');
     try {
-      evs.forEach((e) => win.addEventListener(e, onInteract, { capture: true, passive: true }));
+      win.addEventListener('mousedown', onMouseInteract, { capture: true, passive: true });
+      win.addEventListener('wheel', onMouseInteract, { capture: true, passive: true });
+      win.addEventListener('keydown', onKeyInteract, { capture: true, passive: true });
     } catch {
       return;
     }
     return () => {
       try {
-        evs.forEach((e) => win.removeEventListener(e, onInteract, { capture: true } as any));
+        win.removeEventListener('mousedown', onMouseInteract, { capture: true } as any);
+        win.removeEventListener('wheel', onMouseInteract, { capture: true } as any);
+        win.removeEventListener('keydown', onKeyInteract, { capture: true } as any);
       } catch {
         /* ignore */
       }
@@ -868,6 +1138,11 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       /* 隐私模式等禁用 localStorage：忽略 */
     }
   }, [id, inputMode]);
+
+  // 串流画质：iframe 同源共享 localStorage，加载前写好当前档位的 KasmVNC 参数即生效。
+  useEffect(() => {
+    applyQualitySettings(qualityMode);
+  }, [id, qualityMode]);
 
   // 本机图片粘贴桥（issue #91）：两种输入模式都生效
   const pastingImage = useRef(false);
@@ -1140,6 +1415,27 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     }
   };
 
+  // 文件面板的展示列表：搜索 + 排序，不影响原始 files（自动刷新直接覆盖）
+  const visibleFiles = useMemo(() => {
+    const q = fileQuery.trim().toLowerCase();
+    const list = q ? files.filter((f) => f.name.toLowerCase().includes(q)) : files.slice();
+    if (fileSort === 'mtime') list.sort((a, b) => (b.mtime || 0) - (a.mtime || 0) || a.name.localeCompare(b.name));
+    else if (fileSort === 'size') list.sort((a, b) => b.size - a.size || a.name.localeCompare(b.name));
+    else list.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    return list;
+  }, [files, fileQuery, fileSort]);
+  const fileStats = useMemo(() => ({
+    count: files.length,
+    size: files.reduce((s, f) => s + (f.size || 0), 0),
+  }), [files]);
+  const toggleFileSel = (name: string) => {
+    setFileSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  };
+
   // 逐个上传；上传途中再拖进 / 粘贴 / 选择的文件排进队列，由正在跑的这一轮接着传（此前会另起一轮并发上传）
   const uploadFiles = async (list: FileList | File[]) => {
     uploadQueue.current.push(...Array.from(list));
@@ -1148,17 +1444,22 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     setUploading(true);
     let ok = 0;
     let done = 0;
+    const okNames: string[] = [];
     try {
       while (uploadQueue.current.length) {
         const f = uploadQueue.current.shift()!;
         const total = done + 1 + uploadQueue.current.length;
         const prefix = total > 1 ? `(${done + 1}/${total}) ` : '';
         setUploadPct(`${prefix}0%`);
+        setUploadPctNum(0);
         try {
-          await api.uploadFile(id, f, (loaded, size) =>
-            setUploadPct(loaded < size ? `${prefix}${Math.floor((loaded / size) * 100)}%` : `${prefix}写入中`),
-          );
+          await api.uploadFile(id, f, (loaded, size) => {
+            const pct = size > 0 ? Math.min(100, Math.floor((loaded / size) * 100)) : 0;
+            setUploadPctNum(pct);
+            setUploadPct(loaded < size ? `${prefix}${pct}%` : `${prefix}写入中`);
+          });
           ok++;
+          okNames.push(f.name);
         } catch (e: any) {
           toast(`${f.name}: ${e.message || '上传失败'}`, 'error');
         }
@@ -1168,9 +1469,25 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       uploadBusy.current = false;
       setUploading(false);
       setUploadPct('');
+      setUploadPctNum(0);
     }
     if (ok) {
-      toast(`已上传 ${ok} 个文件到桌面，应用里可直接取用`, 'ok');
+      // 【1.6.6 文件直达会话】把全部上传文件路径写进容器剪贴板；若当前焦点在微信/QQ 就自动按 Ctrl+V
+      // 送入当前会话，省去「另存桌面→在微信里点+→翻目录选文件」。焦点不在聊天应用时只备剪贴板并提示手动粘贴，
+      // 绝不把路径误发到别处。失败静默（不影响上传本身，用户仍可从 ~/Desktop 取用）。
+      let autoPasted = false;
+      try {
+        const r = await api.pasteFilePath(id, okNames, true);
+        autoPasted = !!r?.autoPasted;
+      } catch {
+        /* 路径写入失败不影响上传结果，保持原有取用方式 */
+      }
+      toast(
+        autoPasted
+          ? `已上传 ${ok} 个文件，并已送入当前聊天窗口（如未出现，请在输入框按 Ctrl+V）`
+          : `已上传 ${ok} 个文件；到聊天输入框按 Ctrl+V 即可取用`,
+        'ok',
+      );
       refreshFiles();
     }
   };
@@ -1191,6 +1508,28 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     } catch (e: any) {
       toast(e.message || '删除失败', 'error');
     }
+  };
+
+  // 批量删除：逐个调用既有删除接口（后端无批量端点，保持行为一致），失败项单独提示、不中断其余。
+  const delSelected = async () => {
+    const names = Array.from(fileSel);
+    if (!names.length) return;
+    if (!(await confirm({
+      title: `删除选中的 ${names.length} 个文件？`,
+      body: '将从桌面（~/Desktop）移除这些文件，不可恢复。',
+      danger: true,
+      confirmText: '删除',
+    }))) return;
+    let ok = 0;
+    const failed: string[] = [];
+    for (const name of names) {
+      try { await api.deleteFile(id, name); ok++; } catch { failed.push(name); }
+    }
+    if (ok) toast(`已删除 ${ok} 个文件`, 'ok');
+    if (failed.length) toast(`${failed.length} 个删除失败：${failed.slice(0, 3).join('、')}`, 'error');
+    setFileSel(new Set());
+    setFileSelMode(false);
+    refreshFiles();
   };
 
   // ---------- 桌面壁纸 ----------
@@ -1472,14 +1811,35 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const moreItems: RowMenuItem[] = [
     { label: '剪贴板', onClick: () => setShowClip((v) => !v) },
     { label: soundOn ? '声音：开（点击关闭）' : '声音：关（点击开启）', onClick: toggleSound },
+    ...(unread.enabled ? [{ label: '检查未读消息', onClick: unread.check }] : []),
+    { group: '串流画质' },
+    ...(Object.keys(QUALITY_PRESETS) as QualityMode[]).map((m) => ({
+      label: QUALITY_PRESETS[m].label,
+      onClick: () => changeQuality(m),
+      badge: m === qualityMode ? <IcCheck size={14} /> : undefined,
+    })),
     ...(soundOn ? [{ label: micOn ? '麦克风：开（点击关闭）' : '麦克风：关（点击开启）', onClick: toggleMic }] : []),
     ...(isAdmin
       ? [
           {
-            label: '桌面设置',
+            label: '设置（画质/通知/AI 代回）',
             onClick: () => {
-              setShowSettings((v) => !v);
-              if (!showSettings) {
+              if (showSettings && settingsScope === 'app') setShowSettings(false);
+              else {
+                setSettingsScope('app');
+                if (settingsTab === 'bg' || settingsTab === 'font') setSettingsTab('quality');
+                setShowSettings(true);
+              }
+            },
+          },
+          {
+            label: '桌面（壁纸/字体）',
+            onClick: () => {
+              if (showSettings && settingsScope === 'desktop') setShowSettings(false);
+              else {
+                setSettingsScope('desktop');
+                setSettingsTab('bg');
+                setShowSettings(true);
                 refreshBgList();
                 refreshFontList();
               }
@@ -1497,11 +1857,44 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
         <button className="ws-menu" onClick={onOpenMenu} aria-label="菜单">
           {MenuIcon}
         </button>
-        <span className="ws-title">{title}</span>
+        <span className="ws-title">
+          {title}
+          {unread.enabled && unread.hasUnread && (
+            <button
+              className="ws-unread-badge"
+              title="检测到未读消息（点击关闭本次提醒，下次新消息会再提醒）"
+              onClick={() => { unread.dismiss(); window.focus(); }}
+            >
+              ● 新消息 ×
+            </button>
+          )}
+        </span>
         {showVnc && (
           // 操作按钮收进可横向滑动的容器：手机宽度放不下时在容器内滑动，而不是整排挤出屏幕
           //（此前 390px 宽时「桌面」「重启」完全在屏幕外点不到，标题也被压成 0 宽）
           <div className="ws-actions">
+            {/* 设置：独立主按钮，置于最前并与日常工具按钮分隔（仅管理员可见） */}
+            {isAdmin && (
+              <>
+                <button
+                  className={'ws-action' + (showSettings && settingsScope === 'app' ? ' on' : '')}
+                  title="设置（画质/通知/AI 代回）"
+                  aria-pressed={showSettings && settingsScope === 'app'}
+                  onClick={() => {
+                    if (showSettings && settingsScope === 'app') setShowSettings(false);
+                    else {
+                      setSettingsScope('app');
+                      if (settingsTab === 'bg' || settingsTab === 'font') setSettingsTab('quality');
+                      setShowSettings(true);
+                    }
+                  }}
+                >
+                  <IcSettings />
+                  <span>设置</span>
+                </button>
+                <span className="ws-action-sep ws-action-extra" aria-hidden="true" />
+              </>
+            )}
             <button
               className={'ws-action' + (showFiles ? ' on' : '')}
               title="文件传输"
@@ -1561,7 +1954,21 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             )}
             {isAdmin && (
               <>
-                <button className={'ws-action ws-action-extra' + (showSettings ? ' on' : '')} title="桌面设置（壁纸/字体）" aria-pressed={showSettings} onClick={() => { setShowSettings((v) => !v); if (!showSettings) { refreshBgList(); refreshFontList(); } }}>
+                <button
+                  className={'ws-action ws-action-extra' + (showSettings && settingsScope === 'desktop' ? ' on' : '')}
+                  title="桌面设置（壁纸/字体）"
+                  aria-pressed={showSettings && settingsScope === 'desktop'}
+                  onClick={() => {
+                    if (showSettings && settingsScope === 'desktop') setShowSettings(false);
+                    else {
+                      setSettingsScope('desktop');
+                      setSettingsTab('bg');
+                      setShowSettings(true);
+                      refreshBgList();
+                      refreshFontList();
+                    }
+                  }}
+                >
                   <IcImage />
                   <span>桌面</span>
                 </button>
@@ -1776,9 +2183,22 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             <div className="iv-files">
               <div className="files-head">
                 <span>文件传输</span>
-                <button className="btn-text" onClick={() => setShowFiles(false)}>
-                  关闭
-                </button>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <button className="btn-text btn-text-sm" title="立即刷新文件列表" onClick={refreshFiles}>
+                    刷新
+                  </button>
+                  <a
+                    className="btn-text btn-text-sm"
+                    title="把桌面所有文件打包成 tar.gz 一次下载"
+                    href={api.downloadAllUrl(id)}
+                    style={{ textDecoration: 'none' }}
+                  >
+                    打包下载
+                  </a>
+                  <button className="btn-text" onClick={() => setShowFiles(false)}>
+                    关闭
+                  </button>
+                </span>
               </div>
               <input
                 ref={fileInput}
@@ -1794,29 +2214,152 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 <IcUpload size={18} />
                 {uploading ? `上传中 ${uploadPct}` : '选择文件上传'}
               </button>
-              <div className="files-hint">也可直接把文件拖进来。下方为桌面（~/Desktop）里的文件，应用收到的文件另存到桌面即可在此下载。</div>
+              {uploading && (
+                <div className="files-progress" role="progressbar" aria-valuenow={uploadPctNum} aria-valuemin={0} aria-valuemax={100}>
+                  <div className="files-progress-fill" style={{ width: `${uploadPctNum}%` }} />
+                </div>
+              )}
+              <div className="files-toolbar">
+                <label className="files-search">
+                  <IcSearch size={15} />
+                  <input
+                    value={fileQuery}
+                    onChange={(e) => setFileQuery(e.target.value)}
+                    placeholder="搜索文件名"
+                    aria-label="搜索文件名"
+                  />
+                  {fileQuery && (
+                    <button className="files-search-clear" title="清除搜索" aria-label="清除搜索" onClick={() => setFileQuery('')}>
+                      <IcClose size={13} />
+                    </button>
+                  )}
+                </label>
+                <select
+                  className="files-sort"
+                  value={fileSort}
+                  onChange={(e) => setFileSort(e.target.value as 'mtime' | 'size' | 'name')}
+                  title="排序方式"
+                  aria-label="排序方式"
+                >
+                  <option value="mtime">最近修改</option>
+                  <option value="size">大小</option>
+                  <option value="name">名称</option>
+                </select>
+                <button
+                  className={'btn-text btn-text-sm' + (fileSelMode ? ' on' : '')}
+                  title="批量选择与删除"
+                  onClick={() => { setFileSelMode((v) => !v); setFileSel(new Set()); }}
+                >
+                  {fileSelMode ? '退出选择' : '多选'}
+                </button>
+              </div>
+              {fileSelMode && (
+                <div className="files-bulkbar">
+                  <span>已选 {fileSel.size} 项</span>
+                  <button className="btn-text btn-text-sm" onClick={() => setFileSel(new Set(visibleFiles.map((f) => f.name)))}>全选</button>
+                  <button className="btn-text btn-text-sm" onClick={() => setFileSel(new Set())}>清空</button>
+                  <button className="btn-text btn-text-sm danger" disabled={!fileSel.size} onClick={delSelected}>删除所选</button>
+                </div>
+              )}
+              <div className="files-hint">
+                共 {fileStats.count} 个文件 · {humanSize(fileStats.size)}。拖进来即可上传；微信收到的文件另存到桌面后会自动出现在这里。图片可点眼睛预览。
+              </div>
               <div className="files-list">
-                {files.length === 0 && (
+                {visibleFiles.length === 0 && (
                   <div className="muted small" style={{ padding: '10px 2px' }}>
-                    暂无文件
+                    {files.length === 0 ? '暂无文件' : '没有匹配的文件'}
                   </div>
                 )}
-                {files.map((f) => (
-                  <div key={f.name} className="files-item">
-                    <a className="files-dl" href={api.downloadFileUrl(id, f.name)} download={f.name} title="下载">
-                      <span className="files-name">{f.name}</span>
-                      <span className="files-size">
-                        {humanSize(f.size)}
-                        <IcDownload size={14} />
-                      </span>
-                    </a>
-                    <button className="files-del" title="删除" aria-label={`删除 ${f.name}`} onClick={() => delFile(f.name)}>
-                      <IcClose size={16} />
-                    </button>
-                  </div>
-                ))}
+                {visibleFiles.map((f) => {
+                  const kind = fileKind(f.name);
+                  const checked = fileSel.has(f.name);
+                  return (
+                    <div
+                      key={f.name}
+                      className={'files-item' + (checked ? ' sel' : '')}
+                      onClick={fileSelMode ? () => toggleFileSel(f.name) : undefined}
+                    >
+                      {fileSelMode ? (
+                        <button
+                          className={'files-check' + (checked ? ' on' : '')}
+                          onClick={(e) => { e.stopPropagation(); toggleFileSel(f.name); }}
+                          aria-label={checked ? '取消选择' : '选择'}
+                        >
+                          {checked && <IcCheck size={14} />}
+                        </button>
+                      ) : (
+                        <span className={`files-kind kind-${kind}`} title={FILE_KIND_LABEL[kind]}>
+                          {FILE_KIND_ICON[kind]}
+                        </span>
+                      )}
+                      <div className="files-meta">
+                        <span className="files-name" title={f.name}>{f.name}</span>
+                        <span className="files-sub">
+                          {FILE_KIND_LABEL[kind]} · {humanSize(f.size)}{f.mtime ? ` · ${relTime(f.mtime)}` : ''}
+                        </span>
+                      </div>
+                      {!fileSelMode && (
+                        <div className="files-actions">
+                          {kind === 'image' && (
+                            <button
+                              className="files-act"
+                              title="预览图片"
+                              aria-label={`预览 ${f.name}`}
+                              onClick={(e) => { e.stopPropagation(); setFilePreview(f.name); }}
+                            >
+                              <IcEye size={16} />
+                            </button>
+                          )}
+                          <a
+                            className="files-act"
+                            href={api.downloadFileUrl(id, f.name)}
+                            download={f.name}
+                            title="下载"
+                            aria-label={`下载 ${f.name}`}
+                          >
+                            <IcDownload size={16} />
+                          </a>
+                          <button
+                            className="files-del"
+                            title="删除"
+                            aria-label={`删除 ${f.name}`}
+                            onClick={(e) => { e.stopPropagation(); delFile(f.name); }}
+                          >
+                            <IcTrash size={16} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
+          )}
+
+          {/* 图片预览灯箱：挂到 body，避免被桌面的 VNC 容器层级/变换影响；下载接口带 cookie 鉴权，img 标签可直接渲染 */}
+          {filePreview && createPortal(
+            <div className="file-preview-mask" onClick={() => setFilePreview(null)}>
+              <div className="file-preview-card" onClick={(e) => e.stopPropagation()}>
+                <div className="file-preview-top">
+                  <span className="file-preview-name" title={filePreview}>{filePreview}</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <a
+                      className="btn-text btn-text-sm"
+                      href={api.downloadFileUrl(id, filePreview)}
+                      download={filePreview}
+                      style={{ textDecoration: 'none' }}
+                    >
+                      下载原图
+                    </a>
+                    <button className="btn-text btn-text-sm" onClick={() => setFilePreview(null)}>关闭</button>
+                  </span>
+                </div>
+                <div className="file-preview-body">
+                  <img src={api.downloadFileUrl(id, filePreview)} alt={filePreview} />
+                </div>
+              </div>
+            </div>,
+            document.body,
           )}
 
           {showClip && (
@@ -1850,15 +2393,308 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           )}
 
           {showSettings && (
-            <div className="iv-files">
+            <div className="iv-files settings-float">
               <div className="files-head">
-                <span>桌面设置</span>
+                <span>{settingsScope === 'desktop' ? '桌面设置' : '设置'}</span>
                 <button className="btn-text" onClick={() => setShowSettings(false)}>关闭</button>
               </div>
               <div className="settings-tabs">
-                <button className={'settings-tab' + (settingsTab === 'bg' ? ' on' : '')} onClick={() => setSettingsTab('bg')}>壁纸</button>
-                <button className={'settings-tab' + (settingsTab === 'font' ? ' on' : '')} onClick={() => setSettingsTab('font')}>字体</button>
+                {settingsScope === 'desktop' ? (
+                  <>
+                    <button className={'settings-tab' + (settingsTab === 'bg' ? ' on' : '')} onClick={() => setSettingsTab('bg')}>壁纸</button>
+                    <button className={'settings-tab' + (settingsTab === 'font' ? ' on' : '')} onClick={() => setSettingsTab('font')}>字体</button>
+                  </>
+                ) : (
+                  <>
+                    <button className={'settings-tab' + (settingsTab === 'quality' ? ' on' : '')} onClick={() => setSettingsTab('quality')}>画质</button>
+                    <button className={'settings-tab' + (settingsTab === 'notify' ? ' on' : '')} onClick={() => setSettingsTab('notify')}>通知</button>
+                    <button className={'settings-tab' + (settingsTab === 'ai' ? ' on' : '')} onClick={() => setSettingsTab('ai')}>AI 代回</button>
+                  </>
+                )}
               </div>
+
+              {settingsTab === 'ai' && (
+                <div className="settings-panel ai-reply-panel">
+                  <div className="files-hint ai-tip">
+                    不碰协议/Hook：只读当前会话截图 + 剪贴板中文直贴。读截图需 <strong>VLM</strong>；纯文本模型请手动填消息。
+                  </div>
+                  {!isAdmin ? (
+                    <div className="files-hint">模型与规则仅管理员可见。你可直接使用下方「生成草稿」。</div>
+                  ) : !aiCfg ? (
+                    <div className="files-hint">正在读取配置…</div>
+                  ) : (
+                    <>
+                      <div className={'ai-status ' + (
+                        aiCfg.mode === 'auto' && aiCfg.enabledByEnv && aiCfg.apiKeySet && (aiCfg.whitelist.length || aiCfg.autoAllowAny) ? 'ok' : 'warn'
+                      )}>
+                        {aiCfg.mode === 'off' ? '当前：关闭' : aiCfg.mode === 'assist' ? '当前：人工确认' : '当前：全自动'}
+                        {' · '}{aiCfg.enabledByEnv ? '总开关已开' : '总开关未开'}
+                        {aiCfg.mode === 'auto' && !aiCfg.apiKeySet ? ' · 未配置 API Key' : ''}
+                        {aiCfg.mode === 'auto' && !aiCfg.whitelist.length && !aiCfg.autoAllowAny ? ' · 未设白名单，不会发送' : ''}
+                      </div>
+                      <details className="ai-group" open>
+                        <summary>开关与模型（必填）</summary>
+                        <div className="ai-row">
+                          <span>模式</span>
+                        <select
+                          className="input"
+                          value={aiCfg.mode}
+                          onChange={(e) => void saveAiCfg({ mode: e.target.value as AutoReplyConfigPublic['mode'] })}
+                        >
+                          <option value="off">关闭</option>
+                          <option value="assist">人工确认（只生成草稿）</option>
+                          <option value="auto">自动回复（未读触发）</option>
+                        </select>
+                      </div>
+                      <div className="ai-row">
+                        <span>自动回复总开关</span>
+                        <button
+                          className={'btn ' + (aiCfg.enabledByEnv ? 'btn-primary' : '')}
+                          disabled={aiBusy}
+                          onClick={async () => {
+                            setAiBusy(true);
+                            try {
+                              void await api.autoReplySetEnabled(!aiCfg.enabledByEnv);
+                              await loadAiCfg();
+                              toast(aiCfg.enabledByEnv ? '自动回复总开关已关闭' : '自动回复总开关已开启', 'ok');
+                            } catch (e: any) {
+                              toast(e?.message || '切换失败', 'error');
+                            } finally { setAiBusy(false); }
+                          }}
+                        >{aiCfg.enabledByEnv ? '已开启（点击关闭）' : '已关闭（点击开启）'}</button>
+                      </div>
+                      <div className="ai-row">
+                        <span>接口地址</span>
+                        <input className="input" value={aiCfg.baseURL} onChange={(e) => setAiCfg({ ...aiCfg, baseURL: e.target.value })}
+                          onBlur={(e) => void saveAiCfg({ baseURL: e.target.value })} placeholder="OpenAI 兼容 /v1" />
+                      </div>
+                      <div className="ai-row">
+                        <span>模型</span>
+                        <input className="input" list={`woc-ai-models-${id || 'x'}`} value={aiCfg.model}
+                          onChange={(e) => setAiCfg({ ...aiCfg, model: e.target.value })}
+                          onBlur={(e) => void saveAiCfg({ model: e.target.value })} placeholder="可直接选择，或输入模型 ID" />
+                        <datalist id={`woc-ai-models-${id || 'x'}`}>
+                          {aiModels.map((m) => <option key={m} value={m} />)}
+                        </datalist>
+                      </div>
+                      <div className="ai-row">
+                        <span>模型探测</span>
+                        <button className="btn-text" disabled={aiModelBusy} onClick={() => void fetchAiModels()}>
+                          {aiModelBusy ? '请求中…' : '获取模型列表'}
+                        </button>
+                        <button className="btn-text" disabled={aiModelBusy} onClick={() => void verifyAiModel()}>验证模型</button>
+                        {!!aiModels.length && <span className="muted small">候选 {aiModels.length} 个，点模型框可下拉选择</span>}
+                      </div>
+                      {aiVerify && (
+                        <div className={'ai-verify ' + (aiVerify.visionOk ? 'ok' : aiVerify.textOk ? 'warn' : 'bad')}>
+                          <div>{aiVerify.hint}</div>
+                          <div className="muted small">
+                            文本 {aiVerify.textOk ? '✓' : '✗'} · 视觉 {aiVerify.visionOk ? '✓' : '✗'} · {aiVerify.latencyMs}ms
+                            {aiVerify.textError ? ` · 文本：${aiVerify.textError}` : ''}
+                            {aiVerify.visionError ? ` · 视觉：${aiVerify.visionError}` : ''}
+                          </div>
+                        </div>
+                      )}
+                      <div className="ai-row">
+                        <span>API Key</span>
+                        <input className="input" type="password" value={aiKey} onChange={(e) => setAiKey(e.target.value)}
+                          placeholder={aiCfg.apiKeySet ? '已配置，留空则保留' : '粘贴 API Key'} />
+                        <button className="btn-text" disabled={!aiKey.trim()} onClick={() => void saveAiCfg({ apiKey: aiKey })}>保存</button>
+                        {aiCfg.apiKeySet && <button className="btn-text danger" onClick={() => void saveAiCfg({ clearApiKey: true })}>清除</button>}
+                      </div>
+                      </details>
+                      <details className="ai-group">
+                        <summary>发送规则与标记</summary>
+                        <div className="ai-row">
+                          <span>白名单</span>
+                          <input className="input" defaultValue={aiCfg.whitelist.join('、')}
+                            onBlur={(e) => void saveAiCfg({ whitelist: e.target.value.split(/[,，、\n]/).map((s) => s.trim()).filter(Boolean) })}
+                            placeholder="联系人/群，顿号分隔" />
+                        </div>
+                        <div className="ai-row">
+                          <span>不限制会话</span>
+                          <button
+                            className={'btn ' + (aiCfg.autoAllowAny ? 'btn-primary' : '')}
+                            title="白名单为空时，按未读红点自动切到有新消息的会话代回；识别错人风险自负"
+                            onClick={() => void saveAiCfg({ autoAllowAny: !aiCfg.autoAllowAny })}
+                          >{aiCfg.autoAllowAny ? '已开启' : '已关闭'}</button>
+                        </div>
+                      <div className="ai-row">
+                        <span>触发前缀</span>
+                        <input className="input" defaultValue={aiCfg.triggerPrefix}
+                          onBlur={(e) => void saveAiCfg({ triggerPrefix: e.target.value })} placeholder="留空=所有消息" />
+                      </div>
+                      <div className="ai-row">
+                        <span>停止词</span>
+                        <input className="input" defaultValue={aiCfg.stopWords.join('、')}
+                          onBlur={(e) => void saveAiCfg({ stopWords: e.target.value.split(/[,，、\n]/).map((s) => s.trim()).filter(Boolean) })}
+                          placeholder="命中则不回，例如：人工、别回" />
+                      </div>
+                      <div className="ai-row">
+                        <span>冷却秒</span>
+                        <input className="input" type="number" min={0} defaultValue={aiCfg.cooldownSec}
+                          onBlur={(e) => void saveAiCfg({ cooldownSec: Number(e.target.value) })} />
+                        <span>每小时上限</span>
+                        <input className="input" type="number" min={1} defaultValue={aiCfg.maxPerHour}
+                          onBlur={(e) => void saveAiCfg({ maxPerHour: Number(e.target.value) })} />
+                      </div>
+                      <div className="ai-row">
+                        <span>自动回复标记</span>
+                        <button
+                          className={'btn ' + (aiCfg.autoTagEnabled ? 'btn-primary' : '')}
+                          onClick={() => void saveAiCfg({ autoTagEnabled: !aiCfg.autoTagEnabled })}
+                        >{aiCfg.autoTagEnabled ? '已开启（点击关闭）' : '已关闭（点击开启）'}</button>
+                        <input className="input" defaultValue={aiCfg.autoTagText} disabled={!aiCfg.autoTagEnabled}
+                          onBlur={(e) => void saveAiCfg({ autoTagText: e.target.value })}
+                          placeholder="（此消息由 AI 代回）" />
+                      </div>
+                      {aiCfg.autoTagEnabled && aiCfg.mode === 'auto' && (
+                        <div className="files-hint">标记仅全自动发送时附加，人工确认模式不加。</div>
+                      )}
+                      </details>
+                    </>
+                  )}
+
+                  <details className="ai-group">
+                    <summary>手动生成草稿</summary>
+                  <div className="files-hint">
+                    先点进微信会话输入框；留空读截图，填文字则走纯文本。
+                  </div>
+                  <input className="input" value={aiManual} onChange={(e) => setAiManual(e.target.value)}
+                    placeholder="可选：直接填写对方消息，留空则读截图" />
+                  <button className="btn btn-primary files-upload" disabled={aiBusy}
+                    onClick={() => void genAiDraft(aiManual.trim() || undefined)}>
+                    {aiBusy ? '生成中…' : '生成回复草稿'}
+                  </button>
+                  {aiDraft && (
+                    <div className="ai-draft">
+                      <div className="muted small">
+                        {aiDraft.contact || '当前会话'} · {aiDraft.shouldReply ? '建议回复' : '无需回复'} · {aiDraft.elapsedMs}ms
+                        {aiDraft.reason ? ` · ${aiDraft.reason}` : ''}
+                      </div>
+                      {aiDraft.message && <div className="ai-quote">对方：{aiDraft.message}</div>}
+                      <textarea className="input ai-reply-text" value={aiDraft.reply}
+                        onChange={(e) => setAiDraft({ ...aiDraft, reply: e.target.value })} rows={3} />
+                      <div className="ai-actions">
+                        <button className="btn btn-primary" disabled={aiBusy || !aiDraft.reply.trim()}
+                          onClick={() => void sendAiDraft(true)}>发送到当前会话</button>
+                        <button className="btn" disabled={aiBusy || !aiDraft.reply.trim()}
+                          onClick={() => void sendAiDraft(false)}>只填入输入框</button>
+                      </div>
+                    </div>
+                  )}
+                  </details>
+                  {isAdmin && (
+                    <details className="ai-group">
+                      <summary>全自动回复记录</summary>
+                      <div className="ai-history">
+                      <div className="ai-history-head">
+                        <strong>全自动回复记录</strong>
+                        <button className="btn-text" onClick={() => void loadAiHistory()}>刷新</button>
+                      </div>
+                      {aiHistory.length === 0 ? (
+                        <div className="muted small">暂无记录。自动模式成功发出的消息会显示在这里（含 AI 标记），每 15 秒自动刷新。</div>
+                      ) : aiHistory.map((h, idx) => (
+                        <div className="ai-history-item" key={`${h.at}-${idx}`}>
+                          <div className="muted small">
+                            {new Date(h.at).toLocaleString()} · {h.contact}
+                            {h.tagged ? ' · 此消息由 AI 代回' : ''}
+                          </div>
+                          {h.message && <div className="ai-quote">对方：{h.message}</div>}
+                          <div className="ai-history-reply">已发：{h.reply}</div>
+                        </div>
+                      ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )}
+
+              {settingsTab === 'notify' && (
+                <div className="settings-panel">
+                  <div className="files-hint" style={{ marginBottom: 8 }}>
+                    定时检测微信会话列表的未读红点，只判断"有新消息"，不读取聊天内容。开关在面板即可切换，即时生效。
+                    <br />有新消息时会在 <strong>3 处</strong>提醒：① 顶栏标题旁出现「● 新消息」；② 浏览器标签标题闪烁；③ 提示音 + 系统桌面通知（需授权）。
+                    <br />页面需保持打开才会检测；切到别的标签页时看标签闪烁最直观。
+                  </div>
+                  {isAdmin && (
+                    <>
+                      <div className="ai-row">
+                        <span>未读提醒总开关</span>
+                        <button
+                          className={'btn ' + (unread.enabled ? 'btn-primary' : '')}
+                          disabled={notifyBusy}
+                          onClick={async () => {
+                            setNotifyBusy(true);
+                            await unread.setEnabled(!unread.enabled);
+                            setNotifyBusy(false);
+                            toast(unread.enabled ? '未读提醒已关闭' : '未读提醒已开启', 'ok');
+                          }}
+                        >{unread.enabled ? '已开启（点击关闭）' : '已关闭（点击开启）'}</button>
+                        {unread.byEnv && <span className="muted small">当前来自 .env 默认值</span>}
+                      </div>
+                      <div className="ai-row">
+                        <span>检测间隔（秒）</span>
+                        <input className="input" type="number" min={10} max={3600} defaultValue={unread.pollSec}
+                          key={unread.pollSec}
+                          onBlur={(e) => { const n = Number(e.target.value); if (n >= 10) void unread.setPollSec(n); }} />
+                      </div>
+                    </>
+                  )}
+                  {!unread.enabled ? (
+                    <div className="files-hint">
+                      {isAdmin ? '点击上方开关即可开启未读提醒。' : '未读提醒未启用，请联系管理员在设置中开启。'}
+                    </div>
+                  ) : (
+                    <>
+                      {unread.supported ? (
+                        <button className="btn btn-primary files-upload" onClick={unread.grant}>
+                          开启桌面通知权限
+                        </button>
+                      ) : (
+                        <div className="muted small">当前浏览器不支持或被拒绝桌面通知，仍会用标签闪烁+提示音提醒。</div>
+                      )}
+                      <button className="btn-text" style={{ alignSelf: 'flex-start' }} onClick={unread.toggleMute}>
+                        {unread.muted ? '本实例已静音（点击恢复）' : '本实例静音（点击关闭提醒）'}
+                      </button>
+                      <button className="btn-text" style={{ alignSelf: 'flex-start' }} onClick={unread.testAlert}>
+                        测试提醒（看标题闪烁 / 听提示音）
+                      </button>
+                      <button className="btn-text" style={{ alignSelf: 'flex-start' }} onClick={unread.check}>
+                        立即检查一次
+                      </button>
+                      <div className="muted small">当前状态：{unread.hasUnread ? '检测到未读消息' : '暂无未读'}。</div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {settingsTab === 'quality' && (
+                <div className="settings-panel">
+                  <div className="files-hint" style={{ marginBottom: 10 }}>
+                    调节画面流畅度与清晰度的权衡。切换后会自动重连桌面（当前操作不受影响，聊天记录保留）。
+                  </div>
+                  {(Object.keys(QUALITY_PRESETS) as QualityMode[]).map((m) => {
+                    const p = QUALITY_PRESETS[m];
+                    return (
+                      <button
+                        key={m}
+                        className={'quality-option' + (m === qualityMode ? ' on' : '')}
+                        onClick={() => changeQuality(m)}
+                      >
+                        <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                          <span className="quality-option-name">{p.label}</span>
+                          <span className="quality-option-desc">
+                            帧率 {p.framerate} · 质量 {p.quality} · 压缩 {p.compression}
+                            {p.threading ? ' · 多线程' : ''}
+                          </span>
+                        </span>
+                        {m === qualityMode && <IcCheck size={16} />}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
 
               {settingsTab === 'bg' && (
                 <div className="settings-panel">
@@ -1951,7 +2787,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   disabled={readOnly}
                   onChange={(e) => setImeText(e.target.value)}
                   onKeyDown={(e) => {
-                    void beat();
+                    void beat('key');
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       sendImeText();

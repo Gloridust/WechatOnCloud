@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { appendInstanceLog, deleteInstanceLog, appendPanelLog, readInstanceLog, readPanelLog, filterSince } from './logs.js';
 import http from 'node:http';
 import { PassThrough } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 import zlib from 'node:zlib';
 import { randomBytes } from 'node:crypto';
 import Docker from 'dockerode';
@@ -89,6 +90,14 @@ const NO_IPV6 = /^(1|true|yes)$/i.test(process.env.WOC_DISABLE_IPV6 || '') || !e
 // 默认 0 = 不限制（保持原行为）。命中上限时容器内 OOM 杀进程、由 s6 自动重启 VNC。
 const INSTANCE_MEM_GB = Number(process.env.WOC_INSTANCE_MEM_GB) || 0;
 const INSTANCE_MEM = INSTANCE_MEM_GB > 0 ? Math.floor(INSTANCE_MEM_GB * 1024 * 1024 * 1024) : 0;
+
+// 可选：给每个实例容器设 CPU 核数上限（默认 0 = 不限制，保持原行为）。
+// 场景：小核数宿主（如 4 核）上多个实例的 Xvnc 软渲染会互相抢满 CPU，导致远程桌面卡顿。
+// 用 CpuQuota/CpuPeriod 实现：quota = 核数 × 100000µs，period = 100000µs。
+// 例如设 1.5 → 每实例最多用 1.5 核，避免单个实例把宿主 CPU 吃满、拖慢其它实例与面板。
+// 默认值保持不变（0 = 不限制），只在显式配置时才生效，属行为保持型增强。
+const INSTANCE_CPU_CORES = Number(process.env.WOC_INSTANCE_CPU_CORES) || 0;
+const INSTANCE_CPU_QUOTA = INSTANCE_CPU_CORES > 0 ? Math.round(INSTANCE_CPU_CORES * 100000) : 0;
 
 // 设备伪装：把 /etc/os-release 伪装成 deepin（微信官方支持的发行版，且 Deepin 本就基于 Debian，
 // 与本镜像的 Debian 用户态一致，不会自相矛盾）。默认开启；设 WOC_SPOOF_OS=0 关闭恢复 Debian。
@@ -850,6 +859,10 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
     hostConfig.Memory = INSTANCE_MEM;
     hostConfig.MemorySwap = INSTANCE_MEM; // 禁止 swap 膨胀：限制即为硬上限
   }
+  if (INSTANCE_CPU_QUOTA > 0) {
+    hostConfig.CpuQuota = INSTANCE_CPU_QUOTA;
+    hostConfig.CpuPeriod = 100000;
+  }
   if (vids.length) {
     hostConfig.Devices = vids.map((d) => ({ PathOnHost: d, PathInContainer: d, CgroupPermissions: 'rwm' }));
     hostConfig.GroupAdd = ['video']; // 让容器内 abc 用户能访问 /dev/videoN
@@ -1428,7 +1441,7 @@ async function probeManifest(ref: { registry: string; repo: string; tag: string 
 // 创建 exec 实例。容器 init 未完成时，linuxserver 基镜像的 'abc' 用户可能还没建好，docker 会以
 // 400「unable to find user abc: no matching entries in passwd file」直接拒绝创建 exec（见 issue #74）。
 // 对这种"用户未就绪"错误短暂重试，给容器 init 一点时间；超时则抛清晰的中文错误，而非透传难懂的 docker 400。
-async function execCreate(c: any, opts: any): Promise<any> {
+export async function execCreate(c: any, opts: any): Promise<any> {
   let lastErr: any;
   for (let i = 0; i < 8; i++) {
     try {
@@ -1444,28 +1457,65 @@ async function execCreate(c: any, opts: any): Promise<any> {
 }
 
 // 在实例容器内执行命令，返回 stdout；若命令失败，把 stderr 透出给调用方。
-async function execCapture(inst: Instance, cmd: string[], user = 'abc'): Promise<string> {
+export async function execCapture(inst: Instance, cmd: string[], user = 'abc'): Promise<string> {
   return execCaptureIn(docker.getContainer(inst.containerName), cmd, user);
 }
 
 // 同上，在任意容器里执行（整卷恢复要在临时辅助容器里执行）
-async function execCaptureIn(c: any, cmd: string[], user: string): Promise<string> {
+// 【fork】保留 export：chatbackup / unreadProbe 等定制模块直接使用。
+export async function execCaptureIn(c: any, cmd: string[], user: string): Promise<string> {
   const exec = await execCreate(c, { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: user });
   const stream = await exec.start({ hijack: true, stdin: false });
   return await new Promise<string>((resolve, reject) => {
+    // 用 StringDecoder 累积：多字节 UTF-8 字符（中文文件名等）可能被 docker 流切成跨 chunk 的两半，
+    // 直接 b.toString('utf8') 会把每半截各自解成 U+FFFD，污染路径 → 备份清单里文件名损坏。
+    const outDec = new StringDecoder('utf8');
+    const errDec = new StringDecoder('utf8');
     let out = '';
     let err = '';
-    const stdout = { write: (b: Buffer) => { out += b.toString('utf8'); } } as any;
-    const stderr = { write: (b: Buffer) => { err += b.toString('utf8'); } } as any;
+    const stdout = { write: (b: Buffer) => { out += outDec.write(b); } } as any;
+    const stderr = { write: (b: Buffer) => { err += errDec.write(b); } } as any;
     docker.modem.demuxStream(stream, stdout, stderr);
     stream.on('end', async () => {
       try {
+        out += outDec.end();
+        err += errDec.end();
         const info = await exec.inspect();
         if (info.ExitCode && info.ExitCode !== 0) {
           reject(new Error((err || out || `命令执行失败，退出码 ${info.ExitCode}`).trim()));
           return;
         }
         resolve(out || err);
+      } catch (e) {
+        reject(e);
+      }
+    });
+    stream.on('error', reject);
+  });
+}
+
+// 与 execCapture 同样执行命令，但原样收集二进制 stdout（AI 代回要把容器内截图送进模型，
+// 不能经过 UTF-8 字符串解码）。stderr 仍按文本读，退出码非 0 时抛错。
+export async function execCaptureBinary(inst: Instance, cmd: string[], user = 'abc'): Promise<Buffer> {
+  const c = docker.getContainer(inst.containerName);
+  const exec = await execCreate(c, { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: user });
+  const stream = await exec.start({ hijack: true, stdin: false });
+  return await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let err = '';
+    const errDec = new StringDecoder('utf8');
+    const stdout = { write: (b: Buffer) => { chunks.push(Buffer.from(b)); } } as any;
+    const stderr = { write: (b: Buffer) => { err += errDec.write(b); } } as any;
+    docker.modem.demuxStream(stream, stdout, stderr);
+    stream.on('end', async () => {
+      try {
+        err += errDec.end();
+        const info = await exec.inspect();
+        if (info.ExitCode && info.ExitCode !== 0) {
+          reject(new Error((err || `命令执行失败，退出码 ${info.ExitCode}`).trim()));
+          return;
+        }
+        resolve(Buffer.concat(chunks));
       } catch (e) {
         reject(e);
       }
@@ -1951,10 +2001,10 @@ function safeMediaName(name: string): boolean {
 const UPLOAD_TMP_DIR = '/config/.woc-upload';
 
 // putArchive 的响应体是空的，读掉以释放连接
-async function putArchiveStream(inst: Instance, tar: NodeJS.ReadableStream, path: string): Promise<void> {
+export async function putArchiveStream(inst: Instance, tar: NodeJS.ReadableStream, path: string): Promise<void> {
   await putArchiveTo(docker.getContainer(inst.containerName), tar, path);
 }
-async function putArchiveTo(c: any, tar: NodeJS.ReadableStream, path: string): Promise<void> {
+export async function putArchiveTo(c: any, tar: NodeJS.ReadableStream, path: string): Promise<void> {
   const res: any = await c.putArchive(tar, { path });
   if (res && typeof res.resume === 'function') res.resume();
 }
@@ -2094,6 +2144,52 @@ export async function streamRegularFile(inst: Instance, absPath: string): Promis
 export async function downloadFromInstance(inst: Instance, name: string): Promise<{ size: number; stream: NodeJS.ReadableStream }> {
   if (!safeName(name)) throw new Error('文件名不合法');
   return streamRegularFile(inst, `${TRANSFER_DIR}/${name}`);
+}
+
+// 打包下载桌面全部中转文件：在容器内流式生成 tar.gz（走 docker exec stdout，自己拆帧），不落临时文件、不整个读进内存。
+// 与单文件下载同样是流式，几百 MB 也不会让面板 OOM。用 tar -C 切到中转目录、逐个 basename 传给 tar（argv 数组直传，
+// 文件名含空格/中文/以 - 开头都经 safeName 与 -- 保护），避免 shell 注入。
+export async function downloadAllFromInstance(inst: Instance): Promise<{ stream: NodeJS.ReadableStream }> {
+  const files = await listInstanceFiles(inst);
+  const names = files.map((f) => f.name).filter((n) => safeName(n));
+  if (!names.length) throw new Error('桌面暂无可下载的文件');
+  // -C 到中转目录后用 basename；-- 之后即使文件名以 - 开头也不会被当参数
+  const exec = await execCreate(docker.getContainer(inst.containerName), {
+    Cmd: ['tar', '-czf', '-', '-C', TRANSFER_DIR, '--', ...names],
+    AttachStdout: true,
+    AttachStderr: true,
+    Tty: false,
+    User: 'root',
+  });
+  const raw = (await exec.start({ hijack: true, stdin: false })) as NodeJS.ReadableStream & { destroy?: () => void };
+  const out = new PassThrough();
+  let buf: Buffer = Buffer.alloc(0);
+  let need = 0;
+  let type = 0;
+  raw.on('data', (chunk: Buffer) => {
+    buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+    for (;;) {
+      if (need === 0) {
+        if (buf.length < 8) break;
+        type = buf[0];
+        need = buf.readUInt32BE(4);
+        buf = buf.subarray(8);
+        continue;
+      }
+      if (!buf.length) break;
+      const part = buf.subarray(0, need);
+      buf = buf.subarray(part.length);
+      need -= part.length;
+      if (type === 1 && !out.write(part)) {
+        raw.pause();
+        out.once('drain', () => raw.resume());
+      }
+    }
+  });
+  raw.on('end', () => out.end());
+  raw.on('error', (e) => out.destroy(e as Error));
+  out.on('close', () => raw.destroy?.()); // 客户端中途断开：停掉 tar
+  return { stream: out };
 }
 
 // 从 docker getArchive 返回的 tar 中取出第一个普通文件的内容。Docker(Go archive/tar) 在 mtime 含纳秒精度等
@@ -2281,6 +2377,195 @@ export async function pasteTextInInstance(inst: Instance, text: string): Promise
     ].join('\n');
     await execCapture(inst, ['bash', '-c', cmd]);
   });
+}
+
+// 【优化】把已上传到桌面的文件路径以 text/uri-list 写入容器 X 剪贴板，让用户在应用里按一次 Ctrl+V
+// 就直接拿到文件，省去在文件选择器里逐级翻找 ~/Desktop 的步骤。刻意「不自动按 Ctrl+V」：
+// 按键作用于 X server 当前焦点窗口，上传时焦点通常在面板浏览器而非容器内应用，自动按会落点不可控、
+// 甚至把路径当消息发出去。这里只备好剪贴板，由用户主动到应用输入框粘贴，安全且可回退。
+// 是否真正得到文件取决于应用（微信 Linux 版）对 text/uri-list 的支持；不支持时用户仍可用文件选择器，
+// 体验不比原来差。uri-list 不在 Xvnc 的 DLP_ClipTypes（text/html,image/png）里，不会触发大图 INCR 卡死。
+export async function pasteFilePathInInstance(inst: Instance, fileNames: string[] | string): Promise<void> {
+  const names = Array.isArray(fileNames) ? fileNames : [fileNames];
+  if (!names.length) return;
+  names.forEach(assertSafeName);
+  const tmp = `woc-uri-${Date.now()}.txt`;
+  // file:// + encodeURI：中文/空格路径按 URI 规则转义；路径固定指向桌面中转目录，文件名经 safeName 校验。
+  const uris = names.map((n) => `file://${TRANSFER_DIR}/${encodeURIComponent(n)}`).join('\r\n') + '\r\n';
+  await withClipLock(inst.id, async () => {
+    cancelClipRestore(inst.id);
+    await docker.getContainer(inst.containerName).putArchive(tarSingleFile(tmp, Buffer.from(uris, 'utf8')), { path: '/tmp' });
+    const cmd = [
+      ...X_PRELUDE,
+      CLIP_DISCARD,
+      `xclip -selection clipboard -t text/uri-list -i /tmp/${tmp} >/dev/null 2>&1`,
+      `rm -f /tmp/${tmp}`,
+    ].join('\n');
+    await execCapture(inst, ['bash', '-c', cmd]);
+  });
+}
+
+// 【1.6.6 文件直达会话 / 1.6.15 修正】探测容器内 X server 当前活动窗口的标识，用于判断能否安全自动粘贴。
+// 上传动作发生在面板父页面（宿主浏览器），不改变容器内 X 的 _NET_ACTIVE_WINDOW；
+// 用户最后一次在 VNC 里点击的目标（微信/QQ）仍是 active，据此可确认焦点落点。
+// 返回小写标识（优先 WM_CLASS，无则退回窗口标题，如 'wechat' / 'qq' / '微信'），拿不到返回空串。
+// 1.6.15：Linux 微信存在「有 WM_CLASS 的隐藏窗 + 无 WM_CLASS 的主聊天窗」两个窗口，
+// 真正接收输入的主窗常没有 WM_CLASS，只看 class 会误判成「焦点不在微信」导致自动回复永不发送。
+export async function activeWindowClass(inst: Instance): Promise<string> {
+  const cmd = [
+    'display="${DISPLAY:-}"',
+    'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
+    'export DISPLAY="${display:-:1}"',
+    'wid=$(xprop -root _NET_ACTIVE_WINDOW 2>/dev/null | sed -n "s/.*# //p")',
+    '[ -z "$wid" ] && exit 0',
+    // 优先 WM_CLASS；若为 "not found" 或无值，退回 _NET_WM_NAME / WM_NAME 标题。
+    'cls=$(xprop -id "$wid" WM_CLASS 2>/dev/null | sed -n "s/.*= *\"\\([^\"]*\\)\".*/\\1/p" | tr "[:upper:]" "[:lower:]")',
+    'if [ -n "$cls" ] && ! printf "%s" "$cls" | grep -qi "not found"; then echo "$cls"; exit 0; fi',
+    'title=$(xprop -id "$wid" _NET_WM_NAME 2>/dev/null | sed -n "s/.*= *\"\\(.*\\)\"/\\1/p")',
+    '[ -z "$title" ] && title=$(xprop -id "$wid" WM_NAME 2>/dev/null | sed -n "s/.*= *\"\\(.*\\)\"/\\1/p")',
+    // 规范化：标题含「微信/wechat」→ wechat，含 QQ → qq，其他原样小写返回。
+    'low=$(printf "%s" "$title" | tr "[:upper:]" "[:lower:]")',
+    'case "$low" in *微信*|*wechat*|*weixin*) echo wechat;; *qq*) echo qq;; *) echo "$low";; esac',
+  ].join('\n');
+  try {
+    return (await execCapture(inst, ['sh', '-c', cmd])).trim().split('\n')[0] || '';
+  } catch {
+    return '';
+  }
+}
+
+// 【1.6.14 AI 代回】把聊天窗口（微信/QQ/WeChat）激活到前台，供全自动发送前使用。
+// 自动轮询时焦点可能落在面板浏览器或其他程序，xdotool 的按键作用于 X 当前焦点窗口，
+// 若不先切回聊天窗口就可能把回复贴错地方——所以自动模式改为「主动激活 + 再校验」，
+// 而不是直接要求用户手动点开（那样全自动根本无法无人值守运行）。
+// 用 xdotool search --onlyvisible --class 找窗口再 windowactivate --sync，实测可稳定切到微信。
+// 返回激活后的窗口类名（小写），失败返回空串，由调用方决定是否发送。
+export async function focusChatWindow(inst: Instance, appType = 'wechat'): Promise<string> {
+  const wantQQ = /qq/i.test(appType || '');
+  const clsPattern = wantQQ ? 'qq' : 'wechat';
+  const titlePattern = wantQQ ? 'QQ' : '微信|wechat';
+  const cmd = [
+    'display="${DISPLAY:-}"',
+    'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
+    'export DISPLAY="${display:-:1}"',
+    'command -v xdotool >/dev/null 2>&1 || exit 0',
+    // 同时按 class 与标题收集候选（Linux 微信主聊天窗常无 WM_CLASS，只有标题「微信」）。
+    // 分两条命令赋值再合并，避免用分号拼接把 ';' 当成窗口 id。
+    `ids1=$(xdotool search --onlyvisible --class '${clsPattern}' 2>/dev/null)`,
+    `ids2=$(xdotool search --onlyvisible --name '${titlePattern}' 2>/dev/null)`,
+    // 只认标题为应用名（微信/QQ）的主窗。独立单聊窗标题是联系人名（实测「李鹏」，
+    // 与 main 同为 1656x892、同 WM_CLASS），按面积选会因顺序不稳定误激活它 → 全屏闪一下又回到主窗。
+    // 同时按 class 收集只是兜底：主窗恰好没有应用名标题时才用。
+    'if [ -n "$(printf "%s" "$ids2" | tr -d "[:space:]")" ]; then ids="$ids2"; else ids="$ids1"; fi',
+    '[ -z "$(printf "%s" "$ids" | tr -d "[:space:]")" ] && exit 0',
+    // 剩下的候选里选面积最大的主窗，避免激活到登录窗/隐藏窗。
+    'best=""; bestArea=0',
+    'for w in $ids; do',
+    '  geo=$(xwininfo -id "$w" 2>/dev/null | sed -n "s/.*Width: *\\([0-9]*\\).*/\\1/p")',
+    '  h=$(xwininfo -id "$w" 2>/dev/null | sed -n "s/.*Height: *\\([0-9]*\\).*/\\1/p")',
+    '  [ -z "$geo" ] && continue; [ -z "$h" ] && h=0',
+    '  area=$((geo*h))',
+    '  if [ "$area" -gt "$bestArea" ]; then bestArea=$area; best=$w; fi',
+    'done',
+    '[ -z "$best" ] && best=$(printf "%s" "$ids" | head -1)',
+    'xdotool windowactivate --sync "$best" 2>/dev/null || exit 0',
+    // activate 不保证层叠最前（另一全屏窗可能压在上面），显式 raise，确保 xwd 截到主窗。
+    'xdotool windowraise "$best" 2>/dev/null || true',
+    'sleep 0.2',
+    'focus=$(xdotool getwindowfocus 2>/dev/null)',
+    '[ "$focus" = "$best" ] || exit 0',
+    // 返回标识：优先 WM_CLASS，退回标题，供调用方判断是否确为聊天应用。
+    'cls=$(xprop -id "$focus" WM_CLASS 2>/dev/null | sed -n "s/.*= *\\"\\([^\\"]*\\)\\".*/\\1/p" | tr "[:upper:]" "[:lower:]")',
+    'if [ -n "$cls" ] && ! printf "%s" "$cls" | grep -qi "not found"; then echo "$cls"; exit 0; fi',
+    'title=$(xprop -id "$focus" _NET_WM_NAME 2>/dev/null | sed -n "s/.*= *\\"\\(.*\\)\\"/\\1/p")',
+    '[ -z "$title" ] && title=$(xprop -id "$focus" WM_NAME 2>/dev/null | sed -n "s/.*= *\\"\\(.*\\)\\"/\\1/p")',
+    'low=$(printf "%s" "$title" | tr "[:upper:]" "[:lower:]")',
+    'case "$low" in *微信*|*wechat*|*weixin*) echo wechat;; *qq*) echo qq;; *) echo "$low";; esac',
+  ].join('\n');
+  try {
+    return (await execCapture(inst, ['sh', '-c', cmd])).trim().split('\n')[0] || '';
+  } catch {
+    return '';
+  }
+}
+
+// 【1.6.18】聚焦聊天输入框：窗口激活只保证 X 焦点落在微信主窗，不保证落在「消息输入框」这个控件上。
+// 实测全自动回复时 Ctrl+V/回车打到了会话列表/空白处——动作执行了、日志写了「已发送」，但聊天区根本没有新消息。
+// 这里按窗口尺寸取相对坐标（聊天区中部、底部往上一点），避开右侧「发送」按钮与上方工具条，点击一次把输入焦点真正落到输入框。
+export async function focusChatInput(inst: Instance, appType = 'wechat'): Promise<boolean> {
+  const wantQQ = /qq/i.test(appType || '');
+  const clsPattern = wantQQ ? 'qq' : 'wechat';
+  const titlePattern = wantQQ ? 'QQ' : '微信|wechat';
+  const cmd = [
+    'display="${DISPLAY:-}"',
+    'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
+    'export DISPLAY="${display:-:1}"',
+    'command -v xdotool >/dev/null 2>&1 || exit 1',
+    `ids1=$(xdotool search --onlyvisible --class '${clsPattern}' 2>/dev/null)`,
+    `ids2=$(xdotool search --onlyvisible --name '${titlePattern}' 2>/dev/null)`,
+    // 同 focusChatWindow：只认应用名标题的主窗，不碰联系人单聊窗。
+    'if [ -n "$(printf "%s" "$ids2" | tr -d "[:space:]")" ]; then ids="$ids2"; else ids="$ids1"; fi',
+    '[ -z "$(printf "%s" "$ids" | tr -d "[:space:]")" ] && exit 1',
+    'best=""; bestArea=0; bw=0; bh=0',
+    'for w in $ids; do',
+    '  ww=$(xwininfo -id "$w" 2>/dev/null | sed -n "s/.*Width: *\\([0-9]*\\).*/\\1/p")',
+    '  hh=$(xwininfo -id "$w" 2>/dev/null | sed -n "s/.*Height: *\\([0-9]*\\).*/\\1/p")',
+    '  [ -z "$ww" ] && continue; [ -z "$hh" ] && hh=0',
+    '  area=$((ww*hh))',
+    '  if [ "$area" -gt "$bestArea" ]; then bestArea=$area; best=$w; bw=$ww; bh=$hh; fi',
+    'done',
+    '[ -z "$best" ] && exit 1',
+    'xdotool windowactivate --sync "$best" 2>/dev/null || exit 1',
+    'xdotool windowraise "$best" 2>/dev/null || true',
+    'sleep 0.15',
+    // 相对窗口坐标：横向 45%（会话列表在左侧 ~22%，取聊天区中部），纵向离底部 55px（输入框内，避开发送按钮）。
+    '[ "$bw" -lt 400 ] && bw=1000; [ "$bh" -lt 300 ] && bh=600',
+    'ix=$((bw*45/100)); iy=$((bh-55))',
+    'xdotool mousemove --window "$best" "$ix" "$iy" click 1 2>/dev/null || exit 1',
+    'sleep 0.15',
+    'echo ok',
+  ].join('\n');
+  try {
+    return (await execCapture(inst, ['sh', '-c', cmd])).trim().includes('ok');
+  } catch {
+    return false;
+  }
+}
+
+// 【1.6.19】点击会话列表里指定行（坐标来自 unreadProbe 的全屏截图，是 root 绝对坐标）。
+// 自动回复据此从「当前打开的会话」切到「真正有新未读消息的会话」，否则截图识别对象永远是错的。
+export async function clickChatInList(inst: Instance, x: number, y: number): Promise<boolean> {
+  const cmd = [
+    'display="${DISPLAY:-}"',
+    'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
+    'export DISPLAY="${display:-:1}"',
+    'command -v xdotool >/dev/null 2>&1 || exit 1',
+    `xdotool mousemove ${Math.round(x)} ${Math.round(y)} click 1 2>/dev/null || exit 2`,
+    'sleep 0.4',
+    'echo ok',
+  ].join('\n');
+  try {
+    return (await execCapture(inst, ['sh', '-c', cmd])).trim().includes('ok');
+  } catch {
+    return false;
+  }
+}
+
+// 【1.6.6】把文件上传路径写进剪贴板后，若活动窗口确为微信/QQ，自动按 Ctrl+V 送入当前会话；
+// 否则只备好剪贴板（用户可手动到输入框粘贴）。返回是否真的自动按了键，供前端给出准确提示。
+// 刻意不写「已送达」——微信是否把 uri-list 识别为文件取决于应用本身，这里只保证按键落在正确的应用窗口。
+export async function sendFilesToInstance(
+  inst: Instance,
+  fileNames: string[],
+  appType: string,
+): Promise<{ autoPasted: boolean; activeClass: string }> {
+  await pasteFilePathInInstance(inst, fileNames);
+  const cls = await activeWindowClass(inst);
+  const wechatLike = /wechat|weixin|qq/.test(cls) || (!cls && /wechat|qq/.test(appType));
+  if (!wechatLike) return { autoPasted: false, activeClass: cls };
+  // 焦点在聊天应用：自动粘贴。复用 xdoKey 先松修饰键，避免修饰键残留导致误发。
+  await execCapture(inst, ['bash', '-c', [...X_PRELUDE, xdoKey('ctrl+v')].join('\n')]);
+  return { autoPasted: true, activeClass: cls };
 }
 
 // 把本机剪贴板里的图片（截图等）粘进应用（issue #91）：写入容器的 X 剪贴板（目标类型即图片 MIME），

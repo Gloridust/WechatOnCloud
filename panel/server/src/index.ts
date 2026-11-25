@@ -5,6 +5,7 @@ import httpProxy from 'http-proxy';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { BlockList, isIP } from 'node:net';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
@@ -35,6 +36,12 @@ import {
   publicInstance,
   getDesktopDark,
   setDesktopDark,
+  persistSettings,
+  getUnreadNotifyConfig,
+  setUnreadNotifyEnabled,
+  setUnreadPollSec,
+  getAutoReplyEnabled,
+  setAutoReplyEnabled,
   APP_TYPES,
   type AppType,
   type User,
@@ -72,6 +79,7 @@ import {
   uploadToInstance,
   listInstanceFiles,
   downloadFromInstance,
+  downloadAllFromInstance,
   deleteInstanceFile,
   instanceLogs,
   buildDiagnostics,
@@ -83,6 +91,8 @@ import {
   PASTE_IMAGE_PNG_TOO_BIG,
   readClipboardImage,
   pasteTextInInstance,
+  pasteFilePathInInstance,
+  sendFilesToInstance,
   listOrphanVolumes,
   removeVolume,
   listOrphanContainers,
@@ -123,7 +133,33 @@ import {
   isLoopbackHost,
 } from './host-guard.js';
 import { CURRENT_VERSION, versionInfo, ensureChecked, checkForUpdate, startUpdateChecker } from './version.js';
+import {
+  runBackup,
+  listBackups,
+  backupFilePath,
+  deleteBackup,
+  restoreBackup,
+  startChatBackupScheduler,
+  type BackupKind,
+} from './chatbackup.js';
 import { triggerSelfUpdate } from './self-update.js';
+import {
+  addSseClient,
+  currentUnread,
+  pollOnce,
+  startUnreadPoller,
+} from './unreadNotify.js';
+import {
+  getPublicAutoReplyConfig,
+  saveAutoReplyConfig,
+  draftReply,
+  sendDraft,
+  autoReplyTick,
+  startAutoReplyPoller,
+  getAutoReplyHistory,
+  listAutoReplyModels,
+  verifyAutoReplyModel,
+} from './autoReply.js';
 import { GiB, MiB, readBody, receiveFile, spoolUpload, cleanSpoolDir, type Spooled } from './upload.js';
 import { appendInstanceLog, readInstanceLog, appendPanelLog, readPanelLog, pruneOldLogs, filterSince, rangeToMs, DIAG_RANGES } from './logs.js';
 
@@ -1036,11 +1072,30 @@ app.get('/api/instances/:id/download', async (req, reply) => {
   }
 });
 
+// 打包下载桌面全部中转文件为 tar.gz（流式，不爆内存）
+app.get('/api/instances/:id/download-all', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  try {
+    const { stream } = await downloadAllFromInstance(findInstance(id)!);
+    const stamp = new Date().toISOString().slice(0, 10);
+    reply.header('content-type', 'application/gzip');
+    reply.header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`woc-files-${stamp}.tar.gz`)}`);
+    return reply.send(stream);
+  } catch (e: any) {
+    return reply.code(400).send({ error: e?.message || '打包下载失败' });
+  }
+});
+
 // ---------- 多端协作：操作控制权（心跳软锁，避免多人同时操作打架） ----------
 // 同一实例被多个浏览器连的是同一会话，键鼠会互相打架。这里用"心跳持锁"：
 // 当前操作者每隔几秒 beat 续约；TTL 内他人只读（前端盖只读遮罩）。空闲超 TTL 自动释放。
 const CONTROL_TTL = 10_000; // ms：超过则视为已空闲，可被接管
-const controlHolders = new Map<string, { userId: string; username: string; at: number }>();
+// keyAt：最近一次真实键盘输入时间，独立于控制心跳。AI 代回只在用户打字时让行，
+// 单纯点会话/滚动列表不再阻断自动回复（此前任何鼠标操作都让 AI 停手 10s，实测导致漏回）。
+const controlHolders = new Map<string, { userId: string; username: string; at: number; keyAt: number }>();
 
 // 续约/认领：无人持有、已超时、或本来就是我 → 我成为操作者；否则返回当前操作者。
 app.post('/api/instances/:id/control/beat', async (req, reply) => {
@@ -1050,10 +1105,16 @@ app.post('/api/instances/:id/control/beat', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const sup = supersededBy(id, viewerOf(req));
   if (sup) return reply.code(409).send(supersededBusy(sup));
+  const kind = (req.body as any)?.kind === 'key' ? 'key' : 'mouse';
   const now = Date.now();
   const h = controlHolders.get(id);
   if (!h || now - h.at > CONTROL_TTL || h.userId === u.id) {
-    controlHolders.set(id, { userId: u.id, username: u.username, at: now });
+    controlHolders.set(id, {
+      userId: u.id,
+      username: u.username,
+      at: now,
+      keyAt: kind === 'key' ? now : h && now - h.at <= CONTROL_TTL ? h.keyAt || 0 : 0,
+    });
     return { mine: true, holder: u.username };
   }
   return { mine: false, holder: h.username };
@@ -1080,7 +1141,7 @@ app.post('/api/instances/:id/control/take', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const sup = supersededBy(id, viewerOf(req));
   if (sup) return reply.code(409).send(supersededBusy(sup));
-  controlHolders.set(id, { userId: u.id, username: u.username, at: Date.now() });
+  controlHolders.set(id, { userId: u.id, username: u.username, at: Date.now(), keyAt: 0 });
   return { mine: true, holder: u.username };
 });
 
@@ -1135,7 +1196,7 @@ function attachViewer(instId: string, viewer: string, u: User, device: string, s
     cur = { id: viewer, userId: u.id, username: u.username, sockets: new Set() };
     currentViewers.set(instId, cur);
     // 操作权跟着显示走：否则新页面要等旧页面的心跳过期（CONTROL_TTL）才能操作
-    controlHolders.set(instId, { userId: u.id, username: u.username, at: Date.now() });
+    controlHolders.set(instId, { userId: u.id, username: u.username, at: Date.now(), keyAt: 0 });
   }
   const c = cur;
   c.sockets.add(socket);
@@ -1154,7 +1215,7 @@ function claimControl(u: User, id: string, req: FastifyRequest): object | null {
   const now = Date.now();
   const h = controlHolders.get(id);
   if (h && h.userId !== u.id && now - h.at <= CONTROL_TTL) return controlBusy(h.username);
-  controlHolders.set(id, { userId: u.id, username: u.username, at: now });
+  controlHolders.set(id, { userId: u.id, username: u.username, at: now, keyAt: 0 });
   return null;
 }
 const controlBusy = (holder: string) => ({ error: `「${holder}」正在操作，你当前为只读；要操作请先点「申请控制」`, holder });
@@ -1248,6 +1309,41 @@ app.post('/api/instances/:id/paste-text', { bodyLimit: 2 * 1024 * 1024 }, async 
   }
 });
 
+// 【优化】把已上传到桌面的文件路径写进容器剪贴板（text/uri-list），用户在应用里按一次 Ctrl+V 即可取用，
+// 省去在文件选择器里翻找 ~/Desktop。1.6.6：支持多文件（names）+ 焦点校验后自动粘贴（autoPaste）。
+// 文件须确实存在于中转目录；自动粘贴仅在活动窗口确为聊天应用时执行，避免把路径当消息发出去。
+app.post('/api/instances/:id/paste-path', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const body = (req.body as any) ?? {};
+  const names: string[] = Array.isArray(body.names)
+    ? body.names.filter((n: any) => typeof n === 'string')
+    : typeof body.name === 'string'
+      ? [body.name]
+      : [];
+  if (!names.length) return reply.code(400).send({ error: '文件名无效' });
+  const autoPaste = body.autoPaste === true;
+  const busy = claimControl(u, id, req);
+  if (busy) return reply.code(409).send(busy);
+  try {
+    const inst = findInstance(id)!;
+    const files = await listInstanceFiles(inst);
+    const present = new Set(files.map((f) => f.name));
+    const valid = names.filter((n) => present.has(n));
+    if (!valid.length) return reply.code(404).send({ error: '文件不在桌面中转目录' });
+    if (autoPaste) {
+      const r = await sendFilesToInstance(inst, valid, inst.appType || 'wechat');
+      return { ok: true, autoPasted: r.autoPasted, activeClass: r.activeClass, names: valid };
+    }
+    await pasteFilePathInInstance(inst, valid);
+    return { ok: true, autoPasted: false, names: valid };
+  } catch (e: any) {
+    return reply.code(500).send({ error: e?.message || '写入路径失败' });
+  }
+});
+
 app.post('/api/instances/:id/key', async (req, reply) => {
   const u = requireAuth(req, reply);
   if (!u) return;
@@ -1263,6 +1359,172 @@ app.post('/api/instances/:id/key', async (req, reply) => {
   } catch (e: any) {
     return reply.code(500).send({ error: e?.message || '按键失败' });
   }
+});
+
+// ---------- 未读消息通知（1.6.6，默认关闭） ----------
+// 配置查询：前端据此决定是否订阅 SSE、显示开关。
+app.get('/api/instances/:id/unread/config', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const cfg = getUnreadNotifyConfig();
+  return { enabled: cfg.enabled, pollSec: cfg.pollSec, byEnv: cfg.byEnv, hasUnread: currentUnread(id) };
+});
+
+// 面板总开关：未读通知（管理员）。动态生效，无需重启/改 .env。
+app.post('/api/admin/unread-notify', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const body = ((req.body as any) ?? {}) as Record<string, unknown>;
+  if (typeof body.enabled === 'boolean') setUnreadNotifyEnabled(body.enabled);
+  if (body.pollSec !== undefined) setUnreadPollSec(Number(body.pollSec));
+  return getUnreadNotifyConfig();
+});
+
+// 面板总开关：AI 代回（管理员）。动态生效。
+app.post('/api/admin/auto-reply-enabled', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const body = ((req.body as any) ?? {}) as Record<string, unknown>;
+  if (typeof body.enabled === 'boolean') setAutoReplyEnabled(body.enabled);
+  return getAutoReplyEnabled();
+});
+
+// 手动检查一次未读（不依赖后台轮询，供用户点"检查未读"触发）。
+app.post('/api/instances/:id/unread/check', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  return await pollOnce(inst);
+});
+
+// ---------- AI 代回微信（1.6.6，默认关闭） ----------
+// 配置含 API Key，仅管理员可见/可改；普通用户可用「生成草稿 / 填入 / 发送」。
+app.get('/api/instances/:id/auto-reply/config', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  if (!findInstance(id)) return reply.code(404).send({ error: '实例不存在' });
+  return getPublicAutoReplyConfig(id);
+});
+
+app.post('/api/instances/:id/auto-reply/config', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  if (!findInstance(id)) return reply.code(404).send({ error: '实例不存在' });
+  const body = ((req.body as any) ?? {}) as Record<string, unknown>;
+  const cfg = saveAutoReplyConfig(id, body);
+  persistSettings();
+  return cfg;
+});
+
+// 全自动回复留痕（管理员）：最近 20 条，含实际发出的文本（带 AI 标记）。
+app.get('/api/instances/:id/auto-reply/history', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  if (!findInstance(id)) return reply.code(404).send({ error: '实例不存在' });
+  return { items: getAutoReplyHistory(id, 20) };
+});
+
+// 拉取 OpenAI 兼容 /v1/models：可传未保存的 baseURL/apiKey 用于先测后存；Key 不回传。
+app.post('/api/instances/:id/auto-reply/models', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  if (!findInstance(id)) return reply.code(404).send({ error: '实例不存在' });
+  const patch = ((req.body as any) ?? {}) as Record<string, unknown>;
+  try {
+    return await listAutoReplyModels(id, patch);
+  } catch (e: any) {
+    return reply.code(500).send({ error: String(e?.message || e).slice(0, 300) });
+  }
+});
+
+// 验证当前模型：① 文本 chat/completions ② 同接口传 1x1 测试图探测视觉能力。
+// 截图识别必须用 VLM；视觉不通过时前端提示换模型或手动填消息。
+app.post('/api/instances/:id/auto-reply/verify', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  if (!findInstance(id)) return reply.code(404).send({ error: '实例不存在' });
+  const patch = ((req.body as any) ?? {}) as Record<string, unknown>;
+  try {
+    return await verifyAutoReplyModel(id, patch);
+  } catch (e: any) {
+    return reply.code(500).send({ error: String(e?.message || e).slice(0, 300) });
+  }
+});
+
+// 生成草稿：不传 userMessage 时截取当前会话聊天区交给多模态模型；传入时走纯文本模型也可。
+app.post('/api/instances/:id/auto-reply/draft', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  const raw = ((req.body as any) ?? {}) as { userMessage?: string };
+  const userMessage = typeof raw.userMessage === 'string' ? raw.userMessage.trim().slice(0, 2000) : undefined;
+  try {
+    return await draftReply(inst, userMessage || undefined);
+  } catch (e: any) {
+    return reply.code(500).send({ error: e?.message || '生成失败' });
+  }
+});
+
+// 把草稿写入输入框；withEnter=true 时直接发送。焦点不在微信会拒绝，避免发错窗口。
+app.post('/api/instances/:id/auto-reply/send', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  const busy = claimControl(u, id, req);
+  if (busy) return reply.code(409).send(busy);
+  const body = ((req.body as any) ?? {}) as { text?: string; withEnter?: boolean };
+  try {
+    return await sendDraft(inst, String(body.text || ''), body.withEnter === true);
+  } catch (e: any) {
+    return reply.code(500).send({ error: e?.message || '发送失败' });
+  }
+});
+
+// 手动跑一次自动回复（用于验证规则，不受后台开关影响，但仍要求已配置 Key）。
+app.post('/api/instances/:id/auto-reply/check', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  try {
+    return await autoReplyTick(inst, () => false, true);
+  } catch (e: any) {
+    return reply.code(500).send({ error: e?.message || '检查失败' });
+  }
+});
+
+// SSE 事件流：有未读时推 event: unread。cookie(httpOnly) 由 EventSource 自动携带，复用现有鉴权。
+app.get('/api/instances/:id/unread/events', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  reply.hijack();
+  const raw = reply.raw;
+  raw.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  raw.write(': connected\n\n');
+  const remove = addSseClient(id, reply, currentUnread(id));
+  // 心跳：每 25s 一条注释，防止反代/浏览器因空闲断开。
+  const beat = setInterval(() => {
+    try { raw.write(': beat\n\n'); } catch { /* ignore */ }
+  }, 25_000);
+  const cleanup = () => { clearInterval(beat); remove(); };
+  raw.on('close', cleanup);
+  (req.raw as any).on('close', cleanup);
 });
 
 // 查看实例容器日志（仅管理员）：排查"无法进入/未安装/卡死"等。inline 文本，浏览器可直接看/另存。
@@ -1537,6 +1799,100 @@ app.post('/api/admin/instances/:id/volume/restore', async (req, reply) => {
       spool.dispose();
     }
   });
+  return { ok: true, job: job.id };
+});
+
+// ---------- 聊天消息备份（全量 + 增量，仅管理员） ----------
+// 备份含完整聊天数据（等同凭据），所有端点 requireAdmin。产物落面板 data-panel 卷，不占实例数据卷。
+interface ChatJob {
+  id: string;
+  instId: string;
+  kind: 'backup' | 'restore';
+  state: 'running' | 'done' | 'error';
+  stage: string;
+  error?: string;
+  result?: any;
+  endedAt?: number;
+}
+const chatJobs = new Map<string, ChatJob>();
+const chatBusy = new Set<string>();
+function startChatJob(
+  instId: string,
+  kind: ChatJob['kind'],
+  work: (stage: (s: string) => void) => Promise<any>,
+): ChatJob {
+  const now = Date.now();
+  for (const [k, j] of chatJobs) if (j.endedAt && now - j.endedAt > 60 * 60 * 1000) chatJobs.delete(k);
+  const job: ChatJob = { id: randomUUID(), instId, kind, state: 'running', stage: '准备中' };
+  chatJobs.set(job.id, job);
+  work((s) => { job.stage = s; })
+    .then(
+      (r) => { job.state = 'done'; job.result = r ?? null; },
+      (e: any) => { job.state = 'error'; job.error = e?.message || String(e); },
+    )
+    .finally(() => { job.endedAt = Date.now(); chatBusy.delete(instId); });
+  return job;
+}
+
+app.get('/api/admin/instances/:id/chat-backup/jobs/:job', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const job = chatJobs.get((req.params as any).job);
+  if (!job || job.instId !== (req.params as any).id) return reply.code(404).send({ error: '任务不存在（面板可能重启过）' });
+  return { state: job.state, stage: job.stage, error: job.error || null, result: job.result ?? null };
+});
+
+// 列出备份链
+app.get('/api/admin/instances/:id/chat-backup', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  if (!findInstance((req.params as any).id)) return reply.code(404).send({ error: '实例不存在' });
+  return listBackups((req.params as any).id);
+});
+
+// 触发备份：body { mode: 'full' | 'inc' }
+app.post('/api/admin/instances/:id/chat-backup', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  if (chatBusy.has(inst.id)) return reply.code(409).send({ error: '该实例还有一个备份/恢复在进行，请等它完成' });
+  const body = (req.body as any) || {};
+  const mode: BackupKind = body.mode === 'full' ? 'full' : 'inc';
+  chatBusy.add(inst.id);
+  const job = startChatJob(inst.id, 'backup', (stage) => runBackup(inst, mode, stage));
+  appendPanelLog('INFO', `实例「${inst.name}」(id=${inst.id}) 触发${mode === 'full' ? '全量' : '增量'}聊天备份`);
+  return { ok: true, job: job.id };
+});
+
+// 下载某个备份包
+app.get('/api/admin/instances/:id/chat-backup/:entryId/download', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const p = backupFilePath((req.params as any).id, (req.params as any).entryId);
+  if (!p) return reply.code(404).send({ error: '备份文件不存在' });
+  const name = `${(req.params as any).entryId}.tar.gz`;
+  reply.header('content-type', 'application/gzip');
+  reply.header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+  const stream = createReadStream(p);
+  stream.on('error', () => { /* 客户端断开或文件被删；不需要额外处理 */ });
+  return reply.send(stream);
+});
+
+// 删除某个备份
+app.delete('/api/admin/instances/:id/chat-backup/:entryId', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const ok = deleteBackup((req.params as any).id, (req.params as any).entryId);
+  if (!ok) return reply.code(404).send({ error: '备份记录不存在' });
+  return { ok: true };
+});
+
+// 恢复到某个备份（后台任务，停/启实例）
+app.post('/api/admin/instances/:id/chat-backup/:entryId/restore', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  if (chatBusy.has(inst.id)) return reply.code(409).send({ error: '该实例还有一个备份/恢复在进行，请等它完成' });
+  chatBusy.add(inst.id);
+  const entryId = (req.params as any).entryId;
+  const job = startChatJob(inst.id, 'restore', (stage) => restoreBackup(inst, entryId, stage));
+  appendPanelLog('WARN', `实例「${inst.name}」(id=${inst.id}) 触发聊天备份恢复 → ${entryId}`);
   return { ok: true, job: job.id };
 });
 
@@ -2272,6 +2628,16 @@ await app.listen({ port: PORT, host: HOST });
 console.log(`[panel] 监听 http://${HOST}:${PORT}  （多实例反代已就绪）· 版本 ${CURRENT_VERSION}`);
 appendPanelLog('INFO', `面板启动 · 版本 ${CURRENT_VERSION} · 监听 ${HOST}:${PORT}`);
 startUpdateChecker(); // 后台检测新版（best-effort，失败静默）
+// 聊天备份自动增量调度（默认关闭；WOC_CHAT_BACKUP_AUTO=1 启用）
+startChatBackupScheduler(listInstances, (s) => appendPanelLog('INFO', s));
+// 未读红点通知轮询（默认关闭；WOC_UNREAD_NOTIFY=1 启用，间隔 WOC_UNREAD_POLL_SEC）
+startUnreadPoller(listInstances);
+// AI 代回：仅在 WOC_AUTO_REPLY=1 且实例配置为 auto 时后台运行；仅当用户正在打字时让行，
+// 避免抢输入法；鼠标点选/滚动不构成让行（此前任何操作都让 AI 停手，实测漏回）。
+startAutoReplyPoller(listInstances, (id) => {
+  const h = controlHolders.get(id);
+  return !!h && Date.now() - h.keyAt <= CONTROL_TTL;
+});
 // 日志保留期清理：启动后跑一次 + 每 24h 一次，删除超过一年的日志行（unref 不阻止退出）。
 pruneOldLogs();
 setInterval(() => pruneOldLogs(), 24 * 60 * 60 * 1000).unref();
