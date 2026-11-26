@@ -55,6 +55,7 @@ interface ToolResult {
 const DEFAULT_LOG_TAIL = 100;
 const MCP_WRITE_BODY_LIMIT_BYTES = 8 * 1024 * 1024; // 8 MiB cap when write tools enabled (allows base64 images up to 4 MiB)
 const MAX_DRAFT_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MiB decoded image cap
+const MAX_CLIPBOARD_IMAGE_RETURN_BYTES = 8 * 1024 * 1024; // 8 MiB cap on returned original clipboard PNG
 const ALLOWED_IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'] as const;
 const DRAFT_IMAGE_SETTLE_MS = 250;
 
@@ -122,6 +123,7 @@ export interface McpDeps {
   listInstanceFiles: (inst: Instance) => Promise<TransferFile[]>;
   wechatWindowInfo: (inst: Instance) => Promise<WechatWindowInfo>;
   captureInstanceScreenshot: (inst: Instance, opts?: ScreenshotOptions) => Promise<ScreenshotResult>;
+  readClipboardImage?: (inst: Instance) => Promise<Buffer>;
   clickInInstance?: (inst: Instance, opts: ClickOptions) => Promise<{ displayWidth: number; displayHeight: number }>;
   scrollInInstance?: (inst: Instance, opts: ScrollOptions) => Promise<{ displayWidth: number; displayHeight: number }>;
   // Focuses the WeChat chat input, clears it and pastes text. Never presses Return.
@@ -316,6 +318,23 @@ export const MCP_TOOLS: Tool[] = [
           },
           required: ['x', 'y', 'width', 'height'],
           additionalProperties: false,
+        },
+      },
+      required: ['instance_id'],
+      additionalProperties: false,
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
+    name: 'woc_read_clipboard_image',
+    description:
+      'Read the original full-resolution PNG image currently in a running instance X11 clipboard (e.g. after right-clicking an image in WeChat and choosing Copy). Read-only, never starts stopped containers, never writes to disk (max 8 MiB). Returns the PNG as an MCP image block plus JSON metadata.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        instance_id: {
+          type: 'string',
+          description: 'Instance ID (from woc_list_instances).',
         },
       },
       required: ['instance_id'],
@@ -1274,6 +1293,81 @@ function createToolRunner(deps: McpDeps, state: McpRuntimeState) {
         }
 
         // ---------- Controlled write tools (gated by MCP_ALLOW_WRITE=1) ----------
+        case 'woc_read_clipboard_image': {
+          const id = requireInstanceId(args);
+          logInstanceId = id;
+          const inst = deps.findInstance(id);
+          if (!inst) {
+            log(`[mcp] tool=${toolName} instanceId=${id} durationMs=${state.now() - t0} ok=false reason=not_found`);
+            return jsonTextResult({ ok: false, error: 'instance_not_found', instance_id: id }, true);
+          }
+          const runtime = await deps.instanceRuntime(inst);
+          if (runtime !== 'running') {
+            log(`[mcp] tool=${toolName} instanceId=${id} runtime=${runtime} durationMs=${state.now() - t0} ok=false reason=instance_stopped`);
+            return jsonTextResult({
+              ok: false,
+              error: 'instance_stopped',
+              instance_id: inst.id,
+              runtime,
+              message: 'Instance is not running; cannot read clipboard image without starting the container.',
+            });
+          }
+          if (!deps.readClipboardImage) {
+            throw new Error('clipboard image reader not configured');
+          }
+          let png: Buffer;
+          try {
+            png = await deps.readClipboardImage(inst);
+          } catch (e: any) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (/没有.*图片/.test(msg)) {
+              log(`[mcp] tool=${toolName} instanceId=${id} durationMs=${state.now() - t0} ok=false reason=no_clipboard_image`);
+              return jsonTextResult({
+                ok: false,
+                error: 'no_clipboard_image',
+                instance_id: inst.id,
+                message: 'No PNG image is currently in the instance clipboard; right-click an image in the app and choose Copy first.',
+              });
+            }
+            throw e;
+          }
+          if (png.length > MAX_CLIPBOARD_IMAGE_RETURN_BYTES) {
+            log(`[mcp] tool=${toolName} instanceId=${id} bytes=${png.length} durationMs=${state.now() - t0} ok=false reason=image_too_large`);
+            return jsonTextResult({
+              ok: false,
+              error: 'image_too_large',
+              instance_id: inst.id,
+              bytes: png.length,
+              max_bytes: MAX_CLIPBOARD_IMAGE_RETURN_BYTES,
+              message: `Clipboard image (${png.length} bytes) exceeds MCP return limit (${MAX_CLIPBOARD_IMAGE_RETURN_BYTES} bytes).`,
+            });
+          }
+          const hasIhdr = png.length >= 24 && png.toString('ascii', 12, 16) === 'IHDR';
+          const width = hasIhdr ? png.readUInt32BE(16) : null;
+          const height = hasIhdr ? png.readUInt32BE(20) : null;
+          log(`[mcp] tool=${toolName} instanceId=${id} size=${width ?? '?'}x${height ?? '?'} bytes=${png.length} durationMs=${state.now() - t0} ok=true`);
+          return {
+            content: [
+              {
+                type: 'image' as const,
+                data: png.toString('base64'),
+                mimeType: 'image/png',
+              },
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  ok: true,
+                  instance_id: inst.id,
+                  mime_type: 'image/png',
+                  width,
+                  height,
+                  bytes: png.length,
+                }),
+              },
+            ],
+          };
+        }
+
         case 'woc_session_header': {
           const id = requireInstanceId(args);
           logInstanceId = id;

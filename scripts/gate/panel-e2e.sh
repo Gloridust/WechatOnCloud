@@ -135,7 +135,7 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json
 [ "$code" = 401 ] && note "MCP 不带令牌 401" || bad "MCP 不带令牌应为 401，实际：$code"
 n=$(curl -s -H "authorization: Bearer $MCP_TOKEN" -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$U/mcp" | grep -o '"name":"woc_[a-z_]*"' | sort -u | wc -l | xargs)
-[ "$n" = 14 ] && note "MCP tools/list 14 个工具（开了写工具）" || bad "MCP tools/list 应有 14 个工具，实际：$n"
+[ "$n" = 15 ] && note "MCP tools/list 15 个工具（开了写工具）" || bad "MCP tools/list 应有 15 个工具，实际：$n"
 win=$(mcp woc_window_info "{\"instance_id\":\"$ID\"}")
 DW=$(printf '%s' "$win" | sed -n 's/.*display_width\\":\([0-9]*\).*/\1/p')
 DH=$(printf '%s' "$win" | sed -n 's/.*display_height\\":\([0-9]*\).*/\1/p')

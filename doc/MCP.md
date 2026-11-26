@@ -42,6 +42,7 @@
 | `woc_list_files` | 实例桌面（文件中转目录）里的文件 |
 | `woc_window_info` | 桌面分辨率、微信主窗口的位置和大小 |
 | `woc_screenshot` | 桌面截图（PNG，可裁剪 / 缩放） |
+| `woc_read_clipboard_image` | 读取实例剪贴板里的原图 PNG（在应用里右键复制图片后取回原图，上限 8 MiB） |
 
 这些工具不会启动已停止的实例；实例没在运行时返回 `instance_stopped`。
 

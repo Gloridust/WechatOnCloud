@@ -2018,6 +2018,7 @@ registerMcp(app, {
   listInstanceFiles,
   wechatWindowInfo,
   captureInstanceScreenshot,
+  readClipboardImage,
   clickInInstance,
   scrollInInstance,
   pasteDraftInInstance,
