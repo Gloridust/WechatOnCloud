@@ -52,6 +52,11 @@ case "$args" in *"-NeverShared"*) note "⑤ Xvnc -NeverShared" ;; *) bad "⑤ Xv
 case "$args" in *"-DLP_ClipTypes text/html"*) note "⑤ Xvnc -DLP_ClipTypes text/html" ;; *) bad "⑤ Xvnc 缺 -DLP_ClipTypes text/html（大图粘贴会卡死）" ;; esac
 if docker exec "$P" sh -c 'grep -q "WOC-IME" /usr/share/kasmvnc/www/assets/ui-*.js'; then note "⑤ web 客户端补丁"; else bad "⑤ web 客户端补丁缺失"; fi
 
+# ⑥ 面板在实例里调用的命令都在（R5）：输入用 xdotool / xclip，MCP 的截图用 ffmpeg（基础镜像自带，没有单独安装），
+#    限时执行用 timeout。基础镜像哪天不带了，这里先报，而不是让用户看到「退出码 127」
+missing=$(docker exec "$P" sh -c 'for t in xdotool xclip ffmpeg timeout bash; do command -v "$t" >/dev/null 2>&1 || printf "%s " "$t"; done')
+[ -z "$missing" ] && note "⑥ xdotool / xclip / ffmpeg / timeout 都在" || bad "⑥ 实例镜像缺少命令：$missing"
+
 # 本项目的启动钩子与桌面规则
 if docker exec "$P" test -x /custom-cont-init.d/03-woc-xlock; then note "X 显示锁清理钩子"; else bad "缺 X 显示锁清理钩子 03-woc-xlock"; fi
 if docker exec "$P" grep -q 'application class="" type="normal"' /etc/xdg/openbox/rc.xml; then note "小程序窗口不强制最大化"; else bad "openbox 缺小程序窗口规则"; fi

@@ -124,6 +124,20 @@ import {
 } from './host-guard.js';
 import { CURRENT_VERSION, versionInfo, ensureChecked, checkForUpdate, startUpdateChecker } from './version.js';
 import { triggerSelfUpdate } from './self-update.js';
+import { registerMcp } from './mcp.js';
+import {
+  captureInstanceScreenshot,
+  captureSessionFingerprint,
+  clearInputInInstance,
+  clickInInstance,
+  dockerHealthy,
+  pasteDraftInInstance,
+  pasteDraftImageInInstance,
+  scrollInInstance,
+  sendReturnInInstance,
+  wechatWindowInfo,
+  withInstanceInputLock,
+} from './mcp-desktop.js';
 import { GiB, MiB, readBody, receiveFile, spoolUpload, cleanSpoolDir, type Spooled } from './upload.js';
 import { appendInstanceLog, readInstanceLog, appendPanelLog, readPanelLog, pruneOldLogs, filterSince, rangeToMs, DIAG_RANGES } from './logs.js';
 
@@ -1987,11 +2001,49 @@ const desktopHandler = (req: FastifyRequest, reply: FastifyReply) => {
 app.all('/desktop/:id', desktopHandler);
 app.all('/desktop/:id/*', desktopHandler);
 
+// ---------- MCP 端点（POST /mcp）：没设 MCP_AUTH_TOKEN 时不注册；写工具另需 MCP_ALLOW_WRITE=1（见 mcp.ts） ----------
+registerMcp(app, {
+  allowedHosts: ALLOWED_HOSTS,
+  panelVersion: CURRENT_VERSION,
+  dockerHealthy,
+  listInstances,
+  findInstance,
+  instanceRuntime,
+  instanceUptimeSec,
+  instanceMemoryMB,
+  instanceHttpHealthy,
+  wechatStatus,
+  instanceLogs,
+  readInstanceLog,
+  listInstanceFiles,
+  wechatWindowInfo,
+  captureInstanceScreenshot,
+  readClipboardImage,
+  clickInInstance,
+  scrollInInstance,
+  pasteDraftInInstance,
+  pasteDraftImageInInstance,
+  clearInputInInstance,
+  sendReturnInInstance,
+  withInputLock: withInstanceInputLock,
+  captureSessionFingerprint,
+  effectiveLimits: (inst) => effectiveLimits(inst),
+  activeVncViewerCount,
+  getControlLock: (id) => {
+    const h = controlHolders.get(id);
+    if (!h) return { active: false, holder: null, ageMs: null };
+    const ageMs = Date.now() - h.at;
+    if (ageMs > CONTROL_TTL) return { active: false, holder: null, ageMs: null };
+    return { active: true, holder: h.username, ageMs };
+  },
+  hasActiveSession: (id) => hasActiveSession(id),
+});
+
 // ---------- 静态 SPA + 前端路由回退 ----------
 await app.register(fstatic, { root: STATIC_DIR, wildcard: false, index: ['index.html'] });
 app.setNotFoundHandler((req, reply) => {
   const url = req.raw.url || '';
-  if (url.startsWith('/api') || url.startsWith('/desktop')) {
+  if (url.startsWith('/api') || url.startsWith('/desktop') || /^\/mcp(?:[/?]|$)/.test(url)) {
     return reply.code(404).send({ error: 'not found' });
   }
   return reply.sendFile('index.html');
